@@ -35,7 +35,7 @@ Souffleur is a Claude Code mod, an in-process plugin. For why, including test re
 You work as usual. Souffleur stays quiet while nothing is missing. You notice it in three places:
 
 - When the task needs a skill that is not loaded, or a compaction has cut one, Souffleur adds a short note to your prompt asking the model to invoke that skill first. The model loads it before it answers.
-- The status line shows a summary such as `souffleur (observe): 3 loaded, 1 restoring`. If your app does not show it, `/souffleur` gives the same summary as a table.
+- The status line shows a summary such as `observe · 3 loaded, 1 restoring`. If your app does not show it, `/souffleur` gives the same summary as a table.
 - In `enforce` mode, a step that needs a missing skill is refused once with the reason, and the model loads the skill and tries again.
 
 A good way to start: install it, run `/souffleur init`, keep `observe` for a few sessions, and look at `/souffleur` after a compaction. If the ledger matches what you saw, switch to `enforce`.
@@ -54,7 +54,7 @@ Souffleur needs Claude Code 2.1.332 or later. Type this at the prompt of a termi
 /plugin install skill-souffleur --marketplace r4KK4n/skill-souffleur
 ```
 
-Claude Code asks whether to add the marketplace; answer `y`. It then asks for a scope: choose user to cover every project, or project for one repository. Souffleur starts with no configuration. Until you add one, the status line reads `souffleur: not set up, run /souffleur init`, and nothing else changes in your session.
+Claude Code asks whether to add the marketplace; answer `y`. It then asks for a scope: choose user to cover every project, or project for one repository. Souffleur starts with no configuration. Until you add one, the status line reads `not set up, run /souffleur init`, and nothing else changes in your session.
 
 `/plugin` exists only in the terminal interface. In a Remote Control session from the desktop or mobile app it is not available ("Plugins aren't available in this environment"). Install from a shell on the machine that runs Claude Code instead:
 
@@ -128,7 +128,7 @@ Where no dialog can answer, for example under `claude -p`, `init` prints the pro
 
 ## Troubleshooting
 
-- The status line says `souffleur: degraded, see /souffleur`: Souffleur could not read its config or an event changed shape after a Claude Code update. `/souffleur` lists what failed.
+- The status line says `degraded, see /souffleur`: Souffleur could not read its config or an event changed shape after a Claude Code update. `/souffleur` lists what failed.
 - No status line at all: your app may not show mod status lines. Use `/souffleur`.
 - Please report problems with your Claude Code version (`claude --version`) through the [issue tracker](https://github.com/r4KK4n/skill-souffleur/issues).
 

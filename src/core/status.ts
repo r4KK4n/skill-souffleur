@@ -27,16 +27,16 @@ export function renderTable(config: Config, s: Session, now: number): string {
 
 /** Short summary for the status line; undefined when no skill is configured. */
 export function statusLine(s: Session, mode: Mode): string | undefined {
-  if (s.errors.length) return 'souffleur: degraded, see /souffleur'
+  if (s.errors.length) return 'degraded, see /souffleur'
   const counts = { loaded: 0, restoring: 0, stale: 0, unavailable: 0 }
   for (const e of Object.values(s.ledger)) {
     if (e.state in counts) counts[e.state as keyof typeof counts] += 1
   }
   if (Object.keys(s.ledger).length === 0) return undefined
-  const prefix = mode === 'observe' ? 'souffleur (observe):' : 'souffleur:'
+  const prefix = mode === 'observe' ? 'observe ·' : ''
   const parts = [`${counts.loaded} loaded`]
   if (counts.restoring) parts.push(`${counts.restoring} restoring`)
   if (counts.stale) parts.push(`${counts.stale} stale`)
   if (counts.unavailable) parts.push(`${counts.unavailable} unavailable`)
-  return `${prefix} ${parts.join(', ')}`
+  return prefix ? `${prefix} ${parts.join(', ')}` : parts.join(', ')
 }

@@ -30,12 +30,12 @@ test('status line counts loaded and restoring', () => {
     ...s0,
     ledger: requested(skillLoaded(s0.ledger, 'writing-guide', T1, 'matched prompt'), ['writing-check'], T1),
   }
-  assert.equal(statusLine(s, 'enforce'), 'souffleur: 1 loaded, 1 restoring')
+  assert.equal(statusLine(s, 'enforce'), '1 loaded, 1 restoring')
 })
 
 test('status line says degraded when errors exist', () => {
   const s: Session = { ...fresh(), errors: ['tool_name missing from payload'] }
-  assert.equal(statusLine(s, 'enforce'), 'souffleur: degraded, see /souffleur')
+  assert.equal(statusLine(s, 'enforce'), 'degraded, see /souffleur')
 })
 
 test('status line is undefined without skills', () => {
@@ -46,7 +46,7 @@ test('status line is undefined without skills', () => {
 test('observe mode prefix in status line', () => {
   const s0 = fresh()
   const s: Session = { ...s0, ledger: skillLoaded(s0.ledger, 'writing-guide', T1, 'matched prompt') }
-  assert.equal(statusLine(s, 'observe'), 'souffleur (observe): 1 loaded')
+  assert.equal(statusLine(s, 'observe'), 'observe · 1 loaded')
 })
 
 test('table lists every configured skill with state and reason', () => {
