@@ -56,6 +56,15 @@ Souffleur needs Claude Code 2.1.332 or later. Type this at the prompt of a termi
 
 Claude Code asks whether to add the marketplace; answer `y`. It then asks for a scope: choose user to cover every project, or project for one repository. Souffleur starts with no configuration. Until you add one, the status line reads `souffleur: not set up, run /souffleur init`, and nothing else changes in your session.
 
+`/plugin` exists only in the terminal interface. In a Remote Control session from the desktop or mobile app it is not available ("Plugins aren't available in this environment"). Install from a shell on the machine that runs Claude Code instead:
+
+```
+claude plugin marketplace add r4KK4n/skill-souffleur
+claude plugin install skill-souffleur@skill-souffleur --scope user
+```
+
+New sessions load it. A running session picks it up after `/reload-plugins` or a restart. To update later, run `claude plugin marketplace update skill-souffleur` and `claude plugin update skill-souffleur@skill-souffleur`, then restart.
+
 ## Quick start
 
 Create `~/.claude/souffleur.json`, or let `/souffleur init` write it for you:
