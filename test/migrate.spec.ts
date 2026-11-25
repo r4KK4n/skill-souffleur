@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { findHookOverlaps, findPassages, initSteps, mergeUserConfig, parseSkillProposals, removeHook } from '../src/core/init.ts'
+import { MIGRATE_INTRO, findHookOverlaps, findPassages, migrateSteps, removeHook } from '../src/core/migrate.ts'
 
 const SKILLS = ['writing-guide', 'ui-checklist', 'terse:terse-mode']
 
@@ -81,61 +81,44 @@ test('removeHook drops an emptied event, and leaves settings alone when the entr
   assert.deepEqual(removeHook(edited, target), edited)
 })
 
-test('parseSkillProposals drops unknown skills and garbage', () => {
-  const raw = [
-    'Here you go:',
-    '```json',
-    JSON.stringify({
-      skills: [
-        { name: 'writing-guide', need: 'prose', needText: 'Writing text people read.' },
-        { name: 'terse:terse-mode', always: true },
-        { name: 'not-installed', always: true },
-        { name: 'ui-checklist' },
-        { name: 'ui-checklist', need: 'bad name with spaces' },
-        'junk',
-        null,
-      ],
-    }),
-    '```',
+test('guess rule flags preload style scripts of skills that are not installed', () => {
+  const s = {
+    hooks: {
+      UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'bash ~/.claude/hooks/old-skill-preload.sh' }] }],
+      PostToolUse: [{ matcher: 'Skill', hooks: [{ type: 'command', command: 'bash ~/.claude/hooks/old-skill-preload.sh' }] }],
+      SessionStart: [{ matcher: 'compact|resume|clear', hooks: [{ type: 'command', command: 'bash ~/.claude/hooks/context-reload.sh' }] }],
+    },
+  }
+  const found = findHookOverlaps(s, SKILLS)
+  assert.equal(found.length, 3)
+  for (const o of found) assert.match(o.why, /^guess:/)
+  assert.equal(found.find((o) => o.event === 'PostToolUse')?.matcher, 'Skill')
+})
+
+test('a hook that names a skill is not a guess', () => {
+  const found = findHookOverlaps(settings(), SKILLS)
+  assert.ok(found.length > 0)
+  for (const o of found) assert.doesNotMatch(o.why, /^guess:/)
+})
+
+test('guess rule needs a script name, not a bare word', () => {
+  const s = { hooks: { Stop: [{ hooks: [{ type: 'command', command: 'echo inject the milk' }, { type: 'command', command: 'npm run reload' }] }] } }
+  assert.deepEqual(findHookOverlaps(s, SKILLS), [])
+})
+
+test('passages only for configured skills with loading words', () => {
+  const text = [
+    'Use pdf tools for forms.',
+    'Always load writing-guide first.',
+    'The writing-guide skill is long.',
+    'The hook reminds the model about ui-checklist.',
+    'Run xlsx-helper to load a sheet.',
   ].join('\n')
-  const got = parseSkillProposals(raw, SKILLS)
-  assert.deepEqual(got, [
-    { name: 'writing-guide', rule: { from: 'user', need: 'prose' }, needText: 'Writing text people read.' },
-    { name: 'terse:terse-mode', rule: { from: 'user', always: true } },
-  ])
-  assert.deepEqual(parseSkillProposals('no json here', SKILLS), [])
-  assert.deepEqual(parseSkillProposals('{ "skills": [', SKILLS), [])
-  assert.deepEqual(parseSkillProposals('', SKILLS), [])
-})
-
-test('parseSkillProposals accepts a bare array and keeps at most 10', () => {
-  const known = Array.from({ length: 14 }, (_, i) => `skill-number-${i}`)
-  const raw = JSON.stringify(known.map((name) => ({ name, always: true })))
-  assert.equal(parseSkillProposals(raw, known).length, 10)
-})
-
-test('mergeUserConfig keeps every existing key and does not overwrite an entry', () => {
-  const existing = JSON.stringify({ mode: 'enforce', trustProjects: ['/work/a'], skills: { 'writing-guide': { always: true } }, needs: { prose: 'mine' } })
-  const merged = mergeUserConfig(existing, [
-    { name: 'writing-guide', rule: { from: 'user', need: 'prose' }, needText: 'other' },
-    { name: 'ui-checklist', rule: { from: 'user', need: 'ui' }, needText: 'Building a screen.' },
-  ])
-  assert.ok('text' in merged)
-  const out = JSON.parse(merged.text)
-  assert.equal(out.mode, 'enforce')
-  assert.deepEqual(out.trustProjects, ['/work/a'])
-  assert.deepEqual(out.skills['writing-guide'], { always: true })
-  assert.deepEqual(out.skills['ui-checklist'], { need: 'ui' })
-  assert.deepEqual(out.needs, { prose: 'mine', ui: 'Building a screen.' })
-  assert.deepEqual(merged.added, ['ui-checklist'])
-})
-
-test('mergeUserConfig starts a new file in observe mode and refuses invalid JSON', () => {
-  const fresh = mergeUserConfig(undefined, [{ name: 'terse:terse-mode', rule: { from: 'user', always: true } }])
-  assert.ok('text' in fresh)
-  assert.deepEqual(JSON.parse(fresh.text), { mode: 'observe', skills: { 'terse:terse-mode': { always: true } }, needs: {} })
-  const bad = mergeUserConfig('{ nope', [])
-  assert.ok('error' in bad)
+  const got = findPassages([{ file: 'CLAUDE.md', text }], ['writing-guide', 'ui-checklist'])
+  assert.deepEqual(
+    got.map((p) => p.line),
+    [2, 4],
+  )
 })
 
 test('findPassages lists file and line of text that names a skill', () => {
@@ -143,16 +126,23 @@ test('findPassages lists file and line of text that names a skill', () => {
   assert.deepEqual(got, [{ file: 'CLAUDE.md', line: 2, text: 'Always load writing-guide first.' }])
 })
 
-test('initSteps lists proposals, JSON and steps for the no-dialog case', () => {
-  const text = initSteps({
-    proposals: [{ name: 'writing-guide', rule: { from: 'user', need: 'prose' }, needText: 'Writing text people read.' }],
+test('MIGRATE_INTRO says what it does, what each answer does, and what it never edits', () => {
+  assert.match(MIGRATE_INTRO, /Turn off/)
+  assert.match(MIGRATE_INTRO, /Keep/)
+  assert.match(MIGRATE_INTRO, /Show me what to do/)
+  assert.match(MIGRATE_INTRO, /backup/i)
+  assert.match(MIGRATE_INTRO, /CLAUDE\.md/)
+  assert.doesNotMatch(MIGRATE_INTRO, /[\u2013\u2014]/)
+})
+
+test('migrateSteps starts with the explanation and lists hooks and steps for the no-dialog case', () => {
+  const text = migrateSteps({
     hooks: findHookOverlaps(settings(), SKILLS),
     passages: [{ file: 'CLAUDE.md', line: 2, text: 'Always load writing-guide first.' }],
-    configPath: '~/.claude/souffleur.json',
     settingsPath: '~/.claude/settings.json',
   })
+  assert.ok(text.startsWith(MIGRATE_INTRO))
   assert.match(text, /nothing was changed/i)
-  assert.match(text, /"writing-guide"/)
   assert.match(text, /writing-guide-reload\.sh/)
   assert.match(text, /CLAUDE\.md:2/)
   assert.match(text, /Steps/)

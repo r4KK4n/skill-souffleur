@@ -92,7 +92,8 @@ A skill with `"always": true` is needed from the first turn. A skill with `"need
 - `/souffleur need <name>` turns a need on for this session, even when no prompt matched it.
 - `/souffleur drop <name>` turns a need off again.
 - `/souffleur pause` switches every check off for this session.
-- `/souffleur init` helps you move over from your own hooks. See [Coming from your own hooks](#coming-from-your-own-hooks).
+- `/souffleur init` asks, skill by skill, how Souffleur should keep each one and writes your answers to `~/.claude/souffleur.json`. See [Setting up your skills](#setting-up-your-skills).
+- `/souffleur migrate` goes through your old reload hooks and offers to turn them off. See [Coming from your own hooks](#coming-from-your-own-hooks).
 
 ## Modes
 
@@ -100,22 +101,33 @@ A skill with `"always": true` is needed from the first turn. A skill with `"need
 
 `enforce` lets gates and duties deny a tool call until the skill it names is loaded. Only your user file `~/.claude/souffleur.json` can set it, with `"mode": "enforce"`. A project file that sets a mode gets an error and is ignored, so a cloned repository can neither switch gates on nor off.
 
+## Setting up your skills
+
+`/souffleur init` can run at any time: after install, when you add a skill, or when one behaves differently. It asks about the skills in your user file first, then the skills one of your hooks reloads, then up to ten more that a small model picks from the descriptions of all installed skills. A skill that only a project file configures is listed and not asked, because `init` writes the user file. You answer one dialog per skill:
+
+- `From the start`: the skill is needed from the first turn, and Souffleur asks for it after every compaction.
+- `Injected by its plugin`: a plugin puts the text in at session start itself, so Souffleur counts it as loaded and asks for it only after a compaction or a clear. Offered for plugin skills (`plugin:skill`) only.
+- `When the task needs it`: the skill is needed once a prompt matches a short description. The dialog shows the proposed description, and text you type under "Other" replaces it.
+- `Don't watch`: no entry. A skill with a hand-written gate or duty keeps its entry, and `init` says so.
+
+Each answer is written as it comes, with every other key in the file left as it was. Closing a dialog stops `init` and keeps the answers you gave. The closing summary names the installed skills that are not watched and points to `/souffleur migrate` when your settings hold hooks that may do the same job.
+
 ## Coming from your own hooks
 
-If you already keep skills alive with a `SessionStart` or `UserPromptSubmit` hook, or with a standing line in `CLAUDE.md`, running Souffleur next to them doubles every reminder. Souffleur changes none of your files on install. `/souffleur init` goes through them with you, one question at a time:
+If you already keep skills alive with a `SessionStart` or `UserPromptSubmit` hook, or with a standing line in `CLAUDE.md`, running Souffleur next to them doubles every reminder. Souffleur changes none of your files on install. `/souffleur migrate` starts with a short explanation of what it does and then asks one question per hook:
 
-1. It reads the hooks in `~/.claude/settings.json`, your user and project `CLAUDE.md`, and the memory index of the current project. It also lists the installed skills.
-2. A small model proposes skill entries for the config. You answer `Add`, `Skip` or `Stop` for each.
-3. For each hook that names a known skill or looks like a skill reload script, you answer `Turn off`, `Keep` or `Show me what to do`.
+1. It reads the hooks in `~/.claude/settings.json`, your user and project `CLAUDE.md`, and the memory index of the current project.
+2. A hook is listed when its command or matcher names an installed or configured skill. A hook that runs a script with `preload`, `reload` or `inject` in its name is listed too, even when the skill is gone; the dialog marks it as a guess.
+3. For each hook you answer `Turn off`, `Keep` or `Show me what to do`.
 
-`Turn off` first copies `settings.json` to `settings.json.bak-souffleur-<date>-<time>`, then removes only that one hook entry. Existing keys in `souffleur.json` stay as they are. `init` never edits a hook script, `CLAUDE.md` or a memory file. It lists passages that name a skill with file and line, and you decide what to do with them.
+`Turn off` first copies `settings.json` to `settings.json.bak-souffleur-<date>-<time>`, then removes only that one hook entry. `Show me what to do` changes nothing and adds the manual steps to the closing report. `migrate` never edits a hook script, `CLAUDE.md` or a memory file. It lists passages that name a configured skill and read like a loading or reminding instruction, with file and line, and you decide what to do with them.
 
-Where no dialog can answer, for example under `claude -p`, `init` prints the proposals, the config entries as JSON and the steps, and changes nothing.
+Where no dialog can answer, for example under `claude -p`, both commands print what they would ask, the config entries as JSON and the steps, and change nothing.
 
 ## What Souffleur reads, stores and costs
 
-- It reads `~/.claude/souffleur.json`, the project's `.claude/souffleur.json` and, only during `/souffleur init`, your `settings.json`, `CLAUDE.md` files and the current project's memory index.
-- It writes `~/.claude/souffleur.json` and `settings.json` only after you confirm a change in `/souffleur init`, with a backup of `settings.json` first.
+- It reads `~/.claude/souffleur.json`, the project's `.claude/souffleur.json` and, only during `/souffleur init` and `/souffleur migrate`, your `settings.json`, `CLAUDE.md` files and the current project's memory index.
+- `/souffleur init` writes `~/.claude/souffleur.json` after each of your answers. `/souffleur migrate` writes `settings.json` only after you answer `Turn off`, with a backup copy first.
 - It keeps the ledger per session in Claude Code's plugin store on your machine. Nothing is sent anywhere except through Claude Code's own model calls.
 - Detecting needs costs one small-model call per configured need on each prompt you type, about 0.8 seconds, with a 1.5 second limit after which the prompt goes on without a verdict. A restored skill adds its full text to the context again.
 
@@ -148,7 +160,8 @@ Where no dialog can answer, for example under `claude -p`, `init` prints the pro
 - [x] Block a step until its skills are loaded
 - [x] `/souffleur status` command and status line
 - [ ] Rules and notes: learned from skills, slips and the user, confirmed in a dialog
-- [ ] Install guide and `/souffleur init` to move over from your own hooks
+- [x] `/souffleur init` per skill and `/souffleur migrate` for old hooks
+- [ ] Install guide
 - [ ] First release, installable with `/plugin install`
 
 ## Contributing

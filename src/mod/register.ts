@@ -1,20 +1,10 @@
 import type { Register } from 'claude-code'
 import { parseConfig } from '../core/config.ts'
 import { decide, initSession } from '../core/decide.ts'
-import {
-  NOT_SET_UP,
-  describeHook,
-  describeProposal,
-  findHookOverlaps,
-  findPassages,
-  hookSteps,
-  initSteps,
-  mergeUserConfig,
-  parseSkillProposals,
-  proposalPrompt,
-  removeHook,
-} from '../core/init.ts'
-import type { HookOverlap, Passage, SkillProposal } from '../core/init.ts'
+import { MIGRATE_INTRO, describeHook, findHookOverlaps, findPassages, hookSteps, migrateSteps, removeHook } from '../core/migrate.ts'
+import type { HookOverlap, Passage } from '../core/migrate.ts'
+import { CHOICE_LABEL, NOT_SET_UP, SETUP_INTRO, applyChoice, candidates, choiceOf, currentChoice, describePlan, options, parsePicks, picksPrompt, setupSteps } from '../core/setup.ts'
+import type { LoadChoice, NeedText, Plan, Suggestion } from '../core/setup.ts'
 import type { Action, CoreEvent, Session } from '../core/decide.ts'
 import { classifyPrompt } from '../core/needs.ts'
 import { statusLine } from '../core/status.ts'
@@ -130,10 +120,41 @@ const stamp = (ms: number) => {
   return `${iso.slice(0, 10).replace(/-/g, '')}-${iso.slice(11, 16).replace(':', '')}`
 }
 
+const shownPath = (home: string, path: string) => (path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path)
+
+/** `~/.claude/settings.json` as a value; undefined when it is missing or broken (a note says which). */
+async function readSettings($: Dollar, path: string, shown: string, notes: string[]): Promise<{ text?: string; value?: unknown }> {
+  const text = await readOptional($, path, notes)
+  if (text === undefined) return {}
+  try {
+    return { text, value: JSON.parse(text) }
+  } catch {
+    notes.push(`${shown} is not valid JSON, so its hooks were not checked.`)
+    return { text }
+  }
+}
+
+/** Installed skill names with the one-line description the command list gives, where there is one. */
+async function installedWithDescriptions($: Dollar): Promise<{ name: string; description?: string }[]> {
+  const names = await installedSkills($)
+  let described = new Map<string, string>()
+  try {
+    described = new Map((await $.command.list()).map((c: { name: string; description?: string }) => [c.name, c.description ?? '']))
+  } catch {
+    // names alone are enough
+  }
+  return names.map((name) => {
+    const description = described.get(name)
+    return description ? { name, description } : { name }
+  })
+}
+
+const bareName = (skill: string) => (skill.split(':').pop() ?? skill).replace(/[^A-Za-z0-9:_-]/g, '-')
+
 /**
- * `/souffleur init`. Reads settings hooks, CLAUDE.md files and the memory index (never writes them, apart from
- * removing one hook entry from settings.json after a backup), asks one dialog per item, and merges skill
- * entries into the user config. Where no dialog answers, it returns the proposals and steps and writes nothing.
+ * `/souffleur init`: asks per skill how it is kept and writes each answer to the user file as it comes.
+ * It reads settings only to see which skills a hook reloads, and writes nothing else. Where no dialog
+ * answers, it returns the recommendations and the config they give, and writes nothing.
  */
 async function runInit($: Dollar, l: Loaded): Promise<string> {
   const notes: string[] = []
@@ -141,17 +162,117 @@ async function runInit($: Dollar, l: Loaded): Promise<string> {
   if (!home) return 'Souffleur init: the home folder is unknown, so nothing was changed.'
   const configPath = `${home}/.claude/souffleur.json`
   const settingsPath = `${home}/.claude/settings.json`
-  const shown = (path: string) => (path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path)
+  const shown = (path: string) => shownPath(home, path)
 
-  const settingsText = await readOptional($, settingsPath, notes)
-  let settings: unknown
-  if (settingsText !== undefined) {
+  const userText = await readOptional($, configPath, notes)
+  let userDoc: unknown
+  if (userText !== undefined) {
     try {
-      settings = JSON.parse(settingsText)
-    } catch {
-      notes.push(`${shown(settingsPath)} is not valid JSON, so its hooks were not checked.`)
+      userDoc = JSON.parse(userText)
+    } catch (err) {
+      return `Souffleur init: ${shown(configPath)} is not valid JSON (${message(err)}), so nothing was changed. Fix the file and run /souffleur init again.`
     }
   }
+  const settings = (await readSettings($, settingsPath, shown(settingsPath), notes)).value
+  const described = await installedWithDescriptions($)
+  const installed = described.map((x) => x.name)
+  const configured = Object.keys(l.config.skills)
+  const hooks = findHookOverlaps(settings, [...new Set([...installed, ...configured])])
+  const reloadHooked = [...new Set(hooks.flatMap((o) => (o.skill !== undefined ? [o.skill] : [])))]
+
+  // One small-model call over the installed skills nobody has configured yet.
+  const pool = described.filter((x) => !configured.includes(x.name) && !reloadHooked.includes(x.name))
+  let picks: Suggestion[] = []
+  if (pool.length) {
+    try {
+      const r = await $.model.complete({ model: 'haiku', prompt: picksPrompt(pool, l.config.needs) })
+      if (r.isAnswered) picks = parsePicks(r.text, pool.map((x) => x.name), l.config.needs)
+      else notes.push('The small model gave no answer, so no further skills are proposed.')
+    } catch (err) {
+      notes.push(`The small model failed (${message(err)}), so no further skills are proposed.`)
+    }
+  }
+
+  const plans: Plan[] = candidates(l.config, installed, reloadHooked, picks.map((x) => x.skill)).map(({ skill, source }) => {
+    const rule = l.config.skills[skill]
+    const current = currentChoice(rule)
+    const pick = picks.find((x) => x.skill === skill)
+    if (source === 'hook') return { skill, source, recommended: 'start' }
+    if (source === 'model') return { skill, source, recommended: 'need', ...(pick ? { need: pick.need } : {}) }
+    return { skill, source, ...(current === undefined ? {} : { current }), recommended: current ?? 'need' }
+  })
+  const watched = new Set(plans.map((p) => p.skill))
+  const unwatched = installed.filter((name) => !watched.has(name))
+  const toAsk = plans.filter((p) => p.source !== 'project')
+
+  const noDialog = () =>
+    `${setupSteps({ plans, userConfig: userDoc, configPath: shown(configPath), unwatched })}${notes.length ? `\n\nNotes:\n${notes.map((n) => `- ${n}`).join('\n')}` : ''}`
+  const done: string[] = []
+  let asked = false
+  const needOf = (p: Plan): NeedText | undefined => {
+    if (p.need) return p.need
+    const key = l.config.skills[p.skill]?.need
+    const text = key === undefined ? undefined : l.config.needs[key]
+    return key !== undefined && text !== undefined ? { key, text } : undefined
+  }
+
+  try {
+    for (const p of toAsk) {
+      const proposed = needOf(p)
+      const lines = [
+        `${p.skill}: ${describePlan(p).slice(p.skill.length + 2)}.`,
+        ...(proposed ? [`Description for "When the task needs it": ${proposed.text} Text typed under Other replaces it.`] : ['Text typed under Other becomes the description for "When the task needs it".']),
+        ...(p.skill.includes(':') ? ['Injected by its plugin fits plugins that put their own text in at session start.'] : []),
+        'How should Souffleur keep it?',
+      ]
+      const question = `${asked ? '' : `${SETUP_INTRO}\n\n`}${lines.join(' ')}`
+      const answer: string = await $.ui.ask(question, { options: options(p.skill, p.current, p.recommended), header: 'Souffleur' })
+      asked = true
+      const picked = choiceOf(answer)
+      if (picked === 'stop') break
+      const choice: LoadChoice = picked ?? 'need'
+      const need: NeedText | undefined = picked === undefined ? { key: proposed?.key ?? bareName(p.skill), text: answer.trim() } : choice === 'need' ? proposed : undefined
+      // Read again: the file may have changed since the scan, and earlier answers are already in it.
+      const text = await readOptional($, configPath, notes)
+      const doc: unknown = text === undefined ? undefined : JSON.parse(text)
+      const r = applyChoice(doc, p.skill, choice, need)
+      if (r.note) done.push(r.note)
+      const same = text !== undefined && JSON.stringify(r.config) === JSON.stringify(doc)
+      if (same || (text === undefined && choice === 'none')) {
+        if (!r.note) done.push(`${p.skill}: ${choice === 'none' ? 'not watched' : CHOICE_LABEL[choice]} (no change).`)
+        continue
+      }
+      await $.fs.write(configPath, `${JSON.stringify(r.config, null, 2)}\n`)
+      done.push(`${p.skill}: ${choice === 'none' ? 'not watched any more' : CHOICE_LABEL[choice]}.`)
+    }
+  } catch (err) {
+    if (!asked) return noDialog()
+    done.push(`Stopped early: ${message(err)}. Answers given so far are kept.`)
+  }
+  if (!asked && toAsk.length && !done.length) return noDialog()
+
+  const out = ['Souffleur init', '', ...(done.length ? done.map((d) => `- ${d}`) : ['- Nothing to ask: no skill is configured yet and none looks worth watching.'])]
+  const project = plans.filter((p) => p.source === 'project')
+  if (project.length) out.push('', `Set only in the project file, so init leaves ${project.length === 1 ? 'it' : 'them'} alone: ${project.map((p) => p.skill).join(', ')}.`)
+  if (unwatched.length) out.push('', `Installed and not watched: ${unwatched.slice(0, 30).join(', ')}${unwatched.length > 30 ? `, and ${unwatched.length - 30} more` : ''}.`)
+  if (hooks.length) out.push('', `Found ${hooks.length} hook${hooks.length === 1 ? '' : 's'} in your settings that may do the same job. /souffleur migrate goes through ${hooks.length === 1 ? 'it' : 'them'} with you.`)
+  if (notes.length) out.push('', 'Notes:', ...notes.map((n) => `- ${n}`))
+  if (done.some((d) => !d.includes('(no change)') && !d.startsWith('Stopped'))) out.push('', 'New entries apply from the next session start. The default mode is observe: nothing is blocked until you set "mode": "enforce" in the user file.')
+  return out.join('\n')
+}
+
+/**
+ * `/souffleur migrate`: goes through hooks in settings.json that do what Souffleur does, one dialog each.
+ * `Turn off` copies settings.json first and removes only that entry. Scripts, CLAUDE.md and memory are never edited.
+ */
+async function runMigrate($: Dollar, l: Loaded): Promise<string> {
+  const notes: string[] = []
+  const home: string | undefined = await $.env.get('HOME')
+  if (!home) return 'Souffleur migrate: the home folder is unknown, so nothing was changed.'
+  const settingsPath = `${home}/.claude/settings.json`
+  const shown = (path: string) => shownPath(home, path)
+  const settings = (await readSettings($, settingsPath, shown(settingsPath), notes)).value
+
   const slug = l.root.replace(/[^A-Za-z0-9]/g, '-')
   const sources = [`${home}/.claude/CLAUDE.md`, `${l.root}/CLAUDE.md`, `${home}/.claude/projects/${slug}/memory/MEMORY.md`]
   const files: { file: string; text: string }[] = []
@@ -159,51 +280,21 @@ async function runInit($: Dollar, l: Loaded): Promise<string> {
     const text = await readOptional($, path, notes)
     if (text !== undefined) files.push({ file: shown(path), text })
   }
-
-  const installed = await installedSkills($)
   const configured = Object.keys(l.config.skills)
-  const known = [...new Set([...installed, ...configured])]
-  const passages: Passage[] = findPassages(files, known)
+  const known = [...new Set([...(await installedSkills($)), ...configured])]
+  const passages: Passage[] = findPassages(files, configured)
   const hooks: HookOverlap[] = findHookOverlaps(settings, known)
 
-  let proposals: SkillProposal[] = []
-  const candidates = installed.filter((name) => !configured.includes(name))
-  if (candidates.length) {
-    try {
-      const r = await $.model.complete({ model: 'haiku', prompt: proposalPrompt(candidates, passages, configured) })
-      if (r.isAnswered) proposals = parseSkillProposals(r.text, candidates)
-      else notes.push('The small model gave no answer, so no skill entries are proposed.')
-    } catch (err) {
-      notes.push(`The small model failed (${message(err)}), so no skill entries are proposed.`)
-    }
-  }
-
-  const noDialog = () => `${initSteps({ proposals, hooks, passages, configPath: shown(configPath), settingsPath: shown(settingsPath) })}${notes.length ? `\n\nNotes:\n${notes.map((n) => `- ${n}`).join('\n')}` : ''}`
+  const noDialog = () => `${migrateSteps({ hooks, passages, settingsPath: shown(settingsPath) })}${notes.length ? `\n\nNotes:\n${notes.map((n) => `- ${n}`).join('\n')}` : ''}`
   const done: string[] = []
   const manual: string[] = []
   let asked = false
   let backedUp = false
-  const ask = async (question: string, options: string[]): Promise<string> => {
-    const answer: string = await $.ui.ask(question, { options, header: 'Souffleur' })
-    asked = true
-    return answer
-  }
-
   try {
-    for (const p of proposals) {
-      const answer = await ask(`Add ${describeProposal(p)} to ${shown(configPath)}?`, ['Add', 'Skip', 'Stop'])
-      if (answer === 'Stop') break
-      if (answer !== 'Add') continue
-      const merged = mergeUserConfig(await readOptional($, configPath, notes), [p])
-      if ('error' in merged) done.push(`Not added: ${p.name} (${merged.error}).`)
-      else if (!merged.added.length) done.push(`Already configured: ${p.name}.`)
-      else {
-        await $.fs.write(configPath, merged.text)
-        done.push(`Added ${p.name} to ${shown(configPath)}.`)
-      }
-    }
     for (const o of hooks) {
-      const answer = await ask(`Turn off the ${describeHook(o)} hook? Souffleur now does this.`, ['Turn off', 'Keep', 'Show me what to do', 'Stop'])
+      const question = `${asked ? '' : `${MIGRATE_INTRO}\n\n`}Turn off the ${describeHook(o)} hook? Souffleur now does this job.`
+      const answer: string = await $.ui.ask(question, { options: ['Turn off', 'Keep', 'Show me what to do', 'Stop'], header: 'Souffleur' })
+      asked = true
       if (answer === 'Stop') break
       if (answer === 'Show me what to do') manual.push(hookSteps(o, shown(settingsPath)))
       if (answer !== 'Turn off') continue
@@ -228,16 +319,12 @@ async function runInit($: Dollar, l: Loaded): Promise<string> {
     if (!asked) return noDialog()
     done.push(`Stopped early: ${message(err)}.`)
   }
-  if (!asked && !done.length) {
-    if (proposals.length || hooks.length) return noDialog()
-    done.push('Nothing to propose: no new skill entries and no overlapping hooks.')
-  }
+  if (!asked && hooks.length && !done.length) return noDialog()
 
-  const out = ['Souffleur init', '', ...done.map((d) => `- ${d}`)]
+  const out = [MIGRATE_INTRO, '', ...(done.length ? done.map((d) => `- ${d}`) : ['- Nothing to migrate: no overlapping hooks.'])]
   if (manual.length) out.push('', 'To do by hand:', ...manual.map((m) => `- ${m}`))
-  if (passages.length) out.push('', 'Standing instructions that name a skill (Souffleur never edits these):', ...passages.map((x) => `- ${x.file}:${x.line} ${x.text}`))
+  if (passages.length) out.push('', 'Standing instructions that name a configured skill (Souffleur never edits these):', ...passages.map((x) => `- ${x.file}:${x.line} ${x.text}`))
   if (notes.length) out.push('', 'Notes:', ...notes.map((n) => `- ${n}`))
-  if (done.some((d) => d.startsWith('Added'))) out.push('', 'New entries apply from the next session start. The default mode is observe: nothing is blocked until you set "mode": "enforce" in the user file.')
   return out.join('\n')
 }
 
@@ -260,7 +347,7 @@ export const register: Register = (on) => {
       await persist($, l, s)
     })
     await safe($, 'command.register', undefined, async () => {
-      await $.command.register({ name: 'souffleur', description: 'Show which skills Souffleur keeps loaded', argumentHint: '[status | need <name> | drop <name> | pause | init]' })
+      await $.command.register({ name: 'souffleur', description: 'Show which skills Souffleur keeps loaded', argumentHint: '[status | need <name> | drop <name> | pause | init | migrate]' })
     })
     return next(e)
   })
@@ -349,8 +436,12 @@ export const register: Register = (on) => {
 
   on('command.run', async ($, e, next) => {
     if (e.command === 'souffleur') {
-      if ((e.args ?? '').trim().split(/\s+/)[0] === 'init') {
-        const text = await safe($, 'command.run', undefined as string | undefined, async () => runInit($, (await current($)).l))
+      const verb0 = (e.args ?? '').trim().split(/\s+/)[0]
+      if (verb0 === 'init' || verb0 === 'migrate') {
+        const text = await safe($, 'command.run', undefined as string | undefined, async () => {
+          const { l } = await current($)
+          return verb0 === 'init' ? runInit($, l) : runMigrate($, l)
+        })
         if (text !== undefined) return { text }
         return next(e)
       }

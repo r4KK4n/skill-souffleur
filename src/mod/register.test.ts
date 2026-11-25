@@ -248,36 +248,98 @@ test('the system prompt section names the always-on skills and depends on config
 
 
 const SETTINGS_PATH = `${HOME}/.claude/settings.json`
+const CLAUDE_MD = `${HOME}/.claude/CLAUDE.md`
 const SETTINGS = JSON.stringify(
   {
     theme: 'dark',
     hooks: {
-      SessionStart: [{ matcher: 'compact|resume', hooks: [{ type: 'command', command: 'bash reload-writing-guide.sh' }] }],
+      SessionStart: [{ matcher: 'compact|resume|clear', hooks: [{ type: 'command', command: 'bash ~/.claude/hooks/writing-guide-reload.sh' }] }],
+      UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'bash ~/.claude/hooks/gone-skill-preload.sh' }] }],
       PostToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'prettier --write .' }] }],
     },
   },
   null,
   2,
 )
-const PROPOSALS = JSON.stringify({ skills: [{ name: 'writing-guide', need: 'prose', needText: 'Writing text people read.' }] })
-const init = async ($: any) => (await $.command.run({ command: 'souffleur', args: 'init' })).text as string
+const PICKS = JSON.stringify({ skills: [{ name: 'ui-checklist', need: 'ui', needText: 'Building a screen.' }] })
+const run = async ($: any, args: string) => (await $.command.run({ command: 'souffleur', args })).text as string
+const SKILLS = ['writing-guide', 'ui-checklist', 'pdf']
 
-test('init without dialog prints steps and writes nothing', async ($, on) => {
-  const w = world(on, { [SETTINGS_PATH]: SETTINGS }, { skills: ['writing-guide', 'ui-checklist'], proposals: PROPOSALS, answers: 'reject' })
+test('init asks per skill and writes the user file', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS, [SETTINGS_PATH]: SETTINGS }, { skills: SKILLS, proposals: PICKS, answers: ['When the task needs it', 'When the task needs it'] })
   await start($)
-  const text = await init($)
+  const text = await run($, 'init')
+  // writing-guide is configured (asked first), then the hook skill is none (already configured), then the model pick.
+  expect(w.asked.length).toBe(2)
+  expect(w.asked[0]).toMatch(/writing-guide/)
+  expect(w.asked[0]).toMatch(/From the start|always/i)
+  expect(w.asked[1]).toMatch(/ui-checklist/)
+  const written = JSON.parse(w.writes.filter((x) => x.path === USER_FILE).at(-1)!.text)
+  expect(written.skills['writing-guide'].need).toBeTruthy()
+  expect(written.skills['ui-checklist']).toEqual({ need: 'ui' })
+  expect(written.needs.ui).toBe('Building a screen.')
+  expect(w.writes.some((x) => x.path === SETTINGS_PATH)).toBe(false)
+  expect(text).toMatch(/pdf/)
+  expect(text).toMatch(/\/souffleur migrate/)
+})
+
+test('init starts its first dialog with the explanation', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS }, { skills: ['writing-guide'], answers: ['Stop'] })
+  await start($)
+  await run($, 'init')
+  expect(w.asked[0]).toMatch(/Souffleur init/)
+  expect(w.asked[0]).toMatch(/Don't watch/)
+})
+
+test('closing the dialog stops init and keeps earlier answers', async ($, on) => {
+  const both = JSON.stringify({ skills: { 'writing-guide': { always: true }, 'ui-checklist': { always: true } } })
+  const w = world(on, { [USER_FILE]: both }, { skills: SKILLS, answers: ["Don't watch"] })
+  await start($)
+  const text = await run($, 'init')
+  const written = JSON.parse(w.writes.filter((x) => x.path === USER_FILE).at(-1)!.text)
+  expect(written.skills['writing-guide']).toBe(undefined)
+  expect(written.skills['ui-checklist']).toEqual({ always: true })
+  expect(text).toMatch(/Stopped/)
+})
+
+test('first dialog failing prints text and writes nothing', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS, [SETTINGS_PATH]: SETTINGS }, { skills: SKILLS, proposals: PICKS, answers: 'reject' })
+  await start($)
+  const text = await run($, 'init')
   expect(text).toMatch(/nothing was changed/i)
-  expect(text).toMatch(/"writing-guide"/)
-  expect(text).toMatch(/reload-writing-guide\.sh/)
+  expect(text).toMatch(/writing-guide/)
+  expect(text).toMatch(/"ui-checklist"/)
   expect(w.writes.length).toBe(0)
 })
 
-test('init writes backup before editing settings', async ($, on) => {
-  const w = world(on, { [SETTINGS_PATH]: SETTINGS }, { skills: ['writing-guide'], proposals: PROPOSALS, answers: ['Add', 'Turn off'] })
+test('init lists a project-only skill and does not ask about it', async ($, on) => {
+  const w = world(on, { [USER_FILE]: '{"skills":{}}', [PROJECT_FILE]: JSON.stringify({ skills: { 'ui-checklist': { always: true } } }) }, { skills: ['ui-checklist'], answers: [] })
   await start($)
-  const text = await init($)
-  const config = w.writes.find((x) => x.path === USER_FILE)
-  expect(JSON.parse(config!.text).skills['writing-guide']).toEqual({ need: 'prose' })
+  const text = await run($, 'init')
+  expect(w.asked.length).toBe(0)
+  expect(text).toMatch(/ui-checklist/)
+  expect(text).toMatch(/project/i)
+})
+
+test('migrate starts with its explanation and asks per hook', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS, [SETTINGS_PATH]: SETTINGS, [CLAUDE_MD]: 'Always load writing-guide first.\nUse pdf for forms.' }, { skills: SKILLS, answers: ['Turn off', 'Keep'] })
+  await start($)
+  const text = await run($, 'migrate')
+  expect(w.asked.length).toBe(2)
+  expect(w.asked[0]).toMatch(/^Souffleur migrate/)
+  expect(w.asked[0]).toMatch(/Turn off/)
+  expect(w.asked[0]).toMatch(/writing-guide-reload\.sh/)
+  expect(w.asked[1]).toMatch(/gone-skill-preload\.sh/)
+  expect(w.asked[1]).toMatch(/guess/)
+  expect(text.startsWith('Souffleur migrate')).toBe(true)
+  expect(text).toMatch(/CLAUDE\.md:1/)
+  expect(text).not.toMatch(/pdf for forms/)
+})
+
+test('migrate writes a backup before editing settings', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS, [SETTINGS_PATH]: SETTINGS }, { skills: SKILLS, answers: ['Turn off', 'Keep'] })
+  await start($)
+  const text = await run($, 'migrate')
   const backup = w.writes.findIndex((x) => /settings\.json\.bak-souffleur-\d{8}-\d{4}$/.test(x.path))
   const edit = w.writes.findIndex((x) => x.path === SETTINGS_PATH)
   expect(backup).toBeGreaterThan(-1)
@@ -286,14 +348,26 @@ test('init writes backup before editing settings', async ($, on) => {
   const after = JSON.parse(w.writes[edit]!.text)
   expect(after.theme).toBe('dark')
   expect(after.hooks.SessionStart).toBe(undefined)
+  expect(after.hooks.UserPromptSubmit.length).toBe(1)
   expect(after.hooks.PostToolUse.length).toBe(1)
+  expect(w.writes.some((x) => x.path === USER_FILE)).toBe(false)
   expect(text).toMatch(/Turned off/)
 })
 
-test('init keeps a hook the user wants to keep and edits nothing', async ($, on) => {
-  const w = world(on, { [SETTINGS_PATH]: SETTINGS }, { skills: ['writing-guide'], proposals: '{"skills":[]}', answers: ['Keep'] })
+test('migrate keeps a hook the user wants to keep and edits nothing', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS, [SETTINGS_PATH]: SETTINGS }, { skills: SKILLS, answers: ['Keep', 'Keep'] })
   await start($)
-  await init($)
+  await run($, 'migrate')
+  expect(w.writes.length).toBe(0)
+})
+
+test('migrate without dialog prints the explanation and steps and writes nothing', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS, [SETTINGS_PATH]: SETTINGS }, { skills: SKILLS, answers: 'reject' })
+  await start($)
+  const text = await run($, 'migrate')
+  expect(text.startsWith('Souffleur migrate')).toBe(true)
+  expect(text).toMatch(/nothing was changed/i)
+  expect(text).toMatch(/writing-guide-reload\.sh/)
   expect(w.writes.length).toBe(0)
 })
 
@@ -314,5 +388,5 @@ test('the /souffleur command shows its arguments in the typeahead', async ($, on
   registeredCommands.length = 0
   world(on, { [USER_FILE]: ALWAYS })
   await start($)
-  expect(JSON.stringify(registeredCommands)).toContain('"argumentHint":"[status | need <name> | drop <name> | pause | init]"')
+  expect(JSON.stringify(registeredCommands)).toContain('"argumentHint":"[status | need <name> | drop <name> | pause | init | migrate]"')
 })
