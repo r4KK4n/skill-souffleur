@@ -4,7 +4,7 @@ Keeps Claude Code skills loaded and in use for the whole session, including afte
 
 In a theatre, the souffleur sits out of sight at the edge of the stage and gives an actor the line they forgot, at the moment they need it. Souffleur does the same for skills: when compaction drops a skill the current task needs, it brings the skill back.
 
-> **Status:** work in progress, no release yet. See the [roadmap](#roadmap).
+> **Status:** version 0.1.0 is ready and installable from this repository (see [Install](#install)). The release tag is pending. See the [roadmap](#roadmap).
 >
 > **Early access.** Souffleur is a Claude Code mod: TypeScript that runs inside Claude Code through its mod API, shipped and installed as a plugin. Anthropic still changes that API between releases, so an update of Claude Code can break Souffleur until it is adapted. It is provided as is, with no guarantee of fixes or dates. [docs/compatibility.md](docs/compatibility.md) lists the versions each behaviour was checked on.
 
@@ -19,12 +19,12 @@ Claude Code loads a skill's instructions into the context when the skill is invo
 
 The skill list itself comes back after compaction since Claude Code 2.1.304. What gets lost is the content of skills you already used. The model then keeps working without rules it followed an hour earlier, and nothing tells you. Related upstream reports: [#94564](https://github.com/anthropics/claude-code/issues/94564), [#82144](https://github.com/anthropics/claude-code/issues/82144), [#74990](https://github.com/anthropics/claude-code/issues/74990).
 
-## What Souffleur will do
+## What Souffleur does
 
-- Keep a ledger of the skills a session has loaded, and notice when compaction or a resume drops or truncates one.
-- Decide from what you are working on which skills the current task needs, and load the missing ones by invoking them again.
-- Hold back a step, such as writing a file, until the skills that step needs are loaded.
-- Show which skills are active in the session, since when, and why.
+- Keeps a ledger of the skills a session has loaded, and notices when compaction or a resume drops or truncates one.
+- Decides from what you are working on which skills the current task needs, and asks the model to load the missing ones by invoking them again.
+- Holds back a step, such as writing a file, until the skills that step needs are loaded (in `enforce` mode).
+- Shows which skills are active in the session, since when, and why.
 
 You choose the skills and the rules in a configuration file. Souffleur never pastes a full skill text into every prompt.
 
@@ -37,6 +37,7 @@ You work as usual. Souffleur stays quiet while nothing is missing. You notice it
 - When the task needs a skill that is not loaded, or a compaction has cut one, Souffleur adds a short note to your prompt asking the model to invoke that skill first. The model loads it before it answers.
 - The status line shows a summary such as `observe · 3 loaded, 1 restoring`. If your app does not show it, `/souffleur` gives the same summary as a table.
 - In `enforce` mode, a step that needs a missing skill is refused once with the reason, and the model loads the skill and tries again.
+- An open duty (a step that must be followed by evidence, such as a detector run) is mentioned once in the prompt context when it opens. `/souffleur` lists it for as long as it stays open.
 
 A good way to start: install it, run `/souffleur init`, keep `observe` for a few sessions, and look at `/souffleur` after a compaction. If the ledger matches what you saw, switch to `enforce`.
 
@@ -54,7 +55,7 @@ Souffleur needs Claude Code 2.1.332 or later. Type this at the prompt of a termi
 /plugin install skill-souffleur --marketplace r4KK4n/skill-souffleur
 ```
 
-Claude Code asks whether to add the marketplace; answer `y`. It then asks for a scope: choose user to cover every project, or project for one repository. Souffleur starts with no configuration. Until you add one, the status line reads `not set up, run /souffleur init`, and nothing else changes in your session.
+Claude Code asks whether to add the marketplace; answer `y`. It then asks for a scope: choose user to cover every project, or project for one repository. Souffleur starts with no configuration. Until you add one, the status line reads `not set up, run /souffleur init`. Souffleur then watches no skill, asks the model to load nothing and denies nothing. It still adds one sentence to the system prompt, registers the `/souffleur` command and the `souffleur_propose` tool, and keeps its session copy in the plugin store.
 
 `/plugin` exists only in the terminal interface. In a Remote Control session from the desktop or mobile app it is not available ("Plugins aren't available in this environment"). Install from a shell on the machine that runs Claude Code instead:
 
@@ -93,14 +94,16 @@ Create `~/.claude/souffleur.json`, or let `/souffleur init` write it for you:
 }
 ```
 
-A skill with `"always": true` is needed from the first turn. A skill with `"need"` is needed once a prompt matches that need's description. After a compaction or a resume, Souffleur asks the model to load the skills it needs again. A project can add its own `.claude/souffleur.json`, but it cannot change your entries or your mode. The full format, including gates and duties, is in [docs/design.md](docs/design.md#configuration).
+A skill with `"always": true` is needed from the first turn. A skill with `"need"` is needed once a prompt matches that need's description. After a compaction or a resume, Souffleur asks the model to load the skills it needs again. A project can add its own `.claude/souffleur.json`, but it cannot change your entries or your mode. Its skills and needs are report only until you list the project root in `trustProjects` in your user file: for any other project Souffleur neither asks the model to load them nor names them in the system prompt, and they cannot deny a call. `/souffleur` still lists them. A project file may define 20 skills and 10 needs at most; more get an error that names the cap. Roots in `trustProjects` are compared without trailing slashes.
+
+If you edit a config file by hand, new entries apply after `/souffleur` (it reads both files again) or in a new session. The full format, including gates and duties, is in [docs/design.md](docs/design.md#configuration). A gate cannot name the `Skill` tool, because it would block loading its own skill.
 
 ## Commands
 
 - `/souffleur` or `/souffleur status` shows the mode, one row per skill with its state, the active needs, open duties, and the calls that `observe` mode would have denied.
 - `/souffleur need <name>` turns a need on for this session, even when no prompt matched it.
 - `/souffleur drop <name>` turns a need off again.
-- `/souffleur pause` switches every check off for this session.
+- `/souffleur pause` switches Souffleur off for this session: no restore requests, no need detection (so no classifier calls), no turn-end questions, no reading of skill texts, and no gate, duty, rule or brief denial. The ledger keeps tracking loads and compactions. `/souffleur resume` undoes it. A pause belongs to the running session and is not carried over when you resume a session.
 - `/souffleur init` asks, skill by skill, how Souffleur should keep each one and writes your answers to `~/.claude/souffleur.json`. See [Setting up your skills](#setting-up-your-skills).
 - `/souffleur migrate` goes through your old reload hooks and offers to turn them off. See [Coming from your own hooks](#coming-from-your-own-hooks).
 - `/souffleur rule <text>` turns your words into a rule or a note and asks before it keeps anything. See [Rules and notes](#rules-and-notes).
@@ -137,7 +140,7 @@ Proposals come from the model and from you. When something goes wrong that a rul
 
 `/souffleur migrate` also queues the standing instructions it finds in your `CLAUDE.md` files and memory index as note proposals, with or without a dialog. The question names the file and line, and offers `Yes, this project only` first for a passage from the project's own files. The report says how many passages were skipped and why. 
 
-Souffleur also reads your skills. This needs your user file and a session with a person at the prompt, and it stops under `/souffleur pause`. When the main session loads a skill whose file Souffleur has not seen, a small model looks for obligations the skill states about itself, such as "always run `npm test` after editing files under `src/`", and queues up to three as proposals named `skill:<name>`. The question starts with "Read from a skill's text, not verified:" and names the skill, the plugin or the project skill it came from. A skill version is read once and at most five are read per session (`/clear` starts a new session with five more); at most six skill proposals wait at once, and your own proposals come first. Skills from a project or an MCP server are read only when the project is in `trustProjects`. Skills a subagent loads are skipped, but a background subagent that loads a skill while the main session loads nothing can be read as the main session, because the load event does not say who loaded it. Each read sends the skill file, up to 60,000 characters, to the small model with a limit of 30 seconds, so to switch this off set `"learn": { "skills": false }` in `~/.claude/souffleur.json`. Nothing is written without your yes.
+Souffleur also reads your skills. This needs your user file and a session with a person at the prompt, and it stops under `/souffleur pause`. When the main session loads a skill whose file Souffleur has not seen, a small model looks for obligations the skill states about itself, such as "always run `npm test` after editing files under `src/`", and queues up to three as proposals named `skill:<name>`. The question starts with "Read from a skill's text, not verified:" and names the skill, the plugin or the project skill it came from. A skill version counts as read once its proposals were answered (yes, no, or a request to change one). If the session ends or `/clear` runs before that, the version is read again the next time the skill loads, at most three times in all. At most five skill texts are read per session (`/clear` starts a new session with five more); at most six skill proposals wait at once, and your own proposals come first. Skills from a project or an MCP server are read only when the project is in `trustProjects`. Skills a subagent loads are skipped, but a background subagent that loads a skill while the main session loads nothing can be read as the main session, because the load event does not say who loaded it. Each read sends the skill file, up to 60,000 characters, to the small model with a limit of 30 seconds, so to switch this off set `"learn": { "skills": false }` in `~/.claude/souffleur.json`. Nothing is written without your yes.
 
 ## Setting up your skills
 
@@ -164,10 +167,29 @@ Where no dialog can answer, for example under `claude -p`, both commands print w
 
 ## What Souffleur reads, stores and costs
 
-- It reads `~/.claude/souffleur.json`, the project's `.claude/souffleur.json` and, only during `/souffleur init` and `/souffleur migrate`, your `settings.json`, `CLAUDE.md` files and the current project's memory index.
+Reads:
+
+- `~/.claude/souffleur.json` and the project's `.claude/souffleur.json`, at session start and on every `/souffleur` command.
+- The text of each skill the main session loads, for learning (see [Rules and notes](#rules-and-notes)): the skill file at its path, up to 60,000 characters, sent to the small model. This needs your user file and stops under `/souffleur pause` or `"learn": { "skills": false }`.
+- Only during `/souffleur init` and `/souffleur migrate`: your `~/.claude/settings.json`, your user and project `CLAUDE.md` files, the files those import with `@path` (one level), and the current project's memory index. `init` also reads `~/.claude/plugins/installed_plugins.json` and the `hooks/hooks.json` and `.claude-plugin/plugin.json` of an installed plugin, to find out whether a plugin skill is loaded by a `SessionStart` hook.
+
+Writes:
+
 - `/souffleur init` writes `~/.claude/souffleur.json` after each of your answers, and so does a yes to a rule or note proposal. `/souffleur migrate` writes `settings.json` only after you answer `Turn off`, with a backup copy first.
-- It keeps the ledger per session in Claude Code's plugin store on your machine. Nothing is sent anywhere except through Claude Code's own model calls.
-- Detecting needs costs one small-model call per configured need on each prompt you type, about 0.8 seconds, with a 1.5 second limit after which the prompt goes on without a verdict. A restored skill adds its full text to the context again.
+
+Stores, in Claude Code's plugin store on your machine:
+
+- `session:<id>`: the ledger, active needs, open duties, waiting proposals and errors of one session, stamped with the time it was stored. At session start Souffleur removes `session:*` entries that were not stored for 30 days.
+- `souffleur:declined`: the hashes of the last 200 proposals you declined, so they are not proposed again.
+- `souffleur:skill-hash:<hash>`: one small entry per skill version that was read, with its state (done, offered or failed). These stay.
+
+Nothing is sent anywhere except through Claude Code's own model calls.
+
+Costs:
+
+- Detecting needs costs one small-model call per configured need on each prompt you type, about 0.8 seconds, with a 1.5 second limit after which the prompt goes on without a verdict. Needs from a project file that is not trusted are not classified.
+- Reading a skill costs one small-model call of up to 30 seconds in the background, at most five per session.
+- A restored skill adds its full text to the context again. The restore request and the notes of one prompt stay under 10,000 characters together; skills that do not fit stay `absent` or `stale` in `/souffleur` and are asked for on a later prompt.
 
 ## Limits
 
@@ -175,16 +197,17 @@ Where no dialog can answer, for example under `claude -p`, both commands print w
 - Souffleur checks that a skill is loaded and that a duty left its trace. It does not judge how well the model followed a skill.
 - A restore request after a compaction in the middle of a long turn rides on the next tool result. Models may treat such notes as untrusted and skip them; in `enforce` the gate still catches the next gated step.
 - A skill that does not load after two requests is marked `unavailable` and is neither requested nor gated again in that session.
+- The dialogs of `/souffleur init`, `/souffleur migrate` and the turn-end question were tested with the test kit and in the desktop app's dialog. `init`, `migrate` and the proposal dialogs have not yet run end to end in a live session; that first live run is pending. Where no dialog can open, the commands print what they would ask and change nothing.
 
 ## Troubleshooting
 
-- The status line says `degraded, see /souffleur`: Souffleur could not read its config or an event changed shape after a Claude Code update. `/souffleur` lists what failed.
+- The status line says `degraded, see /souffleur`: Souffleur could not read its config, an event changed shape after a Claude Code update, or the small model failed three times in a row (for need detection or for reading skills). `/souffleur` lists what failed, and one good call clears a model error.
 - No status line at all: your app may not show mod status lines. Use `/souffleur`.
 - Please report problems with your Claude Code version (`claude --version`) through the [issue tracker](https://github.com/r4KK4n/skill-souffleur/issues).
 
 ## Switching off
 
-- `/souffleur pause` switches every check off for the current session.
+- `/souffleur pause` switches Souffleur off for the current session, and `/souffleur resume` switches it on again.
 - `/plugin uninstall skill-souffleur` removes the mod. Your `~/.claude/souffleur.json` stays where it is, and the backup of `settings.json` stays too.
 
 ## Roadmap
@@ -200,8 +223,8 @@ Where no dialog can answer, for example under `claude -p`, both commands print w
 - [x] Rules and notes: from slips and the user's own words, confirmed in a dialog
 - [x] Learn rules from the text of the user's skills
 - [x] `/souffleur init` per skill and `/souffleur migrate` for old hooks
-- [ ] Install guide
-- [ ] First release, installable with `/plugin install`
+- [x] Install guide
+- [ ] Release tag `v0.1.0` (the code is ready and installable from the repository; the maintainer tags it)
 
 ## Contributing
 

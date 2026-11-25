@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { decide, initSession } from '../src/core/decide.ts'
 import type { Config } from '../src/core/types.ts'
 import { enqueue, nextQuestion, answer, makeProposal, YES_PROJECT } from '../src/core/proposals.ts'
-import { MAX_FAILS, MAX_READS, extractPrompt, originOf, parseAnswer, parseProposals, shouldRead, skillHash, trusted } from '../src/core/learn.ts'
+import { MAX_FAILS, MAX_OFFERS, MAX_READS, extractPrompt, originOf, parseAnswer, parseProposals, shouldRead, skillHash, trusted } from '../src/core/learn.ts'
 
 const config: Config = { mode: 'observe', skills: {}, needs: {}, trustProjects: [], rules: [], notes: [], learn: { skills: true } }
 const off: Config = { ...config, learn: { skills: false } }
@@ -153,4 +153,16 @@ test('a project skill offers this project first, and its revise request does not
   assert.ok(r.revise)
   assert.doesNotMatch(r.revise!, /npm test|Edit/)
   assert.match(r.revise!, new RegExp(p.entry.id))
+})
+
+test('a version offered three times is not read again; a proposal answered marks it done elsewhere', () => {
+  assert.equal(shouldRead(fresh(), config, { offers: 2 }), true)
+  assert.equal(shouldRead(fresh(), config, { offers: MAX_OFFERS }), false)
+  assert.equal(MAX_OFFERS, 3)
+  assert.equal(shouldRead(fresh(), config, { offers: 1, fails: MAX_FAILS }), false)
+})
+
+test('a trusted root is compared without trailing slashes', () => {
+  assert.equal(trusted('projectSettings', '/work/proj', { trustProjects: ['/work/proj/'] }), true)
+  assert.equal(trusted('mcp', '/work/proj/', { trustProjects: ['/work/proj'] }), true)
 })

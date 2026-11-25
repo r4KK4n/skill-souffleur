@@ -1,4 +1,4 @@
-import { matches, matchesCommand } from './config.ts'
+import { isTrustedRoot, matches, matchesCommand } from './config.ts'
 import { compacted, initLedger, markInstalled, requested, skillLoaded, syncLedger } from './ledger.ts'
 import type { Ledger } from './ledger.ts'
 import { neededSkills } from './needs.ts'
@@ -8,7 +8,7 @@ import { renderTable } from './status.ts'
 import type { Config, NeedName, SkillName } from './types.ts'
 
 /** An open duty. `denied` is set once the duty has denied a call, so the retry passes. */
-export type Duty = { skill: SkillName; openedAt: number; by: string; denied: boolean }
+export type Duty = { skill: SkillName; openedAt: number; by: string; denied: boolean; /** Mentioned in a prompt context once per opening. */ told?: boolean }
 
 /** Plain JSON only: the adapter persists it and reads it back. */
 export type Session = {
@@ -47,18 +47,26 @@ export type Session = {
   proposed: string[]
   /** Counts the stores, so the newer of two copies can be told. */
   rev?: number
+  /** Classifier runs that failed in a row, and learn calls that failed in a row. */
+  classifyFails?: number
+  learnFails?: number
+  /** When this copy was stored last, so old copies in the plugin store can be removed. */
+  touched?: number
 }
 
 export type CoreEvent =
   | { type: 'start'; now: number; start: 'startup' | 'resume' | 'clear'; version?: string }
   | { type: 'skill'; now: number; skill: string; text?: string; source?: string; pluginName?: string; path?: string }
   | { type: 'compact'; now: number; phase: 'before' | 'after'; trigger: string; skipped?: boolean; agentId?: string }
-  | { type: 'prompt'; now: number; text: string; fromUser: boolean; matched: NeedName[]; root?: string }
+  /** `classifierFailed`: the classifier ran and failed (true) or answered every need (false); absent when it did not run. */
+  | { type: 'prompt'; now: number; text: string; fromUser: boolean; matched: NeedName[]; root?: string; classifierFailed?: boolean }
   /** `present` names the arguments the call carries, for field rules. */
   | { type: 'tool'; now: number; tool: string; path?: string; command?: string; brief?: string; skill?: string; model?: string; present?: string[]; agentId?: string; root?: string; tree?: string }
   | { type: 'command'; now: number; args: string; root?: string }
   | { type: 'typed'; now: number; name: string }
   | { type: 'agentDone'; now: number }
+  /** A learn call (the small model reading a skill text) ended: `ok` is false when it failed or gave no usable answer. */
+  | { type: 'learned'; now: number; ok: boolean }
   /** The config was read again (after `/souffleur init`): the ledger follows it, and `errors` replace the old config errors. */
   | { type: 'config'; now: number; errors: string[] }
   /** The skill names this session lists. An empty list means unknown. */
@@ -79,6 +87,11 @@ const KEEP = 20
 const MAX_REQUESTS = 2
 const COMPACT_TRIGGERS = ['manual', 'auto', 'plugin']
 const BRIEF_SKILLS = /^skills:\s*\S/im
+/** The most characters one context block carries: Claude Code moves hook output above 10,000 to a file. */
+const CONTEXT_LIMIT = 10_000
+/** The part of that block the restore request may take, so notes and reminders still fit. */
+const RESTORE_LIMIT = 5000
+const FAIL_LIMIT = 3
 const PAUSE_HINT = 'To turn checks off for this session: /souffleur pause.'
 
 export function initSession(config: Config, id: string, now: number, start: 'startup' | 'resume' | 'clear', version?: string): Session {
@@ -117,11 +130,21 @@ export function statusText(config: Config, session: Session, now: number, root?:
 
 const lastN = <T>(list: T[], item: T): T[] => [...list, item].slice(-KEEP)
 
+/** Counts failures in a row. The third records an error once (the status shows degraded); a success clears both. */
+function track(s: Session, key: 'classifyFails' | 'learnFails', prefix: string, failed: boolean | undefined, message: string): Session {
+  if (failed === undefined) return s
+  const has = s.errors.some((m) => m.startsWith(prefix))
+  if (!failed) return (s[key] ?? 0) === 0 && !has ? s : { ...s, [key]: 0, errors: s.errors.filter((m) => !m.startsWith(prefix)) }
+  const n = (s[key] ?? 0) + 1
+  return { ...s, [key]: n, errors: n >= FAIL_LIMIT && !has ? lastN(s.errors, `${prefix}${message}`) : s.errors }
+}
+
 export function decide(config: Config, s: Session, e: CoreEvent): Result {
   switch (e.type) {
     case 'start':
       // A resume keeps the ledger: what was loaded stays in the transcript until a compaction.
-      if (e.start === 'resume') return { session: e.version === undefined ? s : { ...s, version: e.version }, actions: [] }
+      // A pause is not carried over.
+      if (e.start === 'resume') return { session: { ...s, paused: false, ...(e.version === undefined ? {} : { version: e.version }) }, actions: [] }
       return { session: initSession(config, s.id, e.now, e.start, e.version), actions: [] }
     case 'skill': {
       const announced = (s.learnCalls ?? []).indexOf(e.skill)
@@ -147,6 +170,8 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
       return { session: { ...s, ledger: markInstalled(s.ledger, e.names, e.now) }, actions: [] }
     case 'agentDone':
       return { session: { ...s, subagentsRunning: Math.max(0, s.subagentsRunning - 1) }, actions: [] }
+    case 'learned':
+      return { session: track(s, 'learnFails', 'learn: ', !e.ok, 'the small model failed or gave no usable answer 3 times in a row, so skill texts are not read'), actions: [] }
     case 'error':
       return { session: { ...s, errors: lastN(s.errors, `${e.where}: ${e.message}`) }, actions: [] }
   }
@@ -173,46 +198,69 @@ function onCompact(config: Config, s: Session, e: Extract<CoreEvent, { type: 'co
 
 /**
  * Asks for needed skills that are missing. Skills asked for twice without a load are not named again;
- * `requested` moves them to unavailable. Restores run in config order with no size cap (the spec's shortcut;
- * add a priority cap if restores push sessions into the next compaction early).
+ * `requested` moves them to unavailable. Restores run in config order. The request names as many skills as fit
+ * into RESTORE_LIMIT characters; the rest stay as they are (the table of /souffleur lists them) and are asked for
+ * on a later prompt. Skills of a project file are asked for only when its root is trusted.
  */
-function restore(config: Config, s: Session, now: number): { ledger: Ledger; text?: string } {
+function restore(config: Config, s: Session, now: number, trusted: boolean): { ledger: Ledger; text?: string } {
   const missing = neededSkills(config, s.needs, s.ruleSkills).filter((name) => {
+    if (!trusted && config.skills[name]?.from === 'project') return false
     const st = s.ledger[name]?.state
     return st === 'absent' || st === 'stale' || st === 'restoring'
   })
-  const ask = missing.filter((name) => s.ledger[name]!.requests < MAX_REQUESTS)
+  const wanted = missing.filter((name) => s.ledger[name]!.requests < MAX_REQUESTS)
   const giveUp = missing.filter((name) => s.ledger[name]!.requests >= MAX_REQUESTS)
+  const why = wanted.some((name) => s.ledger[name]!.state !== 'absent') ? ' Compaction cut or dropped their text. The note that skills invoked earlier must not be run again does not apply to them: invoke them again.' : ''
+  const head = 'Souffleur: before anything else, invoke these skills with the Skill tool, one after another: '
+  const ask: SkillName[] = []
+  let used = head.length + why.length + 1
+  for (const name of wanted) {
+    const cost = name.length + (ask.length ? 2 : 0)
+    if (ask.length > 0 && used + cost > RESTORE_LIMIT) break
+    ask.push(name)
+    used += cost
+  }
   const ledger = requested(s.ledger, [...ask, ...giveUp], now)
   if (ask.length === 0) return { ledger }
-  const again = ask.some((name) => s.ledger[name]!.state !== 'absent')
-  const why = again ? ' Compaction cut or dropped their text. The note that skills invoked earlier must not be run again does not apply to them: invoke them again.' : ''
-  return { ledger, text: `Souffleur: before anything else, invoke these skills with the Skill tool, one after another: ${ask.join(', ')}.${why}` }
+  return { ledger, text: `${head}${ask.join(', ')}.${why}` }
 }
 
 function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'prompt' }>): Result {
   if (!e.fromUser) return { session: s, actions: [] }
+  const trusted = isTrustedRoot(config, e.root)
   const needs = { ...s.needs }
-  for (const name of e.matched) {
-    if (name in needs) continue
-    needs[name] = { since: e.now, reason: `need:${name} from "${e.text.slice(0, 40)}"` }
+  if (!s.paused) {
+    for (const name of e.matched) {
+      if (name in needs) continue
+      needs[name] = { since: e.now, reason: `need:${name} from "${e.text.slice(0, 40)}"` }
+    }
   }
-  const next: Session = { ...s, needs, compactedSincePrompt: false }
-  const r = restore(config, next, e.now)
-  next.ledger = r.ledger
-  const lines = r.text === undefined ? [] : [r.text]
+  const next: Session = track({ ...s, needs, compactedSincePrompt: false }, 'classifyFails', 'classifier: ', e.classifierFailed, 'the small model failed or timed out 3 prompts in a row, so needs are not detected')
+  const r = s.paused ? undefined : restore(config, next, e.now, trusted)
+  if (r) next.ledger = r.ledger
+  // One block, at most CONTEXT_LIMIT characters. What does not fit waits: it stays in the session and /souffleur lists it.
+  const lines: string[] = []
+  let used = 0
+  const add = (text: string): boolean => {
+    const cost = text.length + (lines.length ? 1 : 0)
+    if (used + cost > CONTEXT_LIMIT) return false
+    lines.push(text)
+    used += cost
+    return true
+  }
+  if (r?.text !== undefined) add(r.text)
   const notes = contextNotes(config, next, e.root).kept
-  if (notes.length) {
-    lines.push(`Souffleur notes from the user's config:\n${notes.map((n) => `- ${n.text}`).join('\n')}`)
+  if (notes.length && add(`Souffleur notes from the user's config:\n${notes.map((n) => `- ${n.text}`).join('\n')}`)) {
     const ids = notes.map((n) => n.id)
     next.notesSent = [...next.notesSent, ...ids.filter((id) => !next.notesSent.includes(id))]
     next.freshNotes = next.freshNotes.filter((id) => !ids.includes(id) && config.notes.some((n) => n.id === id))
   }
-  lines.push(...next.revise)
-  next.revise = []
-  for (const d of next.duties) if (next.ledger[d.skill]?.state !== 'not installed here') lines.push(`Open duty: ${d.skill} (${d.by}).`)
-  for (const o of next.openRules) if (!o.told) lines.push(`Open rule: ${o.id} (${o.by}).`)
-  next.openRules = next.openRules.map((o) => ({ ...o, told: true }))
+  next.revise = next.revise.filter((text) => !add(text))
+  next.duties = next.duties.map((d) => {
+    if (d.told || next.ledger[d.skill]?.state === 'not installed here' || (!trusted && config.skills[d.skill]?.from === 'project')) return d
+    return add(`Open duty: ${d.skill} (${d.by}).`) ? { ...d, told: true } : d
+  })
+  next.openRules = next.openRules.map((o) => (!o.told && add(`Open rule: ${o.id} (${o.by}).`) ? { ...o, told: true } : o))
   return { session: next, actions: lines.length ? [{ kind: 'context', text: lines.join('\n') }] : [] }
 }
 
@@ -230,9 +278,10 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
   // The learn decision keeps its own list: it also covers skills the config does not list.
   if (e.tool === 'Skill' && e.skill !== undefined) next.learnCalls = [...(s.learnCalls ?? []), e.skill].slice(-KEEP)
 
-  if (s.compactedSincePrompt) {
+  const trustedRoot = isTrustedRoot(config, e.root)
+  if (s.compactedSincePrompt && !s.paused) {
     next.compactedSincePrompt = false
-    const r = restore(config, next, e.now)
+    const r = restore(config, next, e.now, trustedRoot)
     next.ledger = r.ledger
     if (r.text !== undefined) actions.push({ kind: 'toolContext', text: r.text })
   }
@@ -243,18 +292,18 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
   })
 
   // Violations: `trusted` ones may deny in enforce mode; the rest (untrusted project skills) only record.
-  const trustedRoot = e.root !== undefined && config.trustProjects.includes(e.root)
   const found: { text: string; trusted: boolean }[] = []
 
   if (!next.paused) {
     if (e.tool === 'Agent') {
-      const active = Object.keys(next.needs)
+      // A need only the project file defines counts for a trusted root alone, like its skills.
+      const active = Object.keys(next.needs).filter((n) => trustedRoot || !(config.projectNeeds ?? []).includes(n))
       if (active.length === 0 || BRIEF_SKILLS.test(e.brief ?? '')) next.agentDenied = false
       else if (next.agentDenied) next.agentDenied = false
       else {
         next.agentDenied = true
         found.push({
-          text: `Souffleur: add a line "skills: <names>" (or "skills: none" for mechanical work) to the brief, then retry. Configured skills: ${Object.keys(config.skills).filter((n) => next.ledger[n]?.state !== 'not installed here').join(', ') || 'none'}. Active needs: ${active.join(', ')}. ${PAUSE_HINT}`,
+          text: `Souffleur: add a line "skills: <names>" (or "skills: none" for mechanical work) to the brief, then retry. Configured skills: ${Object.keys(config.skills).filter((n) => next.ledger[n]?.state !== 'not installed here' && (trustedRoot || config.skills[n]!.from !== 'project')).join(', ') || 'none'}. Active needs: ${active.join(', ')}. ${PAUSE_HINT}`,
           trusted: true,
         })
       }
@@ -262,7 +311,7 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
 
     const needed = neededSkills(config, next.needs, next.ruleSkills)
     for (const [name, rule] of Object.entries(config.skills)) {
-      if (!rule.gate || next.ledger[name]?.state === 'not installed here' || !matches(rule.gate, e.tool, e.path, e.tree ?? e.root)) continue
+      if (!rule.gate || next.ledger[name]?.state === 'not installed here' || (e.tool === 'Skill' && e.skill === name) || !matches(rule.gate, e.tool, e.path, e.tree ?? e.root)) continue
       const trusted = rule.from === 'user' || trustedRoot
       const state = next.ledger[name]?.state
       if (needed.includes(name) && state !== undefined && state !== 'loaded' && state !== 'unavailable') {
@@ -312,7 +361,7 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
     for (const [name, rule] of Object.entries(config.skills)) {
       if (!rule.duty || next.ledger[name]?.state === 'not installed here' || !matches(rule.duty.after, e.tool, e.path, e.tree ?? e.root)) continue
       if (next.duties.some((d) => d.skill === name)) continue
-      next.duties = [...next.duties, { skill: name, openedAt: e.now, by: e.path === undefined ? e.tool : `${e.tool} ${e.path}`, denied: false }]
+      next.duties = [...next.duties, { skill: name, openedAt: e.now, by: e.path === undefined ? e.tool : `${e.tool} ${e.path}`, denied: false, told: false }]
     }
   }
   return { session: next, actions }
@@ -327,7 +376,9 @@ function onCommand(config: Config, s: Session, e: Extract<CoreEvent, { type: 'co
     case 'status':
       return reply(s, statusText(config, s, e.now, e.root))
     case 'pause':
-      return reply({ ...s, paused: true }, 'Souffleur: checks are off for this session (no gate, duty or brief denial).')
+      return reply({ ...s, paused: true }, 'Souffleur: paused for this session: no restore requests, no need detection, no turn-end questions, no gate, duty or brief denial. /souffleur resume turns them on again.')
+    case 'resume':
+      return s.paused ? reply({ ...s, paused: false }, 'Souffleur: checks are on again.') : reply(s, 'Souffleur: not paused.')
     case 'need':
       if (!(arg in config.needs)) return reply(s, `Unknown need "${arg}". ${known()}`)
       return reply({ ...s, needs: { ...s.needs, [arg]: { since: e.now, reason: 'command' } } }, `Need ${arg} is on.`)
@@ -337,6 +388,6 @@ function onCommand(config: Config, s: Session, e: Extract<CoreEvent, { type: 'co
       return reply({ ...s, needs: rest }, `Need ${arg} is off.`)
     }
     default:
-      return reply(s, 'Usage: /souffleur [status | need <name> | drop <name> | pause | init | migrate | rule <text> | review | accept <id> | decline <id>]')
+      return reply(s, 'Usage: /souffleur [status | need <name> | drop <name> | pause | resume | init | migrate | rule <text> | review | accept <id> | decline <id>]')
   }
 }

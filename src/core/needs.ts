@@ -4,26 +4,36 @@ export type Classify = (text: string, labels: readonly string[]) => Promise<stri
 
 /**
  * Asks the classifier once per need, in parallel. Returns the needs answered `match` before the budget ends,
- * in the order of `needs`. A rejected call or a call still running at the end counts as no match.
+ * in the order of `needs`. A rejected call, an answer that is neither label, or a call still running at the end
+ * counts as no match and sets `failed`.
  */
-export async function classifyPrompt(
+export async function classifyPromptChecked(
   prompt: string,
   needs: Record<NeedName, string>,
   classify: Classify,
   timeout: (ms: number) => Promise<void>,
   budgetMs = 1500,
-): Promise<NeedName[]> {
+): Promise<{ matched: NeedName[]; failed: boolean }> {
   const matched = new Set<NeedName>()
+  let answered = 0
+  let failed = false
   const calls = Object.entries(needs).map(async ([name, description]) => {
     try {
       const answer = await classify(`Need: ${description}\n\nPrompt: ${prompt}`, ['match', 'no-match'])
       if (answer === 'match') matched.add(name)
+      if (answer === 'match' || answer === 'no-match') answered += 1
+      else failed = true
     } catch {
       // A failing classifier call means no new need for this prompt.
+      failed = true
     }
   })
   await Promise.race([Promise.all(calls), timeout(budgetMs)])
-  return Object.keys(needs).filter((name) => matched.has(name))
+  return { matched: Object.keys(needs).filter((name) => matched.has(name)), failed: failed || answered < calls.length }
+}
+
+export async function classifyPrompt(prompt: string, needs: Record<NeedName, string>, classify: Classify, timeout: (ms: number) => Promise<void>, budgetMs = 1500): Promise<NeedName[]> {
+  return (await classifyPromptChecked(prompt, needs, classify, timeout, budgetMs)).matched
 }
 
 /** Skills with `always`, plus skills whose `need` is active, in config order, then `extra` (skills a rule fired or saw loaded). */

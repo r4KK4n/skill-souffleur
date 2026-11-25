@@ -24,6 +24,8 @@ export type Config = {
   learn: { skills: boolean }
   /** The need names the user file defines: proposals may name only these. */
   userNeeds?: string[]
+  /** The need names only the project file defines: they count only for a trusted root. */
+  projectNeeds?: string[]
 }
 
 /**

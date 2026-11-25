@@ -137,3 +137,10 @@ test('the table has no version notice for a verified or unknown version', () => 
   assert.doesNotMatch(renderTable(config, fresh(config, '2.1.322'), T0), /checked up to/)
   assert.doesNotMatch(renderTable(config, fresh(config), T0), /checked up to/)
 })
+
+test('the table says when a project file is read but not trusted', () => {
+  const c: Config = { ...config, skills: { ...config.skills, 'proj-skill': { always: true, from: 'project' } } }
+  assert.match(renderTable(c, fresh(c), T1, '/work/p'), /not trusted.*trustProjects/s)
+  assert.doesNotMatch(renderTable({ ...c, trustProjects: ['/work/p/'] }, fresh(c), T1, '/work/p'), /not trusted/)
+  assert.doesNotMatch(renderTable(config, fresh(), T1, '/work/p'), /not trusted/)
+})

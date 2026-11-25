@@ -15,7 +15,7 @@ declare module 'claude-code' {
           }
         >
         needs: Record<string, { since: number; reason: string }>
-        duties: { skill: string; openedAt: number; by: string; denied: boolean }[]
+        duties: { skill: string; openedAt: number; by: string; denied: boolean; told?: boolean }[]
         paused: boolean
         id: string
         mainSkillCalls: string[]
@@ -45,6 +45,9 @@ declare module 'claude-code' {
           }
           scope?: 'everywhere' | 'project'
           from: string
+          origin?: string
+          project?: boolean
+          skillHash?: string
         }[]
         declined: string[]
         notesSent: string[]
@@ -52,6 +55,9 @@ declare module 'claude-code' {
         revise: string[]
         proposed: string[]
         rev?: number
+        classifyFails?: number
+        learnFails?: number
+        touched?: number
       }
     }
   }

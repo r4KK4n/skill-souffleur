@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- A project file is report only unless its root is in `trustProjects`: Souffleur no longer asks the model to load its skills, names them in the system prompt or lets its needs deny an `Agent` brief. A project file may define 20 skills and 10 needs; more get an error that names the cap. Duty evidence gets the same length and control character checks as rule evidence, and `trustProjects` ignores trailing slashes.
+- The restore request and the notes of one prompt stay under 10,000 characters. Skills that do not fit are asked for on a later prompt and stay listed in `/souffleur`.
+- The status turns `degraded` after three failed classifier runs or three failed skill reads in a row, and clears after a good one.
+- A skill version counts as read only once its proposals were answered. If the queue is dropped first, the version is read again the next time it loads, three times at most.
+- `/souffleur pause` also stops restore requests, need detection and the turn-end questions. `/souffleur resume` undoes it. A pause is not carried over when a session is resumed.
+- `/souffleur` and every session start read the config files again, so a hand edit applies without a restart.
+- An open duty is mentioned once in the prompt context when it opens.
+- Session copies in the plugin store are stamped, and copies older than 30 days are removed at session start. The README now lists what Souffleur reads and stores.
+- A gate that names the `Skill` tool is rejected when the file is read, and the `Skill` call that loads a gated skill is never denied.
 - Version notice: when Claude Code is newer than the newest version Souffleur was checked on, `/souffleur` shows one line with both versions. The status line stays unchanged.
 - The plugin has a version, `0.1.0`, in `plugin.json` and `marketplace.json`, so `claude plugin update` can find later changes. CONTRIBUTING explains when to raise it.
 - CI runs `claude plugin validate .` and `claude plugin test .` on the verified Claude Code version, and a weekly workflow runs them on the latest one and opens an issue when they fail.

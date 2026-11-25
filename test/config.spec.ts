@@ -333,3 +333,49 @@ test('file-supplied text in error messages is cut to 80 characters', () => {
     for (const e of errors) assert.ok(!e.includes('q'.repeat(81)), e.slice(0, 200))
   }
 })
+
+test('project file: at most 20 skills and 10 needs are read, and the error names the cap', () => {
+  const skills = Object.fromEntries(Array.from({ length: 25 }, (_, i) => [`s${i}`, { always: true }]))
+  const needs = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`n${i}`, `Need ${i}.`]))
+  const { config, errors } = parseConfig(undefined, json({ skills, needs }))
+  assert.equal(Object.keys(config.skills).length, 20)
+  assert.equal(Object.keys(config.needs).length, 10)
+  assert.ok(errors.some((e) => /project config: .*20 skills/.test(e)), errors.join('\n'))
+  assert.ok(errors.some((e) => /project config: .*10 needs/.test(e)), errors.join('\n'))
+  const user = parseConfig(json({ skills, needs }), undefined)
+  assert.equal(Object.keys(user.config.skills).length, 25, 'the user file has no cap')
+})
+
+test('duty evidence gets the same length and control character checks as rule evidence', () => {
+  const duty = (evidence: unknown) => ({ skills: { x: { always: true, duty: { after: { tools: ['Write'] }, evidence } } } })
+  for (const evidence of [{ tool: 'Bash', command: 'a‮b' }, { tool: 'Bash', command: 'x'.repeat(201) }, { tool: 'Ba\nsh' }, { tool: 'T'.repeat(101) }]) {
+    for (const [user, project] of [[json(duty(evidence)), undefined], [undefined, json(duty(evidence))]] as const) {
+      const { config, errors } = parseConfig(user, project)
+      assert.deepEqual(Object.keys(config.skills), [], JSON.stringify(evidence))
+      assert.ok(errors.some((e) => /duty\.evidence/.test(e)), errors.join('\n'))
+    }
+  }
+  assert.deepEqual(parseConfig(json(duty({ tool: 'Bash', command: 'npm test' })), undefined).errors, [])
+})
+
+test('a gate cannot name the Skill tool: the entry is dropped like a skill rule', () => {
+  const { config, errors } = parseConfig(json({ skills: { x: { always: true, gate: { tools: ['Write', 'Skill'] } }, y: { always: true } } }), undefined)
+  assert.deepEqual(Object.keys(config.skills), ['y'])
+  assert.ok(errors.some((e) => /gate/.test(e) && /Skill/.test(e)), errors.join('\n'))
+})
+
+test('trustProjects compares with the same root normalisation as where', async () => {
+  const { isTrustedRoot } = await import('../src/core/config.ts')
+  const { config } = parseConfig(json({ trustProjects: ['/work/a/', '/work/b'] }), undefined)
+  assert.equal(isTrustedRoot(config, '/work/a'), true)
+  assert.equal(isTrustedRoot(config, '/work/a//'), true)
+  assert.equal(isTrustedRoot(config, '/work/b/'), true)
+  assert.equal(isTrustedRoot(config, '/work/c'), false)
+  assert.equal(isTrustedRoot(config, undefined), false)
+  assert.equal(isTrustedRoot({ trustProjects: ['/work/a/'] }, '/work/a'), true, 'a config built by hand is normalised too')
+})
+
+test('project needs are named in the config', () => {
+  const { config } = parseConfig(json({ needs: { a: 'A.' } }), json({ needs: { b: 'B.' } }))
+  assert.deepEqual(config.projectNeeds, ['b'])
+})

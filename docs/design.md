@@ -81,7 +81,7 @@ src/mod/         thin adapter, the only code that imports 'claude-code'
 
 JSON, so the mod needs no parser dependency. A user file `~/.claude/souffleur.json`, optionally extended by a project file `.claude/souffleur.json`.
 
-The project file comes from whatever repository the user opens, so it is untrusted. It may add skills and needs under names the user file does not use; it can never change, remove or shadow a user entry, never set `mode`, and never hold rules or notes. Its gates and duties only report, even in `enforce`, unless the user file lists that project root under `trustProjects`. Each file is validated on its own before the merge: an invalid entry drops that entry with an error, not the whole file, and never touches an entry of the same name in the other file. Names are limited to letters, digits, `:`, `_`, `-` and 64 characters; need texts to one line of 200 characters.
+The project file comes from whatever repository the user opens, so it is untrusted. It may add skills and needs under names the user file does not use; it can never change, remove or shadow a user entry, never set `mode`, and never hold rules or notes. Its gates and duties only report, even in `enforce`, unless the user file lists that project root under `trustProjects` (roots are compared without trailing slashes, as `where` is). For a root that is not trusted, Souffleur also does not ask the model to load the file's skills, does not name them in the system prompt and does not let the file's needs raise the subagent brief check; `/souffleur` lists them and says why. The file may define at most 20 skills and 10 needs; the rest are dropped with an error that names the cap. Each file is validated on its own before the merge: an invalid entry drops that entry with an error, not the whole file, and never touches an entry of the same name in the other file. Names are limited to letters, digits, `:`, `_`, `-` and 64 characters; need texts to one line of 200 characters.
 
 ```json
 {
@@ -147,6 +147,8 @@ Compaction can also happen in the middle of a long turn, when no user prompt fol
 
 Restores run in config order with no size cap. Restoring humanizer, stop-slop and impeccable after a compaction adds roughly 80 KB. The code marks this as a shortcut: add a priority cap if measurements show restores pushing sessions into the next compaction early.
 
+No cap applies to the skills' own text. The request that names the skills is cut at 5,000 characters, and the whole context block of a prompt (request, notes, reminders) at 10,000, because longer hook output is moved to a file. Skills left out stay `absent` or `stale` in `/souffleur` and are asked for on a later prompt.
+
 ### Skills loaded without `skill.prompt`
 
 Some skill text reaches the context through other paths: a plugin's own startup hook (Chisle injects its rules at startup), or the engine's re-attachment after compaction. Souffleur does not see these. A skill can set `"startup": "injected"` in the config; Souffleur then treats it as `loaded` at session start and `stale` after the first compaction, so it neither duplicates the startup text nor misses the loss.
@@ -163,8 +165,8 @@ It holds the rule and the `always` skills from the config, never the changing le
 
 ### Gates and duties
 
-- Gate: on `tool.call` for a configured tool and path, if a skill whose gate matches is needed and not `loaded`, deny with a reason that names the skill and says how to proceed. The model then loads it and retries. `/souffleur pause` turns every denial off for the session: gates, duties, rules and the subagent brief check.
-- Duty: when a call matches `after`, Souffleur records an open duty. A later tool call matching `evidence` closes it. While a duty is open, the next call that matches the skill's gate (writing or publishing the next prototype file, for example) is denied once with the duty named; the retry passes, so a wrong evidence pattern cannot trap the session. This enforces it in the same turn without a paid turn of its own. An open duty at turn end is also listed in the context of the next user prompt.
+- Gate: on `tool.call` for a configured tool and path, if a skill whose gate matches is needed and not `loaded`, deny with a reason that names the skill and says how to proceed. The model then loads it and retries. `/souffleur pause` turns every denial off for the session: gates, duties, rules and the subagent brief check. It also stops restore requests, need detection (no classifier calls), the turn-end questions and the reading of skill texts. `/souffleur resume` undoes it, and a pause is not carried over when a session is resumed. A gate cannot name the `Skill` tool (the entry is dropped with an error), and the `Skill` call that loads a gated skill is never denied.
+- Duty: when a call matches `after`, Souffleur records an open duty. A later tool call matching `evidence` closes it. While a duty is open, the next call that matches the skill's gate (writing or publishing the next prototype file, for example) is denied once with the duty named; the retry passes, so a wrong evidence pattern cannot trap the session. This enforces it in the same turn without a paid turn of its own. An open duty is also mentioned once, with the next user prompt's context, and not again until it closes and opens anew.
 
 ### Rules and notes
 
@@ -200,7 +202,7 @@ A note has no trace and is never checked. A note without `need` goes into the sy
 
 #### Where proposals come from
 
-- Skills. Learning needs a user file (a session that is not set up reads nothing), a person at the prompt (`isInteractive`) and no pause. When the main session loads a skill Souffleur has not read before, a small model reads the text once and proposes at most three rules or notes that have a trace or are standing instructions. A version is the skill file at the load's `path` (read with `$.fs`, capped at 60,000 characters) together with the skill name and an extractor version, so arguments or command output in the computed text do not create new versions; without a path the computed text stands in. A version is read once: its hash is stored in the plugin store under its own key, `souffleur:skill-hash:<hash>`, only after its proposals were queued, as `{ "done": true }`. A read that fails, gets no answer or an answer that does not parse stores a failure count, gives the session its read back, and is tried again on a later load until three failures. A read that finds the queue full leaves the version unmarked. At most five reads start per session (a `/clear` starts a new session with five more), at most twenty proposals wait in the queue and at most six of them come from skill texts. A proposal equal to an existing rule or a declined one is dropped. A slip or a user proposal is asked about before any skill proposal. `"learn": { "skills": false }` turns this source off.
+- Skills. Learning needs a user file (a session that is not set up reads nothing), a person at the prompt (`isInteractive`) and no pause. When the main session loads a skill Souffleur has not read before, a small model reads the text once and proposes at most three rules or notes that have a trace or are standing instructions. A version is the skill file at the load's `path` (read with `$.fs`, capped at 60,000 characters) together with the skill name and an extractor version, so arguments or command output in the computed text do not create new versions; without a path the computed text stands in. A version is marked in the plugin store under its own key, `souffleur:skill-hash:<hash>`: `{ "offers": n }` once its proposals were queued, and `{ "done": true }` when every one of them was answered (yes, no or a request to revise) or when nothing was left to ask because each proposal was known or declined. A queue that is dropped first (the session ends, `/clear`) leaves the version at `offers`, so the next load reads it again, up to three offers. A version whose proposals still wait in the session is not read again. A read that fails, gets no answer or an answer that does not parse stores a failure count, gives the session its read back, and is tried again on a later load until three failures. A read that finds the queue full leaves the version unmarked. Three failed reads or failed classifier runs in a row put an error in the session, so the status shows `degraded`; a good call clears it. At most five reads start per session (a `/clear` starts a new session with five more), at most twenty proposals wait in the queue and at most six of them come from skill texts. A proposal equal to an existing rule or a declined one is dropped. A slip or a user proposal is asked about before any skill proposal. `"learn": { "skills": false }` turns this source off.
 
   What the core does and what the adapter does. The core marks a main-session load: a load with a main `Skill` call or typed name announced before it, or any load while no subagent runs. `skill.prompt` has no `agentId`, so a load by a background subagent that runs while the main session loads nothing itself can be read as a main load; that is a known gap. The adapter reads the file, claims the version in the process, counts the read in the session under the serialised session update, then calls the small model after the hook has answered, with `timeoutMs: 30000`, so a slow or failing call cannot hold up or break `skill.prompt`.
 
@@ -285,13 +287,16 @@ Without a dialog (`claude -p`), both commands print what they would ask, the con
 4. How does the status line render in the desktop and mobile clients?
 5. Plugin skill names: is the `skill.prompt` key `chisle:chisle` or `chisle`?
 
-Items 1 to 5 were answered on 2.1.332; see [background.md](background.md). Item 4 was dropped: the status line is built for the terminal, and `/souffleur` shows the same everywhere. Still open:
+Items 1 to 5 were answered on 2.1.332; see [background.md](background.md). Item 4 was dropped: the status line is built for the terminal, and `/souffleur` shows the same everywhere. Items 7 to 10 were answered on 2.1.332 as well, with the evidence in [background.md](background.md#tests-for-rules-and-notes-claude-code-21332):
 
-6. Does `$.ui.ask` show its dialog in a Remote Control session in the desktop and mobile apps, and does it reject cleanly where nobody can answer?
-7. Does a tool registered with `$.tool.register` reach the model in the main session, and does the model call it when the system prompt section asks?
-8. How long and how reliable is one small-model call over a 40 KB skill text through `$.model.complete`?
-9. Does an automatic compaction (trigger `auto`), including one in the middle of a turn, fire `session.compact` like `/compact` does, and does a `context` entry on a tool result reach the model?
-10. Which API call gives the main repository root from a worktree session?
+7. A tool registered with `$.tool.register` reaches the model in the main session, and the model calls it when the system prompt section asks.
+8. One small-model call over a 43 KB skill text takes about 2 seconds and returns the requested JSON.
+9. An automatic compaction fires `session.compact` with trigger `auto`. A `context` entry on a tool result reaches the model, which may still treat it as untrusted, so a restore request sent that way is a hint, and the gate in `enforce` stays the safety net.
+10. `$.session.repo().root` gives the main working tree in a worktree session, and `$.vcs.detect` gives the worktree itself as `root`.
+
+Still open:
+
+6. Does `$.ui.ask` show its dialog in a Remote Control session in the desktop and mobile apps, and does it reject cleanly where nobody can answer? The dialogs of `init`, `migrate` and the turn-end question were tested with the test kit and in the desktop app's dialog. The `init`, `migrate` and proposal dialogs have not yet run end to end in a live session.
 
 ## Left to the builder
 
