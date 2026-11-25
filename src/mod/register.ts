@@ -7,6 +7,7 @@ import { CHOICE_LABEL, INJECTED_HELP, NOT_SET_UP, SETUP_INTRO, applyChoice, cand
 import type { LoadChoice, NeedText, Plan, StartHooks, Suggestion } from '../core/setup.ts'
 import type { Action, CoreEvent, Session } from '../core/decide.ts'
 import { classifyPrompt } from '../core/needs.ts'
+import { EXTRACT_SYSTEM, MAX_KNOWN, extractPrompt, parseProposals, shouldRead, skillHash } from '../core/learn.ts'
 import { NO, YES_EVERYWHERE, YES_PROJECT, addEntry, answer, describeProposal, enqueue, findProposal, makeProposal, nextQuestion, parseShaped, proposalLines, shapePrompt } from '../core/proposals.ts'
 import { ruleSkillNames, sectionNotes } from '../core/rules.ts'
 import { statusLine } from '../core/status.ts'
@@ -25,6 +26,7 @@ const PROPOSE_SENTENCE =
   ' When something went wrong that a rule would have caught, or the user asks you to remember a rule, call the souffleur_propose tool. Souffleur then asks the user; do not write the rule anywhere yourself.'
 const PROPOSE_TOOL = 'mcp__skill-souffleur__souffleur_propose'
 const DECLINED_KEY = 'souffleur:declined'
+const READ_KEY = 'souffleur:skill-hashes'
 
 // Module variables start over on a reload; the config is read again by `session.start`, which a reload runs.
 let loaded: Loaded | undefined
@@ -808,6 +810,57 @@ async function propose($: Dollar, raw: unknown, from: string): Promise<{ status:
   return { status, id: made.proposal.entry.id }
 }
 
+// --- Learning from skill texts ---
+
+/** Skill versions whose read is under way in this process. */
+const reading = new Set<string>()
+
+async function readKnown($: Dollar): Promise<string[]> {
+  const stored: unknown = await $.store.get(READ_KEY)
+  return Array.isArray(stored) ? stored.filter((h): h is string => typeof h === 'string') : []
+}
+
+/**
+ * Reads one skill text with the small model and queues what it finds. Runs after the hook has answered, so the hook never
+ * waits for the model; every failure ends here. A version counts as read once claimed, and is released again when the
+ * model gave no answer, so a failed call is tried again on the next load (the five-per-session cap still holds).
+ */
+async function learnFrom($: Dollar, skill: string, text: string): Promise<void> {
+  const hash = skillHash(skill, text)
+  let claimed = false
+  try {
+    const l = await serial(async () => {
+      const { l, session } = await current($)
+      const known = await readKnown($)
+      if (reading.has(hash) || !shouldRead(session, l.config, hash, known)) return undefined
+      reading.add(hash)
+      await $.store.set(READ_KEY, [...known, hash].slice(-MAX_KNOWN))
+      await persist($, l, { ...session, skillReads: (session.skillReads ?? 0) + 1 })
+      return l
+    })
+    if (l === undefined) return
+    claimed = true
+    const r = await $.model.complete({ model: 'haiku', system: EXTRACT_SYSTEM, prompt: extractPrompt(skill, text), maxTokens: 1500 })
+    if (!r.isAnswered) throw new Error('the small model gave no answer')
+    claimed = false
+    const found = parseProposals(r.text, skill, l.config)
+    if (found.length === 0) return
+    await update($, (l2, s) => found.reduce((acc, p) => enqueue(l2.config, acc, p).session, s))
+  } catch {
+    if (claimed) {
+      try {
+        await serial(async () => {
+          await $.store.set(READ_KEY, (await readKnown($)).filter((h) => h !== hash))
+        })
+      } catch {
+        // the version stays marked as read
+      }
+    }
+  } finally {
+    reading.delete(hash)
+  }
+}
+
 /** The model may make this many proposals per session. */
 const MODEL_PROPOSALS = 5
 
@@ -961,7 +1014,8 @@ export const register: Register = (on) => {
 
   on('skill.prompt', async ($, e, next) => {
     await safe($, 'skill.prompt', undefined, async () => {
-      await apply($, () => ({ type: 'skill', now: now(), skill: e.skill }))
+      const { actions } = await apply($, () => ({ type: 'skill', now: now(), skill: e.skill, text: e.text }))
+      for (const a of actions) if (a.kind === 'learn') void learnFrom($, a.skill, a.text)
     })
     return next(e)
   })

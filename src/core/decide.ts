@@ -31,6 +31,8 @@ export type Session = {
   /** Field rules that denied and wait for the retry. */
   fieldDenied: string[]
   proposals: Proposal[]
+  /** Skill texts read for proposals in this session. */
+  skillReads?: number
   /** Hashes of declined proposals. */
   declined: string[]
   /** Need notes already sent since the last compaction. */
@@ -47,7 +49,7 @@ export type Session = {
 
 export type CoreEvent =
   | { type: 'start'; now: number; start: 'startup' | 'resume' | 'clear'; version?: string }
-  | { type: 'skill'; now: number; skill: string }
+  | { type: 'skill'; now: number; skill: string; text?: string }
   | { type: 'compact'; now: number; phase: 'before' | 'after'; trigger: string; skipped?: boolean; agentId?: string }
   | { type: 'prompt'; now: number; text: string; fromUser: boolean; matched: NeedName[]; root?: string }
   /** `present` names the arguments the call carries, for field rules. */
@@ -63,6 +65,8 @@ export type CoreEvent =
 
 export type Action =
   | { kind: 'context'; text: string }
+  /** A main-session skill load whose text may be read for proposals; the adapter decides whether to. */
+  | { kind: 'learn'; skill: SkillName; text: string }
   | { kind: 'deny'; reason: string }
   | { kind: 'reply'; text: string }
   | { kind: 'toolContext'; text: string }
@@ -117,8 +121,11 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
       // A resume keeps the ledger: what was loaded stays in the transcript until a compaction.
       if (e.start === 'resume') return { session: e.version === undefined ? s : { ...s, version: e.version }, actions: [] }
       return { session: initSession(config, s.id, e.now, e.start, e.version), actions: [] }
-    case 'skill':
-      return { session: onSkill(config, s, e), actions: [] }
+    case 'skill': {
+      const main = s.mainSkillCalls.includes(e.skill) || s.subagentsRunning === 0
+      const learn = main && config.learn.skills && e.text !== undefined && e.text.trim() !== ''
+      return { session: onSkill(config, s, e), actions: learn ? [{ kind: 'learn', skill: e.skill, text: e.text! }] : [] }
+    }
     case 'compact':
       return { session: onCompact(config, s, e), actions: [] }
     case 'prompt':

@@ -6,6 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- Learn rules from skills: when the main session loads a skill version Souffleur has not read, a small model reads the text in the background and queues at most three rules or notes the skill states as obligations, with source `skill:<name>`. A version is read once, five reads per session at most, and subagent loads are skipped. `"learn": { "skills": false }` in the user file turns it off.
 - Rules and notes in the user file: a rule waits for a skill before a call, requires a field on a call, or requires evidence after a call; a note is a standing instruction for the system prompt section or, with a `need`, for the prompt context. Rules follow `mode`, `/souffleur pause` stops them, and a project file that holds them gets an error.
 - The tool `souffleur_propose` lets the model propose a rule or note when something went wrong or you ask it to remember something. Proposals queue (20 at most), and one question per turn is asked at the end of a turn with `Yes, everywhere`, `Yes, this project only` and `No`.
 - `/souffleur rule <text>`, `/souffleur review`, `/souffleur accept <id> [here|project]` and `/souffleur decline <id>`; they act only when the user types them. Without a dialog proposals stay queued and nothing is written. `/souffleur migrate` queues standing instructions from `CLAUDE.md` and the memory index as note proposals.

@@ -2,6 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import { decide, initSession } from '../core/decide.ts'
 import { parseConfig } from '../core/config.ts'
+import { makeProposal } from '../core/proposals.ts'
 
 const HOME = '/users/test'
 const USER_FILE = `${HOME}/.claude/souffleur.json`
@@ -59,6 +60,11 @@ type Opts = {
   failToolRegister?: boolean
   /** What the small model answers to `/souffleur rule`. */
   shaped?: string
+  /** What the small model answers when it reads a skill text; sees the prompt. Records every call in `skillCalls`. */
+  skillAnswer?: (prompt: string) => string | Promise<string>
+  skillCalls?: string[]
+  /** An Agent tool call stays open until this resolves, as a running subagent keeps it open. */
+  holdAgent?: Promise<void>
 }
 
 /** Answers every call the mod makes on `$`; files maps an absolute path to its text, a missing path throws. */
@@ -134,8 +140,16 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
       },
     } as never
   })
-  on('model.complete', (_, e) => ({ value: { isAnswered: true, text: /Turn the user instruction/.test(String((e as { prompt?: string }).prompt)) ? (opts.shaped ?? '') : (opts.proposals ?? '{"skills":[]}'), usage: {} } }) as never)
-  on('tool.call', (_, e) => {
+  on('model.complete', (_, e) => {
+    const call = e as { system?: string; prompt?: string }
+    if (/checkable obligations/.test(call.system ?? '')) {
+      opts.skillCalls?.push(String(call.prompt))
+      return Promise.resolve(opts.skillAnswer?.(String(call.prompt)) ?? '[]').then((text) => ({ value: { isAnswered: true, text, usage: {} } }) as never)
+    }
+    return { value: { isAnswered: true, text: /Turn the user instruction/.test(String(call.prompt)) ? (opts.shaped ?? '') : (opts.proposals ?? '{"skills":[]}'), usage: {} } } as never
+  })
+  on('tool.call', async (_, e) => {
+    if (e.tool === 'Agent' && opts.holdAgent) await opts.holdAgent
     if (e.tool !== 'AskUserQuestion') return { result: {} }
     const question = (e as unknown as { questions: { question: string }[] }).questions[0]!.question
     asked.push(question)
@@ -1253,4 +1267,129 @@ test('a passage proposal names its file and line, and a project file offers this
   await run($, 'review')
   expect(w.asked[0]).toMatch(/from .*CLAUDE\.md:2/)
   expect(w.options[0]![0]).toBe('Yes, this project only')
+})
+
+// ---- learning from skills ----
+
+const OBLIGATION = 'Always run `npm test` after editing files under src/.'
+const TEST_RULE = { kind: 'rule', after: { tools: ['Edit'], paths: ['src/**'] }, evidence: { tool: 'Bash', command: 'npm test' } }
+const answerWith = (...items: unknown[]) => () => JSON.stringify(items)
+/** Lets the background read finish: the mod does not hand it back to the hook. */
+const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 30))
+const loadSkill = ($: any, skill: string, text = OBLIGATION) => $.skill.prompt({ skill, text, len: text.length, head: text, tail: text })
+const mainLoad = async ($: any, skill: string, text = OBLIGATION) => {
+  await $.tool.call({ tool: 'Skill', skill } as never)
+  const r = await loadSkill($, skill, text)
+  await settle()
+  return r
+}
+
+test('a skill text is read in the background and its proposals land in the queue with source skill:<name>', async ($, on) => {
+  const calls: string[] = []
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', skillCalls: calls, skillAnswer: answerWith(TEST_RULE, { kind: 'note', text: 'Reply in German.' }) })
+  await start($)
+  await mainLoad($, 'writing-guide')
+  expect(calls.length).toBe(1)
+  expect(calls[0]).toMatch(/npm test/)
+  const text = await run($, 'review')
+  expect(text).toMatch(/skill:writing-guide/)
+  expect(text).toMatch(/npm test/)
+  expect(text).toMatch(/Reply in German/)
+  expect(w.writes.length).toBe(0)
+})
+
+test('the same skill text is read once, across sessions', async ($, on) => {
+  const calls: string[] = []
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', skillCalls: calls, skillAnswer: answerWith(TEST_RULE) })
+  await start($)
+  await mainLoad($, 'writing-guide')
+  await mainLoad($, 'writing-guide')
+  expect(calls.length).toBe(1)
+  w.setId('s2')
+  await start($)
+  await mainLoad($, 'writing-guide')
+  expect(calls.length).toBe(1)
+  await mainLoad($, 'writing-guide', `${OBLIGATION} Also lint.`)
+  expect(calls.length).toBe(2)
+})
+
+test('at most five skills are read per session', async ($, on) => {
+  const calls: string[] = []
+  world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', skillCalls: calls })
+  await start($)
+  for (let i = 0; i < 7; i++) await mainLoad($, `skill-${i}`, `Always do thing ${i}.`)
+  expect(calls.length).toBe(5)
+})
+
+test('a subagent load is not read', async ($, on) => {
+  const calls: string[] = []
+  let release = () => {}
+  world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', skillCalls: calls, holdAgent: new Promise<void>((r) => { release = r }) })
+  await start($)
+  const agent = $.tool.call({ tool: 'Agent', prompt: 'x' } as never)
+  await settle()
+  await loadSkill($, 'writing-guide')
+  await settle()
+  expect(calls.length).toBe(0)
+  release()
+  await agent
+})
+
+test('a typed /name load is read', async ($, on) => {
+  const calls: string[] = []
+  world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', skillCalls: calls })
+  await start($)
+  await loadSkill($, 'writing-guide')
+  await settle()
+  expect(calls.length).toBe(1)
+})
+
+test('garbage or oversized model output yields no proposals', async ($, on) => {
+  const answers = ['I cannot help with that.', '{"kind":"rule"', `[${'{"kind":"note","text":"x"},'.repeat(5000)}]`, '[{"kind":"note","text":"a\\nb"}]']
+  const calls: string[] = []
+  world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', skillCalls: calls, skillAnswer: () => answers.shift() ?? '' })
+  await start($)
+  for (let i = 0; i < 4; i++) await mainLoad($, `skill-${i}`, `Always do thing ${i}.`)
+  expect(calls.length).toBe(4)
+  expect(await run($, 'review')).toMatch(/no proposals/)
+  expect(await table($)).not.toMatch(/degraded/)
+})
+
+test('more than three proposals from one skill are cut to three', async ($, on) => {
+  world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', skillAnswer: answerWith(...[1, 2, 3, 4, 5].map((i) => ({ ...TEST_RULE, evidence: { tool: 'Bash', command: `npm test ${i}` } }))) })
+  await start($)
+  await mainLoad($, 'writing-guide')
+  expect((await run($, 'review')).match(/skill:writing-guide/g)?.length).toBe(3)
+})
+
+test('learn.skills false reads nothing', async ($, on) => {
+  const calls: string[] = []
+  world(on, { [USER_FILE]: JSON.stringify({ mode: 'enforce', learn: { skills: false } }) }, { answers: 'reject', skillCalls: calls })
+  await start($)
+  await mainLoad($, 'writing-guide')
+  expect(calls.length).toBe(0)
+})
+
+test('a slow or failing model call never delays or breaks skill.prompt', async ($, on) => {
+  let mode: 'hang' | 'fail' = 'hang'
+  world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', skillAnswer: () => (mode === 'hang' ? new Promise<string>(() => {}) : Promise.reject(new Error('model down'))) })
+  await start($)
+  const first = await Promise.race([loadSkill($, 'writing-guide'), new Promise((resolve) => setTimeout(() => resolve('timeout'), 1000))])
+  expect(first).not.toBe('timeout')
+  mode = 'fail'
+  const second = await loadSkill($, 'other-skill', 'Always do the other thing.')
+  expect(second).toBeDefined()
+  await settle()
+  expect(await table($)).not.toMatch(/degraded/)
+  expect(await run($, 'review')).toMatch(/no proposals/)
+})
+
+test('proposals respect declined hashes, existing rules and the queue', async ($, on) => {
+  const declinedHash = makeProposal(TEST_RULE, 'skill:x', { userNeeds: [] }).proposal!.hash
+  world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', stored: { 'souffleur:declined': [declinedHash] }, skillAnswer: answerWith(TEST_RULE, { kind: 'note', text: 'Reply in German.' }) })
+  await start($)
+  await mainLoad($, 'writing-guide')
+  const text = await run($, 'review')
+  expect(text).not.toMatch(/npm test/)
+  expect(text).toMatch(/Reply in German/)
 })

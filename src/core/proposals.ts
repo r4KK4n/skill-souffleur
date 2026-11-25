@@ -24,7 +24,7 @@ export const OPTIONS = [YES_EVERYWHERE, YES_PROJECT, NO]
 const MAX_NOTE = 500
 
 /** FNV-1a over the UTF-16 code units of the text, 64 bits, as 16 hex digits. No Node crypto in the core. */
-function fnv(text: string): string {
+export function fnv(text: string): string {
   let h = 0xcbf29ce484222325n
   for (let i = 0; i < text.length; i++) {
     h ^= BigInt(text.charCodeAt(i))
