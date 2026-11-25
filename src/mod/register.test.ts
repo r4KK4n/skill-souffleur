@@ -3,6 +3,7 @@ import type { On } from 'claude-code'
 import { decide, initSession } from '../core/decide.ts'
 import { parseConfig } from '../core/config.ts'
 import { makeProposal } from '../core/proposals.ts'
+import { hashKey, skillHash } from '../core/learn.ts'
 
 const HOME = '/users/test'
 const USER_FILE = `${HOME}/.claude/souffleur.json`
@@ -61,8 +62,10 @@ type Opts = {
   /** What the small model answers to `/souffleur rule`. */
   shaped?: string
   /** What the small model answers when it reads a skill text; sees the prompt. Records every call in `skillCalls`. */
-  skillAnswer?: (prompt: string) => string | Promise<string>
+  skillAnswer?: (prompt: string) => string | null | Promise<string | null>
   skillCalls?: string[]
+  /** The whole request of every skill read. */
+  skillRequests?: Record<string, unknown>[]
   /** An Agent tool call stays open until this resolves, as a running subagent keeps it open. */
   holdAgent?: Promise<void>
 }
@@ -78,7 +81,16 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   const asked: string[] = []
   const hidden = new Set<string>()
   const answers = opts.answers === 'reject' ? [] : [...(opts.answers ?? [])]
-  mock.store(on, opts.stored)
+  const storeData: Record<string, unknown> = opts.stored ?? {}
+  on('store.get', (_, e) => ({ value: storeData[e.key] === undefined ? undefined : JSON.parse(JSON.stringify(storeData[e.key])) }) as never)
+  on('store.set', (_, e) => {
+    storeData[e.key] = JSON.parse(JSON.stringify(e.value))
+    return { value: undefined } as never
+  })
+  on('store.delete', (_, e) => {
+    delete storeData[e.key]
+    return { value: undefined } as never
+  })
   const clock = mock.clock(on)
   mock.session(on)
   const options: string[][] = []
@@ -144,7 +156,8 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
     const call = e as { system?: string; prompt?: string }
     if (/checkable obligations/.test(call.system ?? '')) {
       opts.skillCalls?.push(String(call.prompt))
-      return Promise.resolve(opts.skillAnswer?.(String(call.prompt)) ?? '[]').then((text) => ({ value: { isAnswered: true, text, usage: {} } }) as never)
+      opts.skillRequests?.push(e as Record<string, unknown>)
+      return Promise.resolve(opts.skillAnswer ? opts.skillAnswer(String(call.prompt)) : '[]').then((text) => (text === null ? ({ value: { isAnswered: false, usage: {} } } as never) : ({ value: { isAnswered: true, text, usage: {} } } as never)))
     }
     return { value: { isAnswered: true, text: /Turn the user instruction/.test(String(call.prompt)) ? (opts.shaped ?? '') : (opts.proposals ?? '{"skills":[]}'), usage: {} } } as never
   })
@@ -1276,10 +1289,10 @@ const TEST_RULE = { kind: 'rule', after: { tools: ['Edit'], paths: ['src/**'] },
 const answerWith = (...items: unknown[]) => () => JSON.stringify(items)
 /** Lets the background read finish: the mod does not hand it back to the hook. */
 const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 30))
-const loadSkill = ($: any, skill: string, text = OBLIGATION) => $.skill.prompt({ skill, text, len: text.length, head: text, tail: text })
-const mainLoad = async ($: any, skill: string, text = OBLIGATION) => {
+const loadSkill = ($: any, skill: string, text = OBLIGATION, extra: Record<string, unknown> = {}) => $.skill.prompt({ skill, text, len: text.length, head: text, tail: text, ...extra })
+const mainLoad = async ($: any, skill: string, text = OBLIGATION, extra: Record<string, unknown> = {}) => {
   await $.tool.call({ tool: 'Skill', skill } as never)
-  const r = await loadSkill($, skill, text)
+  const r = await loadSkill($, skill, text, extra)
   await settle()
   return r
 }
@@ -1358,7 +1371,7 @@ test('garbage or oversized model output yields no proposals', async ($, on) => {
 test('more than three proposals from one skill are cut to three', async ($, on) => {
   world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', skillAnswer: answerWith(...[1, 2, 3, 4, 5].map((i) => ({ ...TEST_RULE, evidence: { tool: 'Bash', command: `npm test ${i}` } }))) })
   await start($)
-  await mainLoad($, 'writing-guide')
+  await mainLoad($, 'writing-guide', `${OBLIGATION} ${[1, 2, 3, 4, 5].map((i) => `npm test ${i}`).join(' ')}`)
   expect((await run($, 'review')).match(/skill:writing-guide/g)?.length).toBe(3)
 })
 
@@ -1392,4 +1405,172 @@ test('proposals respect declined hashes, existing rules and the queue', async ($
   const text = await run($, 'review')
   expect(text).not.toMatch(/npm test/)
   expect(text).toMatch(/Reply in German/)
+})
+
+// ---- review fixes ----
+
+const hashOf = (name: string, text = OBLIGATION) => skillHash(name, text)
+
+test('nothing is read in a session without a person at the prompt', async ($, on) => {
+  const stored: Record<string, unknown> = {}
+  const calls: string[] = []
+  world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', stored, skillCalls: calls })
+  await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: false })
+  await mainLoad($, 'writing-guide')
+  expect(calls.length).toBe(0)
+  expect(stored[hashKey(hashOf('writing-guide'))]).toBe(undefined)
+})
+
+test('nothing is read when Souffleur is not set up or paused', async ($, on) => {
+  const calls: string[] = []
+  world(on, {}, { answers: 'reject', skillCalls: calls })
+  await start($)
+  await mainLoad($, 'writing-guide')
+  expect(calls.length).toBe(0)
+})
+
+test('nothing is read while paused', async ($, on) => {
+  const calls: string[] = []
+  world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', skillCalls: calls })
+  await start($)
+  await run($, 'pause')
+  await mainLoad($, 'writing-guide')
+  expect(calls.length).toBe(0)
+})
+
+test('the hash is stored per version after the proposals were queued, and not at all when the queue is full', async ($, on) => {
+  const stored: Record<string, unknown> = {}
+  const calls: string[] = []
+  const texts = [0, 1, 2].map((i) => `Always run cmd-${i}-a, cmd-${i}-b and cmd-${i}-c.`)
+  let n = 0
+  world(on, { [USER_FILE]: ENFORCE }, {
+    answers: 'reject',
+    stored,
+    skillCalls: calls,
+    skillAnswer: () => {
+      const i = n++
+      return JSON.stringify(['a', 'b', 'c'].map((x) => ({ kind: 'rule', after: { tools: ['Edit'] }, evidence: { tool: 'Bash', command: `cmd-${i}-${x}` } })))
+    },
+  })
+  await start($)
+  await mainLoad($, 'skill-0', texts[0]!)
+  expect(stored[hashKey(hashOf('skill-0', texts[0]!))]).toEqual({ done: true })
+  await mainLoad($, 'skill-1', texts[1]!)
+  await mainLoad($, 'skill-2', texts[2]!)
+  expect(calls.length).toBe(3)
+  expect(stored[hashKey(hashOf('skill-2', texts[2]!))]).toBe(undefined)
+  expect(stored['souffleur:skill-hashes']).toBe(undefined)
+})
+
+test('a project skill is not read for an untrusted root', async ($, on) => {
+  const calls: string[] = []
+  world(on, { [USER_FILE]: ENFORCE }, { answers: ['No'], skillCalls: calls, skillAnswer: answerWith(TEST_RULE) })
+  await start($)
+  await mainLoad($, 'writing-guide', OBLIGATION, { source: 'projectSettings' })
+  await mainLoad($, 'tool-server', OBLIGATION, { source: 'mcp' })
+  expect(calls.length).toBe(0)
+})
+
+test('a project skill of a trusted root is read, named, and asks for this project first', async ($, on) => {
+  const calls: string[] = []
+  const w = world(on, { [USER_FILE]: JSON.stringify({ mode: 'enforce', trustProjects: ['/work/proj'] }) }, { answers: ['No'], skillCalls: calls, skillAnswer: answerWith(TEST_RULE) })
+  await start($)
+  await mainLoad($, 'writing-guide', OBLIGATION, { source: 'projectSettings' })
+  expect(calls.length).toBe(1)
+  await turnEnd($)
+  expect(w.asked[0]).toMatch(/^Read from a skill's text, not verified: add rule from project skill writing-guide/)
+  expect(w.options[0]![0]).toBe('Yes, this project only')
+})
+
+test('a plugin skill is named in the question', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: ['No'], skillAnswer: answerWith(TEST_RULE) })
+  await start($)
+  await mainLoad($, 'terse-mode', OBLIGATION, { source: 'plugin', pluginName: 'terse' })
+  await turnEnd($)
+  expect(w.asked[0]).toMatch(/from plugin terse \(terse-mode\)/)
+})
+
+test('the model call has a 30 second limit; an unanswered call is released and given up after three tries', async ($, on) => {
+  const stored: Record<string, unknown> = {}
+  const calls: string[] = []
+  const requests: Record<string, unknown>[] = []
+  world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', stored, skillCalls: calls, skillRequests: requests, skillAnswer: () => null })
+  await start($)
+  for (let i = 0; i < 5; i++) await mainLoad($, 'writing-guide')
+  expect(calls.length).toBe(3)
+  expect(requests[0]!.timeoutMs).toBe(30000)
+  expect(stored[hashKey(hashOf('writing-guide'))]).toEqual({ fails: 3 })
+  await mainLoad($, 'other', 'Always run `npm test`.')
+  expect(calls.length).toBe(4)
+})
+
+test('an answer that does not parse counts as a failure; a failed read gives its session slot back', async ($, on) => {
+  const stored: Record<string, unknown> = {}
+  const calls: string[] = []
+  world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', stored, skillCalls: calls, skillAnswer: () => 'I cannot do that.' })
+  await start($)
+  await mainLoad($, 'writing-guide')
+  expect(stored[hashKey(hashOf('writing-guide'))]).toEqual({ fails: 1 })
+  for (let i = 0; i < 4; i++) await mainLoad($, `skill-${i}`, `Always do ${i}.`)
+  expect(calls.length).toBe(5)
+  await mainLoad($, 'skill-last', 'Always do the last thing.')
+  expect(calls.length).toBe(6)
+})
+
+test('the skill file at path decides the version and is what the model reads', async ($, on) => {
+  const calls: string[] = []
+  const file = '/work/proj/.claude/skills/writing-guide/SKILL.md'
+  world(on, { [USER_FILE]: ENFORCE, [file]: 'FILE TEXT: always run `npm test`.' }, { answers: 'reject', skillCalls: calls })
+  await start($)
+  await mainLoad($, 'writing-guide', 'Arguments: first run', { path: file })
+  await mainLoad($, 'writing-guide', 'Arguments: second run', { path: file })
+  expect(calls.length).toBe(1)
+  expect(calls[0]).toMatch(/FILE TEXT/)
+  expect(calls[0]).not.toMatch(/Arguments/)
+  await mainLoad($, 'no-file', 'Always do this.', { path: '/missing/SKILL.md' })
+  expect(calls[1]).toMatch(/Always do this/)
+})
+
+test('two loads of the same new text at once read it once', async ($, on) => {
+  const calls: string[] = []
+  world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', skillCalls: calls, skillAnswer: answerWith(TEST_RULE) })
+  await start($)
+  await $.tool.call({ tool: 'Skill', skill: 'writing-guide' } as never)
+  await $.tool.call({ tool: 'Skill', skill: 'writing-guide' } as never)
+  await Promise.all([loadSkill($, 'writing-guide'), loadSkill($, 'writing-guide')])
+  await settle()
+  expect(calls.length).toBe(1)
+})
+
+test('a single object answer is accepted', async ($, on) => {
+  world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', skillAnswer: () => JSON.stringify(TEST_RULE) })
+  await start($)
+  await mainLoad($, 'writing-guide')
+  expect(await run($, 'review')).toMatch(/npm test/)
+})
+
+test('a skill name with bidi or control characters never reaches the source, the origin or the prompt', async ($, on) => {
+  const calls: string[] = []
+  world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', skillCalls: calls, skillAnswer: answerWith(TEST_RULE) })
+  await start($)
+  await mainLoad($, 'evil\u202e\nname')
+  const text = await run($, 'review')
+  expect(text).not.toMatch(/[\u202e]/)
+  expect(text).toMatch(/skill:evil-/)
+  expect(calls[0]).not.toMatch(/[\u202e]/)
+})
+
+test('a main Skill call for an unlisted skill is read even while a subagent runs', async ($, on) => {
+  const calls: string[] = []
+  let release = () => {}
+  world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', skillCalls: calls, holdAgent: new Promise<void>((r) => { release = r }) })
+  await start($)
+  const agent = $.tool.call({ tool: 'Agent', prompt: 'x' } as never)
+  await settle()
+  await $.tool.call({ tool: 'Skill', skill: 'writing-guide' } as never)
+  await loadSkill($, 'writing-guide')
+  await settle()
+  expect(calls.length).toBe(1)
+  release()
+  await agent
 })

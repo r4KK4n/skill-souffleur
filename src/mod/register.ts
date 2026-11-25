@@ -7,7 +7,7 @@ import { CHOICE_LABEL, INJECTED_HELP, NOT_SET_UP, SETUP_INTRO, applyChoice, cand
 import type { LoadChoice, NeedText, Plan, StartHooks, Suggestion } from '../core/setup.ts'
 import type { Action, CoreEvent, Session } from '../core/decide.ts'
 import { classifyPrompt } from '../core/needs.ts'
-import { EXTRACT_SYSTEM, MAX_KNOWN, extractPrompt, parseProposals, shouldRead, skillHash } from '../core/learn.ts'
+import { EXTRACT_SYSTEM, MAX_SKILL_TEXT, extractPrompt, hashKey, parseAnswer, shouldRead, skillHash, trusted } from '../core/learn.ts'
 import { NO, YES_EVERYWHERE, YES_PROJECT, addEntry, answer, describeProposal, enqueue, findProposal, makeProposal, nextQuestion, parseShaped, proposalLines, shapePrompt } from '../core/proposals.ts'
 import { ruleSkillNames, sectionNotes } from '../core/rules.ts'
 import { statusLine } from '../core/status.ts'
@@ -26,7 +26,6 @@ const PROPOSE_SENTENCE =
   ' When something went wrong that a rule would have caught, or the user asks you to remember a rule, call the souffleur_propose tool. Souffleur then asks the user; do not write the rule anywhere yourself.'
 const PROPOSE_TOOL = 'mcp__skill-souffleur__souffleur_propose'
 const DECLINED_KEY = 'souffleur:declined'
-const READ_KEY = 'souffleur:skill-hashes'
 
 // Module variables start over on a reload; the config is read again by `session.start`, which a reload runs.
 let loaded: Loaded | undefined
@@ -814,50 +813,77 @@ async function propose($: Dollar, raw: unknown, from: string): Promise<{ status:
 
 /** Skill versions whose read is under way in this process. */
 const reading = new Set<string>()
+const READ_TIMEOUT_MS = 30_000
 
-async function readKnown($: Dollar): Promise<string[]> {
-  const stored: unknown = await $.store.get(READ_KEY)
-  return Array.isArray(stored) ? stored.filter((h): h is string => typeof h === 'string') : []
-}
+type LearnAction = Extract<Action, { kind: 'learn' }>
 
 /**
- * Reads one skill text with the small model and queues what it finds. Runs after the hook has answered, so the hook never
- * waits for the model; every failure ends here. A version counts as read once claimed, and is released again when the
- * model gave no answer, so a failed call is tried again on the next load (the five-per-session cap still holds).
+ * Reads one skill with the small model and queues what it finds. Runs after the hook has answered, so the hook never
+ * waits for the model, and every failure ends here. The version is marked done in the plugin store only after its
+ * proposals were queued; a call that fails, gets no answer or gives an unusable one counts a failure for that version
+ * (three end the tries) and gives the session its read back; a full queue leaves the version unmarked, so a later load tries again.
  */
-async function learnFrom($: Dollar, skill: string, text: string): Promise<void> {
-  const hash = skillHash(skill, text)
+async function learnFrom($: Dollar, a: LearnAction): Promise<void> {
+  if (!interactive) return
+  let hash: string | undefined
+  let fails = 0
   let claimed = false
   try {
+    const first = await current($)
+    if (!first.l.setUp || !trusted(a.source, first.l.root, first.l.config)) return
+    let fileText: string | undefined
+    if (a.path !== undefined) {
+      try {
+        if (await $.fs.exists(a.path)) fileText = (await $.fs.read(a.path)).slice(0, MAX_SKILL_TEXT)
+      } catch {
+        // without the file the computed text stands in
+      }
+    }
+    const text = fileText ?? a.text
+    hash = skillHash(a.skill, text)
+    if (reading.has(hash)) {
+      hash = undefined
+      return
+    }
+    reading.add(hash)
+    const key = hashKey(hash)
     const l = await serial(async () => {
       const { l, session } = await current($)
-      const known = await readKnown($)
-      if (reading.has(hash) || !shouldRead(session, l.config, hash, known)) return undefined
-      reading.add(hash)
-      await $.store.set(READ_KEY, [...known, hash].slice(-MAX_KNOWN))
+      const stored = await $.store.get(key)
+      if (!l.setUp || !interactive || !shouldRead(session, l.config, stored)) return undefined
+      fails = typeof stored === 'object' && stored !== null && typeof (stored as { fails?: unknown }).fails === 'number' ? (stored as { fails: number }).fails : 0
       await persist($, l, { ...session, skillReads: (session.skillReads ?? 0) + 1 })
       return l
     })
     if (l === undefined) return
     claimed = true
-    const r = await $.model.complete({ model: 'haiku', system: EXTRACT_SYSTEM, prompt: extractPrompt(skill, text), maxTokens: 1500 })
-    if (!r.isAnswered) throw new Error('the small model gave no answer')
+    const nonce = Math.random().toString(36).slice(2, 10)
+    const r = await $.model.complete({ model: 'haiku', system: EXTRACT_SYSTEM, prompt: extractPrompt(a.skill, text, nonce), maxTokens: 1500, timeoutMs: READ_TIMEOUT_MS })
+    const origin = { name: a.skill, ...(a.source === undefined ? {} : { source: a.source }), ...(a.pluginName === undefined ? {} : { pluginName: a.pluginName }) }
+    const found = r.isAnswered ? parseAnswer(r.text, origin, l.config, text) : undefined
+    if (found === undefined) throw new Error('no usable answer')
     claimed = false
-    const found = parseProposals(r.text, skill, l.config)
-    if (found.length === 0) return
-    await update($, (l2, s) => found.reduce((acc, p) => enqueue(l2.config, acc, p).session, s))
+    let full = false
+    if (found.length > 0) await update($, (l2, s) => found.reduce((acc, p) => {
+      const q = enqueue(l2.config, acc, p)
+      if (q.status === 'full') full = true
+      return q.session
+    }, s))
+    if (!full) await $.store.set(key, { done: true })
   } catch {
-    if (claimed) {
+    if (claimed && hash !== undefined) {
       try {
         await serial(async () => {
-          await $.store.set(READ_KEY, (await readKnown($)).filter((h) => h !== hash))
+          const { l, session } = await current($)
+          await persist($, l, { ...session, skillReads: Math.max(0, (session.skillReads ?? 0) - 1) })
+          await $.store.set(hashKey(hash!), { fails: fails + 1 })
         })
       } catch {
-        // the version stays marked as read
+        // the version stays as it was
       }
     }
   } finally {
-    reading.delete(hash)
+    if (hash !== undefined) reading.delete(hash)
   }
 }
 
@@ -1014,8 +1040,8 @@ export const register: Register = (on) => {
 
   on('skill.prompt', async ($, e, next) => {
     await safe($, 'skill.prompt', undefined, async () => {
-      const { actions } = await apply($, () => ({ type: 'skill', now: now(), skill: e.skill, text: e.text }))
-      for (const a of actions) if (a.kind === 'learn') void learnFrom($, a.skill, a.text)
+      const { actions } = await apply($, () => ({ type: 'skill', now: now(), skill: e.skill, text: e.text, ...(e.source === undefined ? {} : { source: e.source }), ...(e.pluginName === undefined ? {} : { pluginName: e.pluginName }), ...(e.path === undefined ? {} : { path: e.path }) }))
+      for (const a of actions) if (a.kind === 'learn') void learnFrom($, a)
     })
     return next(e)
   })

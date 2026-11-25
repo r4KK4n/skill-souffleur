@@ -17,6 +17,8 @@ export type Proposal = {
 }
 
 export const QUEUE_CAP = 20
+/** At most this many proposals that came from skill texts wait at once. */
+export const SKILL_QUEUE_CAP = 6
 export const YES_EVERYWHERE = 'Yes, everywhere'
 export const YES_PROJECT = 'Yes, this project only'
 export const NO = 'No'
@@ -65,7 +67,15 @@ export function enqueue(config: Config, s: Session, p: Proposal): { session: Ses
   const known = [...config.rules.map((r) => hashEntry('rule', r)), ...config.notes.map((n) => hashEntry('note', n)), ...s.proposals.map((q) => q.hash)]
   if (known.includes(p.hash)) return { session: s, status: 'duplicate' }
   if (s.proposals.length >= QUEUE_CAP) return { session: s, status: 'full' }
-  return { session: { ...s, proposals: [...s.proposals, p] }, status: 'queued' }
+  const fromSkill = (q: Proposal) => q.from.startsWith('skill:')
+  if (fromSkill(p)) {
+    if (s.proposals.filter(fromSkill).length >= SKILL_QUEUE_CAP) return { session: s, status: 'full' }
+    return { session: { ...s, proposals: [...s.proposals, p] }, status: 'queued' }
+  }
+  // A slip or the user's own words are asked about before anything a skill text suggested.
+  const at = s.proposals.findIndex(fromSkill)
+  const proposals = at < 0 ? [...s.proposals, p] : [...s.proposals.slice(0, at), p, ...s.proposals.slice(at)]
+  return { session: { ...s, proposals }, status: 'queued' }
 }
 
 /** The short form of the entry a dialog and a listing show. */
@@ -76,7 +86,9 @@ export function nextQuestion(s: Session): { hash: string; question: string; opti
   const p = s.proposals[0]
   if (p === undefined) return undefined
   const from = p.origin === undefined ? '' : ` from ${p.origin}`
-  return { hash: p.hash, question: `Add ${p.kind}${from}: ${describeProposal(p)}?`, options: p.project ? [YES_PROJECT, YES_EVERYWHERE, NO] : [...OPTIONS] }
+  const caution = p.from.startsWith('skill:') ? "Read from a skill's text, not verified: " : ''
+  const head = caution === '' ? 'Add' : 'add'
+  return { hash: p.hash, question: `${caution}${head} ${p.kind}${from}: ${describeProposal(p)}?`, options: p.project ? [YES_PROJECT, YES_EVERYWHERE, NO] : [...OPTIONS] }
 }
 
 /** The proposal an id (the entry id or the hash) names. */
@@ -100,6 +112,10 @@ export function answer(config: Config, s: Session, hash: string, label: string, 
     const entry = label === YES_PROJECT ? { ...p.entry, where: normRoot(root!) } : { ...p.entry }
     const fresh = p.kind === 'note' && (entry as Note).need === undefined ? [...s.freshNotes, entry.id] : s.freshNotes
     return { session: { ...s, proposals: rest, freshNotes: fresh }, write: { kind: p.kind, entry } }
+  }
+  if (p.from.startsWith('skill:')) {
+    const revise = `Souffleur: the user answered proposal ${p.entry.id} with a request to revise it: ${clip(label.trim())}. Call souffleur_propose again with the revised ${p.kind}.`
+    return { session: { ...s, proposals: rest, revise: [...s.revise, revise] }, revise }
   }
   const revise = `Souffleur: the user answered a proposal ("${clip(describeProposal(p))}") with a request to revise it: ${clip(label.trim())}. Call souffleur_propose again with the revised ${p.kind}.`
   return { session: { ...s, proposals: rest, revise: [...s.revise, revise] }, revise }

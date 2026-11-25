@@ -7,22 +7,51 @@ import type { Config } from './types.ts'
 export const MAX_PROPOSALS = 3
 /** At most this many skill texts are read per session. */
 export const MAX_READS = 5
+/** A skill version whose read failed this many times is given up. */
+export const MAX_FAILS = 3
 /** The part of a skill text the small model sees. */
 export const MAX_SKILL_TEXT = 60_000
 /** A model answer longer than this is not read. */
 const MAX_ANSWER = 20_000
-/** How many hashes the plugin store keeps. */
-export const MAX_KNOWN = 500
+/** A note from a skill is at most this long, as the prompt says. */
+const MAX_SKILL_NOTE = 300
+/** Changes when the prompt or the checks change enough that old reads should not count. */
+const EXTRACTOR_VERSION = 1
 
-/** One skill version: name and text, FNV-1a, 16 hex digits. */
-export const skillHash = (name: string, text: string): string => fnv(`${name}\n${text}`)
+/** One skill version: extractor version, name and text, FNV-1a, 16 hex digits. */
+export const skillHash = (name: string, text: string): string => fnv(`v${EXTRACTOR_VERSION}\n${name}\n${text}`)
+
+/** The plugin store key that holds the state of one skill version. */
+export const hashKey = (hash: string): string => `souffleur:skill-hash:${hash}`
+
+/** What a skill load tells about the skill: its name and where it comes from. */
+export type SkillOrigin = { name: string; source?: string; pluginName?: string }
+
+const slug = (text: string, max = 64): string => text.replace(/[^A-Za-z0-9:_-]/g, '-').slice(0, max)
 
 /** The skill name as it may appear in a source (`skill:<name>`). */
-export const sourceOf = (name: string): string => `skill:${name.replace(/[^A-Za-z0-9:_-]/g, '-').slice(0, 64)}`
+export const sourceOf = (name: string): string => `skill:${slug(name)}`
 
-/** Whether this load is read: the source is on, the version is new, and the session has reads left. */
-export function shouldRead(s: Pick<Session, 'skillReads'>, config: Pick<Config, 'learn'>, hash: string, known: readonly string[]): boolean {
-  return config.learn.skills && (s.skillReads ?? 0) < MAX_READS && !known.includes(hash)
+/** The words the dialog shows for the origin, built from the same characters as the source. */
+export function originOf(o: SkillOrigin): { origin: string; project?: true } {
+  const name = slug(o.name)
+  if (o.source === 'projectSettings') return { origin: `project skill ${name}`, project: true }
+  if (o.source === 'plugin') return { origin: o.pluginName === undefined ? `plugin skill ${name}` : `plugin ${slug(o.pluginName)} (${name})` }
+  if (o.source === 'mcp') return { origin: `mcp skill ${name}` }
+  return { origin: `skill ${name}` }
+}
+
+/** A project's or an MCP server's skill is read only for a root the user trusts. */
+export function trusted(source: string | undefined, root: string, config: Pick<Config, 'trustProjects'>): boolean {
+  return source === 'projectSettings' || source === 'mcp' ? config.trustProjects.includes(root) : true
+}
+
+/** What the plugin store holds under a version's key: `{ done: true }` or `{ fails: n }`. */
+export function shouldRead(s: Pick<Session, 'skillReads'>, config: Pick<Config, 'learn'>, stored: unknown): boolean {
+  if (!config.learn.skills || (s.skillReads ?? 0) >= MAX_READS) return false
+  if (typeof stored !== 'object' || stored === null) return true
+  const { done, fails } = stored as { done?: unknown; fails?: unknown }
+  return done !== true && !(typeof fails === 'number' && fails >= MAX_FAILS)
 }
 
 export const EXTRACT_SYSTEM = [
@@ -32,36 +61,91 @@ export const EXTRACT_SYSTEM = [
   'A rule has a trace Souffleur can see, in one of three shapes:',
   '{"kind":"rule","before":{"tools":["Agent"]},"skill":"<skill that must be loaded before a matching call>"}',
   '{"kind":"rule","before":{"tools":["Agent"]},"field":"<argument the call must carry, for example model>"}',
-  '{"kind":"rule","after":{"tools":["Edit"],"paths":["src/**"]},"evidence":{"tool":"Bash","command":"npm test"}}',
-  'A standing instruction without such a trace is a note: {"kind":"note","text":"<one line, at most 300 characters>"}.',
+  '{"kind":"rule","after":{"tools":["Edit"],"paths":["src/**"]},"evidence":{"tool":"Bash","command":"<a command that appears word for word in the skill text>"}}',
+  `A standing instruction without such a trace is a note: {"kind":"note","text":"<one line, at most ${MAX_SKILL_NOTE} characters>"}.`,
 ].join('\n')
 
-/** The prompt for one skill. */
-export const extractPrompt = (name: string, text: string): string => `Skill: ${name}\n\n${text.slice(0, MAX_SKILL_TEXT)}`
+/** The prompt for one skill: the text sits between tags whose name carries a random suffix the text cannot know. */
+export function extractPrompt(name: string, text: string, nonce: string): string {
+  const tag = `skill-text-${slug(nonce, 16)}`
+  const body = text.slice(0, MAX_SKILL_TEXT).split(`</${tag}>`).join('')
+  return `Skill: ${slug(name)}\nThe skill text is between <${tag}> and </${tag}>.\n<${tag}>\n${body}\n</${tag}>`
+}
 
-/** The proposals in a model answer: tolerant about JSON in prose, strict about each item, at most three. */
-export function parseProposals(raw: string, name: string, config: Pick<Config, 'userNeeds'>): Proposal[] {
-  if (raw.length > MAX_ANSWER) return []
-  const from = sourceOf(name)
-  for (const [open, close] of [['[', ']'], ['{', '}']] as const) {
-    const start = raw.indexOf(open)
-    const end = raw.lastIndexOf(close)
-    if (start < 0 || end <= start) continue
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(raw.slice(start, end + 1))
-    } catch {
-      continue
+/** Every JSON value in the text that starts at a bracket and closes, in order, at most 30 starts. */
+function candidates(raw: string): unknown[] {
+  const found: unknown[] = []
+  let starts = 0
+  for (let i = 0; i < raw.length && starts < 30; i++) {
+    if (raw[i] !== '[' && raw[i] !== '{') continue
+    starts++
+    let depth = 0
+    let inString = false
+    for (let j = i; j < raw.length; j++) {
+      const c = raw[j]!
+      if (inString) {
+        if (c === '\\') j++
+        else if (c === '"') inString = false
+      } else if (c === '"') inString = true
+      else if (c === '[' || c === '{') depth++
+      else if ((c === ']' || c === '}') && --depth === 0) {
+        try {
+          found.push(JSON.parse(raw.slice(i, j + 1)))
+        } catch {
+          // not JSON: the next start
+        }
+        break
+      }
     }
-    const list = Array.isArray(parsed) ? parsed : typeof parsed === 'object' && parsed !== null && Array.isArray((parsed as { proposals?: unknown }).proposals) ? (parsed as { proposals: unknown[] }).proposals : undefined
+  }
+  return found
+}
+
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
+
+/** The items of an answer shape: a list, `{ proposals: [...] }` or one object with `kind`. */
+function itemsOf(v: unknown): unknown[] | undefined {
+  if (Array.isArray(v)) return v
+  if (isObject(v) && Array.isArray(v.proposals)) return v.proposals
+  if (isObject(v) && typeof v.kind === 'string') return [v]
+  return undefined
+}
+
+/** A skill's own words must not steer Souffleur: no entry may name it or its tool. */
+const mentionsSouffleur = (item: unknown): boolean => /souffleur/i.test(JSON.stringify(item))
+
+function acceptable(item: unknown, skillText: string): boolean {
+  if (!isObject(item) || mentionsSouffleur(item)) return false
+  if (item.kind === 'note') return typeof item.text !== 'string' || item.text.length <= MAX_SKILL_NOTE
+  const ev = item.evidence
+  if (isObject(ev) && ev.command !== undefined) return typeof ev.command === 'string' && skillText.includes(ev.command)
+  return true
+}
+
+/**
+ * The proposals in a model answer, at most three: tolerant about JSON inside prose, strict about each item (the parsers of
+ * the user file, plus the limits for skill text). `undefined` when nothing in the answer has an answer shape, as opposed to an empty list.
+ */
+export function parseAnswer(raw: string, o: SkillOrigin, config: Pick<Config, 'userNeeds'>, skillText: string): Proposal[] | undefined {
+  if (raw.length > MAX_ANSWER) return undefined
+  const from = sourceOf(o.name)
+  const where = originOf(o)
+  let shaped = false
+  for (const value of candidates(raw)) {
+    const list = itemsOf(value)
     if (list === undefined) continue
+    shaped = true
     const out: Proposal[] = []
     for (const item of list.slice(0, 20)) {
+      if (!acceptable(item, skillText)) continue
       const made = makeProposal(item, from, config)
-      if (made.proposal !== undefined && !out.some((p) => p.hash === made.proposal!.hash)) out.push({ ...made.proposal, origin: `skill ${name.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 64)}` })
+      if (made.proposal !== undefined && !out.some((p) => p.hash === made.proposal!.hash)) out.push({ ...made.proposal, ...where })
       if (out.length === MAX_PROPOSALS) break
     }
-    return out
+    if (out.length > 0) return out
   }
-  return []
+  return shaped ? [] : undefined
 }
+
+/** `parseAnswer` where an unusable answer is no proposals. */
+export const parseProposals = (raw: string, o: SkillOrigin, config: Pick<Config, 'userNeeds'>, skillText: string): Proposal[] => parseAnswer(raw, o, config, skillText) ?? []
