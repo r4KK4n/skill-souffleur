@@ -1,6 +1,7 @@
 /** What `/souffleur migrate` works with. Pure functions only: the adapter reads, asks and writes. */
 
-export type HookOverlap = { event: string; matcher?: string; command: string; index: [number, number]; why: string; skill?: string }
+/** `skill` is the first skill the hook names, `skills` all of them. */
+export type HookOverlap = { event: string; matcher?: string; command: string; index: [number, number]; why: string; skill?: string; skills?: string[] }
 export type Passage = { file: string; line: number; text: string }
 
 const MAX_PASSAGES = 20
@@ -37,8 +38,8 @@ function names(text: string, skill: string, allowShort: boolean): boolean {
   })
 }
 
-/** The first of the user's configured `skills` that `text` names, if any. */
-const namedSkill = (text: string, skills: string[]): string | undefined => skills.find((s) => names(text, s, true))
+/** Every one of the user's configured `skills` that `text` names. */
+const namedSkills = (text: string, skills: string[]): string[] => skills.filter((s) => names(text, s, true))
 
 const tokens = (command: string) => command.split(/\s+/).map((t) => t.replace(/^["']+|["']+$/g, '')).filter((t) => t !== '' && !t.includes('://'))
 
@@ -46,9 +47,15 @@ const tokens = (command: string) => command.split(/\s+/).map((t) => t.replace(/^
  * The installed skill (not configured) a command points at: its full `plugin:skill` name, or its name inside a
  * script file name (a token with `/` or `.`). Plain words never count, so `notify-send "ready for review"` is not about a skill `review`.
  */
-function installedMatch(command: string, installedOnly: string[]): string | undefined {
+function installedMatches(command: string, installedOnly: string[]): string[] {
   const files = tokens(command).filter((t) => /[/.]/.test(t))
-  return installedOnly.find((skill) => (skill.includes(':') && command.includes(skill)) || files.some((t) => names(t, skill, false)))
+  return installedOnly.filter((skill) => (skill.includes(':') && command.includes(skill)) || files.some((t) => names(t, skill, false)))
+}
+
+/** A configured skill named by a script file name (a token with `/` or `.`) or by its full `plugin:skill` name: a firm match. A bare word is only a guess. */
+function firmlyNamed(command: string, skill: string): boolean {
+  if (skill.includes(':') && command.includes(skill)) return true
+  return tokens(command).some((t) => /[/.]/.test(t) && names(t, skill, true))
 }
 
 export const isGuess = (o: HookOverlap): boolean => o.why.startsWith('guess:')
@@ -84,16 +91,20 @@ export function findHookOverlaps(settings: unknown, configured: string[], instal
       group.hooks.forEach((hook, h) => {
         if (!isObject(hook) || typeof hook.command !== 'string') return
         const command = hook.command
-        const bySkill = namedSkill(command, configured) ?? (matcher === undefined ? undefined : namedSkill(matcher, configured))
-        const byInstalled = bySkill === undefined ? installedMatch(command, installedOnly) : undefined
+        const inMatcher = matcher === undefined ? [] : namedSkills(matcher, configured)
+        const inCommand = namedSkills(command, configured)
+        const bySkill = [...new Set([...inCommand, ...inMatcher])]
+        const byInstalled = bySkill.length === 0 ? installedMatches(command, installedOnly) : []
         const word = scriptName(command)
         let why: string | undefined
-        if (bySkill !== undefined) why = `names the skill ${bySkill}`
-        else if (byInstalled !== undefined) why = `guess: the script name contains ${byInstalled}`
+        if (bySkill.length) {
+          const firm = bySkill.every((x) => inMatcher.includes(x) || firmlyNamed(command, x))
+          why = firm ? `names the skill ${bySkill.join(', ')}` : `guess: the command mentions ${bySkill.join(', ')}`
+        } else if (byInstalled.length) why = `guess: the script name contains ${byInstalled.join(', ')}`
         else if (word !== undefined) why = `guess: the script name contains ${word}`
         if (why === undefined) return
-        const skill = bySkill ?? byInstalled
-        found.push({ event, ...(matcher === undefined ? {} : { matcher }), command, index: [g, h], why, ...(skill === undefined ? {} : { skill }) })
+        const skills = bySkill.length ? bySkill : byInstalled
+        found.push({ event, ...(matcher === undefined ? {} : { matcher }), command, index: [g, h], why, ...(skills.length ? { skill: skills[0]!, skills } : {}) })
       })
     })
   }
@@ -126,7 +137,7 @@ export function findPassages(files: { file: string; text: string }[], configured
     const lines = text.split(/\r\n|\r|\n/)
     for (let i = 0; i < lines.length && out.length < max; i++) {
       const line = lines[i]!.trim()
-      if (line && LOADING_WORDS.test(line) && namedSkill(line, configuredSkills) !== undefined) out.push({ file, line: i + 1, text: line.length > MAX_LINE ? `${line.slice(0, MAX_LINE)}...` : line })
+      if (line && LOADING_WORDS.test(line) && namedSkills(line, configuredSkills).length > 0) out.push({ file, line: i + 1, text: line.length > MAX_LINE ? `${line.slice(0, MAX_LINE)}...` : line })
     }
   }
   return out
@@ -140,14 +151,39 @@ export function passageLines(passages: Passage[], max = MAX_PASSAGES): string[] 
 
 export const describeHook = (o: HookOverlap): string => `${o.event}${o.matcher === undefined ? '' : ` [${o.matcher}]`}: ${o.command} (${o.why})`
 
+/**
+ * A warning when turning the hook off could leave something without reminders: a skill it names is not in `watched`
+ * (the skills of the user file), the match is only a guess, or the hook names no skill at all, so it may serve a skill
+ * of another project or a rules file.
+ */
+export function watchWarning(o: HookOverlap, watched: string[]): string | undefined {
+  const named = o.skills ?? (o.skill === undefined ? [] : [o.skill])
+  const unwatched = named.filter((x) => !watched.includes(x))
+  if (unwatched.length) return `Souffleur does not watch ${unwatched.join(', ')} yet; turning this off leaves ${unwatched.length === 1 ? 'it' : 'them'} without reminders.`
+  if (!isGuess(o)) return undefined
+  return 'Souffleur cannot tell which skill this reloads. If it serves a skill of another project or a rules file, Souffleur does not watch it, and turning this off leaves it without reminders.'
+}
+
+/** The dialog for one hook. With a warning, `Keep` comes first and the question gives the warning instead of the claim that Souffleur does the job. */
+export function hookQuestion(o: HookOverlap, watched: string[]): { text: string; options: string[] } {
+  const warning = watchWarning(o, watched)
+  const rest = ['Show me what to do', 'Stop']
+  return warning === undefined
+    ? { text: `Turn off the ${describeHook(o)} hook? Souffleur now does this job.`, options: ['Turn off', 'Keep', ...rest] }
+    : { text: `${warning} Turn off the ${describeHook(o)} hook?`, options: ['Keep', 'Turn off', ...rest] }
+}
+
 /** Manual steps for one hook, for the `Show me what to do` answer and the no-dialog text. */
 export const hookSteps = (o: HookOverlap, settingsPath: string): string =>
   `Remove the ${o.event} hook "${o.command}" from ${settingsPath} (copy the file first). If the script is only used for this, delete it too.`
 
 /** The text `/souffleur migrate` returns when it cannot ask: the explanation, hooks and steps; nothing is changed. */
-export function migrateSteps(a: { hooks: HookOverlap[]; passages: Passage[]; settingsPath: string }): string {
+export function migrateSteps(a: { hooks: HookOverlap[]; passages: Passage[]; settingsPath: string; watched?: string[] }): string {
   const out = [MIGRATE_INTRO, '', 'No dialog is available here, so nothing was changed.', '']
-  if (a.hooks.length) out.push('Hooks that do what Souffleur now does:', ...a.hooks.map((o) => `- ${describeHook(o)}`), '')
+  if (a.hooks.length) out.push('Hooks that do what Souffleur now does:', ...a.hooks.map((o) => {
+      const warning = a.watched === undefined ? undefined : watchWarning(o, a.watched)
+      return `- ${describeHook(o)}${warning === undefined ? '' : ` Warning: ${warning}`}`
+    }), '')
   else out.push('No overlapping hooks found.', '')
   if (a.passages.length) out.push('Standing instructions that name a configured skill (Souffleur never edits these):', ...passageLines(a.passages), '')
   out.push('Steps:')

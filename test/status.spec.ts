@@ -111,3 +111,16 @@ test('table cells escape backslashes, pipes and line breaks', () => {
   s.ledger['writing-guide'] = { ...s.ledger['writing-guide'], state: 'loaded', reason: 'a\\|b\r\nc' }
   assert.match(renderTable(config, s, T0), /^\| writing-guide \| loaded \| \d\d:\d\d \| a\\\\\\\|b c \|$/m)
 })
+
+test('status line counts skills not installed here separately', () => {
+  const s0 = fresh()
+  const s = decide(config, s0, { type: 'installed', now: T1, names: ['writing-guide'] }).session
+  assert.equal(statusLine(s, 'enforce'), '0 loaded, 3 not installed here')
+  assert.match(renderTable(config, s, T1), /\| ui-checklist \| not installed here \|/)
+})
+
+test('open duties of a skill not installed here are not listed', () => {
+  const s0 = decide(config, fresh(), { type: 'installed', now: T1, names: ['writing-guide'] }).session
+  const s = { ...s0, duties: [{ skill: 'ui-checklist', openedAt: T1, by: 'Write', denied: false }] }
+  assert.doesNotMatch(renderTable(config, s, T1), /Open duties/)
+})

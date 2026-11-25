@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { compacted, initLedger, requested, skillLoaded } from '../src/core/ledger.ts'
+import { compacted, initLedger, markInstalled, requested, skillLoaded, syncLedger } from '../src/core/ledger.ts'
 import type { Config } from '../src/core/types.ts'
 import { loadFixture } from './fixtures.ts'
 
@@ -135,4 +135,47 @@ test('replays compact-in-process.json: bigtest ends stale', () => {
   }
   assert.equal(l.bigtest.state, 'stale')
   assert.equal(l.bigtest.lastCompactAt, 73459)
+})
+
+test('syncLedger adds new skills as absent and drops removed ones', () => {
+  let l = initLedger(config, 100, 'clear')
+  l = skillLoaded(l, 'plain', 110, 'skill.prompt')
+  const next: Config = { ...config, skills: { plain: config.skills.plain!, fresh: { need: 'ui', from: 'user' } } }
+  const synced = syncLedger(l, next, 200)
+  assert.deepEqual(Object.keys(synced).sort(), ['fresh', 'plain'])
+  assert.equal(synced.fresh.state, 'absent')
+  assert.equal(synced.fresh.since, 200)
+  assert.equal(synced.plain.state, 'loaded')
+  assert.equal(synced.plain.since, 110)
+  assert.equal('inj' in synced, false)
+})
+
+test('markInstalled sets skills missing from the list to not installed here and back', () => {
+  let l = initLedger(config, 100, 'clear')
+  l = markInstalled(l, ['plain'], 150)
+  assert.equal(l.inj.state, 'not installed here')
+  assert.equal(l.plain.state, 'absent')
+  l = markInstalled(l, ['plain', 'inj'], 160)
+  assert.equal(l.inj.state, 'absent')
+})
+
+test('markInstalled treats an empty list as unknown and never touches a loaded skill', () => {
+  let l = initLedger(config, 100, 'startup')
+  assert.equal(markInstalled(l, [], 150), l)
+  l = skillLoaded(l, 'plain', 120, 'skill.prompt')
+  l = markInstalled(l, ['other'], 150)
+  assert.equal(l.plain.state, 'loaded')
+})
+
+test('markInstalled matches a bare name with a plugin name either way, but not two different plugins', () => {
+  const c: Config = { mode: 'observe', needs: {}, trustProjects: [], skills: { plan: { always: true, from: 'user' }, 'flow:check': { always: true, from: 'user' }, 'a:thing': { always: true, from: 'user' } } }
+  const l = markInstalled(initLedger(c, 0, 'clear'), ['flow:plan', 'check', 'b:thing'], 5)
+  assert.equal(l.plan.state, 'absent')
+  assert.equal(l['flow:check'].state, 'absent')
+  assert.equal(l['a:thing'].state, 'not installed here')
+})
+
+test('markInstalled also moves a skill injected at startup that the list lacks', () => {
+  const l = markInstalled(initLedger(config, 0, 'startup'), ['plain'], 5)
+  assert.equal(l.inj.state, 'not installed here')
 })

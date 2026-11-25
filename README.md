@@ -106,11 +106,11 @@ A skill with `"always": true` is needed from the first turn. A skill with `"need
 `/souffleur init` can run at any time: after install, when you add a skill, or when one behaves differently. It asks about the skills in your user file first, then the skills one of your hooks reloads, then up to ten more that a small model picks from the descriptions of all installed skills. A skill that only a project file configures is listed and not asked, because `init` writes the user file. You answer one dialog per skill:
 
 - `From the start`: the skill is needed from the first turn, and Souffleur asks for it after every compaction.
-- `Injected by its plugin`: a plugin puts the text in at session start itself, so Souffleur counts it as loaded and asks for it only after a compaction or a clear. Offered for plugin skills (`plugin:skill`) only.
+- `Loaded by its own plugin at start (rare)`: a plugin puts the text in at session start itself, for example with a `SessionStart` hook, so Souffleur counts it as loaded and asks for it only after a compaction or a clear. Offered last, for plugin skills (`plugin:skill`) only. Pick it for a plugin that merely lists its skills and the status will say loaded when it is not; `init` warns when the plugin has no such hook.
 - `When the task needs it`: the skill is needed once a prompt matches a short description. The dialog shows the proposed description, and text you type under "Other" replaces it.
 - `Don't watch`: no entry. A skill with a hand-written gate or duty keeps its entry, and `init` says so.
 
-Each answer is written as it comes, with every other key in the file left as it was. Closing a dialog stops `init` and keeps the answers you gave. The closing summary names the installed skills that are not watched and points to `/souffleur migrate` when your settings hold hooks that may do the same job.
+Each answer is written as it comes, with every other key in the file left as it was, and the running session uses the new entries at once. A skill your config names but this session does not list shows as `not installed here` and is never requested. Closing a dialog stops `init` and keeps the answers you gave. The closing summary names the installed skills that are not watched and points to `/souffleur migrate` when your settings hold hooks that may do the same job.
 
 ## Coming from your own hooks
 

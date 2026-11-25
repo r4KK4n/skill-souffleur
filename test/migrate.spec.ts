@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { MIGRATE_INTRO, findHookOverlaps, findPassages, migrateSteps, passageLines, removeHook } from '../src/core/migrate.ts'
+import { MIGRATE_INTRO, findHookOverlaps, findPassages, hookQuestion, migrateSteps, passageLines, removeHook, watchWarning } from '../src/core/migrate.ts'
 
 const SKILLS = ['writing-guide', 'ui-checklist', 'terse:terse-mode']
 
@@ -95,10 +95,26 @@ test('guess rule flags preload style scripts of skills that are not installed', 
   assert.equal(found.find((o) => o.event === 'PostToolUse')?.matcher, 'Skill')
 })
 
-test('a hook that names a skill is not a guess', () => {
+test('a hook whose script file or matcher names a skill is not a guess; a bare word is', () => {
   const found = findHookOverlaps(settings(), SKILLS)
   assert.ok(found.length > 0)
-  for (const o of found) assert.doesNotMatch(o.why, /^guess:/)
+  for (const o of found) {
+    const bareWord = o.command.includes('remind.sh ui-checklist')
+    assert.equal(/^guess:/.test(o.why), bareWord, o.command)
+  }
+})
+
+test('a hook that names several skills lists them all and warns when any is unwatched', () => {
+  const [o] = findHookOverlaps(one('bash ~/h/writing-guide-ui-checklist.sh'), SKILLS)
+  assert.deepEqual(o!.skills, ['writing-guide', 'ui-checklist'])
+  assert.match(watchWarning(o!, ['writing-guide'])!, /does not watch ui-checklist yet/)
+  assert.equal(watchWarning(o!, ['writing-guide', 'ui-checklist']), undefined)
+})
+
+test('a hook that names a watched skill only as a bare word gets the cannot-tell warning', () => {
+  const [o] = findHookOverlaps(one('echo writing-guide'), SKILLS)
+  assert.match(o!.why, /^guess: /)
+  assert.match(watchWarning(o!, ['writing-guide'])!, /cannot tell/)
 })
 
 test('guess rule needs a script name, not a bare word', () => {
@@ -188,4 +204,25 @@ test('passageLines cuts at 20 and says how many more', () => {
   assert.equal(lines.length, 21)
   assert.match(lines.at(-1)!, /and 5 more/)
   assert.equal(passageLines(many.slice(0, 3)).length, 3)
+})
+
+test('watchWarning names a skill Souffleur does not watch, and a hook whose skill is unknown', () => {
+  const o = (command: string, why: string, skill?: string) => ({ event: 'UserPromptSubmit', command, index: [0, 0] as [number, number], why, ...(skill === undefined ? {} : { skill }) })
+  assert.equal(watchWarning(o('x writing-guide', 'names the skill writing-guide', 'writing-guide'), ['writing-guide']), undefined)
+  assert.match(watchWarning(o('~/h/review-preload.sh', 'guess: the script name contains review', 'review'), ['writing-guide'])!, /does not watch review yet; turning this off leaves it without reminders/)
+  assert.match(watchWarning(o('~/h/rules-preload.sh', 'guess: the script name contains preload'), ['writing-guide'])!, /rules file/)
+})
+
+test('hookQuestion puts Keep first when there is a warning and Turn off first otherwise', () => {
+  const o = { event: 'UserPromptSubmit', command: '~/h/rules-preload.sh', index: [0, 0] as [number, number], why: 'guess: the script name contains preload' }
+  const warned = hookQuestion(o, ['writing-guide'])
+  assert.deepEqual(warned.options, ['Keep', 'Turn off', 'Show me what to do', 'Stop'])
+  assert.match(warned.text, /without reminders/)
+  const named = { ...o, why: 'names the skill writing-guide', skill: 'writing-guide' }
+  assert.deepEqual(hookQuestion(named, ['writing-guide']).options, ['Turn off', 'Keep', 'Show me what to do', 'Stop'])
+})
+
+test('migrateSteps shows the warning next to the hook', () => {
+  const o = { event: 'UserPromptSubmit', command: '~/h/rules-preload.sh', index: [0, 0] as [number, number], why: 'guess: the script name contains preload' }
+  assert.match(migrateSteps({ hooks: [o], passages: [], settingsPath: '~/s.json', watched: ['writing-guide'] }), /Warning: .*without reminders/)
 })

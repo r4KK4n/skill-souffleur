@@ -13,6 +13,8 @@ type World = {
   seen: { prompts: { text: string; context?: readonly string[] }[] }
   writes: { path: string; text: string }[]
   asked: string[]
+  options: string[][]
+  clock: { advance: (ms: number) => Promise<void> }
   hide: (path: string) => void
   files: Record<string, string>
 }
@@ -33,6 +35,14 @@ type Opts = {
   failWrite?: RegExp
   /** Runs after each successful write, with its path. */
   onWrite?: (path: string) => void
+  /** The skill listing is empty and `$.command.list` names these. */
+  listOnly?: string[]
+  /** The skill listing says it holds fewer skills than there are. */
+  incomplete?: boolean
+  /** `$.session.usage` never answers. */
+  hangUsage?: boolean
+  /** `$.session.usage` rejects. */
+  failUsage?: boolean
   /** Runs when a dialog opens. */
   onAsk?: () => void
 }
@@ -49,8 +59,9 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   const hidden = new Set<string>()
   const answers = opts.answers === 'reject' ? [] : [...(opts.answers ?? [])]
   mock.store(on, opts.stored)
-  mock.clock(on)
+  const clock = mock.clock(on)
   mock.session(on)
+  const options: string[][] = []
   on('session.id', () => ({ value: id }))
   on('session.cwd', () => ({ value: '/work/proj' }))
   on('session.repo', () => ({ value: null }))
@@ -81,19 +92,26 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
     opts.onWrite?.(e.path)
     return { value: undefined }
   })
-  on('session.usage', () => ({
-    value: {
-      startedAt: 0,
-      context: { window: 1, breakdown: { skills: { totalSkills: 0, includedSkills: 0, tokens: 0, skillFrontmatter: (opts.skills ?? []).map((name) => ({ name, source: 'plugin', tokens: 1 })) } } },
-      rateLimits: [],
-      cost: {},
-    },
-  }) as never)
+  if (opts.listOnly) on('command.list', () => ({ value: opts.listOnly!.map((name) => ({ name, description: '' })) }) as never)
+  on('session.usage', () => {
+    if (opts.hangUsage) return new Promise(() => {}) as never
+    if (opts.failUsage) throw new Error('usage unavailable')
+    const names = opts.listOnly ? [] : (opts.skills ?? [])
+    return {
+      value: {
+        startedAt: 0,
+        context: { window: 1, breakdown: { skills: { totalSkills: names.length + (opts.incomplete ? 1 : 0), includedSkills: names.length, tokens: 0, skillFrontmatter: names.map((name) => ({ name, source: 'plugin', tokens: 1 })) } } },
+        rateLimits: [],
+        cost: {},
+      },
+    } as never
+  })
   on('model.complete', () => ({ value: { isAnswered: true, text: opts.proposals ?? '{"skills":[]}', usage: {} } }) as never)
   on('tool.call', (_, e) => {
     if (e.tool !== 'AskUserQuestion') return { result: {} }
     const question = (e as unknown as { questions: { question: string }[] }).questions[0]!.question
     asked.push(question)
+    options.push(((e as unknown as { questions: { options?: ({ label: string } | string)[] }[] }).questions[0]!.options ?? []).map((o) => (typeof o === 'string' ? o : o.label)))
     opts.onAsk?.()
     const label = answers.shift()
     if (opts.answers === 'reject' || label === undefined) throw new Error('nobody to ask')
@@ -103,7 +121,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   on('skill.prompt', (_, e) => ({ text: e.text }))
   on('session.compact', () => (opts.skipCompact ? { skip: 'vetoed' } : { messages: [{ role: 'user', text: 'summary', toolUses: [] }] }))
   on('command.run', () => ({}))
-  return { statuses, setId: (next) => { id = next }, seen, writes, asked, hide: (path) => void hidden.add(path), files }
+  return { statuses, setId: (next) => { id = next }, seen, writes, asked, options, clock, hide: (path) => void hidden.add(path), files }
 }
 
 const COMPOSE = { model: 'm', promptModel: 'm', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] } as never
@@ -603,4 +621,258 @@ test('notes print paths in the ~ form and imports in CLAUDE.md are followed one 
   expect(text).not.toMatch(/deeper\.md/)
   expect(text).toMatch(/~\/\.claude\/CLAUDE\.md/)
   expect(text).not.toContain(HOME)
+})
+
+test('init applies at once: a new skill shows in the table and the status line', async ($, on) => {
+  const w = world(on, {}, { skills: ['ui-checklist'], proposals: PICKS, answers: ['When the task needs it'] })
+  await start($)
+  expect(w.statuses.at(-1)).toBe('not set up, run /souffleur init')
+  const text = await run($, 'init')
+  expect(text).not.toMatch(/next session/)
+  expect(w.statuses.at(-1)).toBe('observe · 0 loaded')
+  const t = await table($)
+  expect(t).toMatch(/\| ui-checklist \| absent \|/)
+  expect(t).not.toMatch(/not set up/)
+})
+
+test('init applies at once: a skill answered Dont watch leaves the table', async ($, on) => {
+  const files = { [USER_FILE]: JSON.stringify({ skills: { 'writing-guide': { always: true }, 'old-skill': { always: true } } }) }
+  world(on, files, { skills: ['writing-guide', 'old-skill'], answers: ['From the start', "Don't watch"] })
+  await start($)
+  expect(await table($)).toMatch(/old-skill/)
+  await run($, 'init')
+  const t = await table($)
+  expect(t).toMatch(/writing-guide/)
+  expect(t).not.toMatch(/old-skill/)
+})
+
+const PLUGINS = `${HOME}/.claude/plugins/installed_plugins.json`
+const pluginFiles = (hooks: unknown) => ({
+  [PLUGINS]: JSON.stringify({ version: 2, plugins: { 'flow@market': [{ installPath: '/plugins/flow' }] } }),
+  '/plugins/flow/hooks/hooks.json': JSON.stringify({ hooks }),
+})
+const FLOW_PICKS = JSON.stringify({ skills: [{ name: 'flow:plan', need: 'plan', needText: 'Planning a change.' }] })
+
+test('init warns when Injected is chosen for a plugin without a SessionStart hook', async ($, on) => {
+  const w = world(on, pluginFiles({ PostToolUse: [] }), { skills: ['flow:plan'], proposals: FLOW_PICKS, answers: ['Loaded by its own plugin at start (rare)'] })
+  await start($)
+  const text = await run($, 'init')
+  expect(text).toMatch(/flow:plan: Loaded by its own plugin at start \(rare\)\./)
+  expect(text).toMatch(/Warning: the plugin flow has no SessionStart hook/)
+  expect(w.asked[0]).toMatch(/for example/i)
+})
+
+test('init does not warn when the plugin has a SessionStart hook', async ($, on) => {
+  world(on, pluginFiles({ SessionStart: [{ hooks: [{ type: 'command', command: 'x' }] }] }), { skills: ['flow:plan'], proposals: FLOW_PICKS, answers: ['Loaded by its own plugin at start (rare)'] })
+  await start($)
+  expect(await run($, 'init')).not.toMatch(/Warning/)
+})
+
+test('migrate warns about a hook for something Souffleur does not watch', async ($, on) => {
+  const settings = JSON.stringify({ hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'bash ~/.claude/hooks/rules-preload.sh' }] }] } })
+  const w = world(on, { [USER_FILE]: ALWAYS, [SETTINGS_PATH]: settings }, { skills: SKILLS, answers: ['Keep'] })
+  await start($)
+  const text = await run($, 'migrate')
+  expect(w.asked[0]).toMatch(/does not watch|cannot tell which skill/)
+  expect(w.asked[0]).toMatch(/without reminders/)
+  expect(w.writes.length).toBe(0)
+  expect(text).toMatch(/Kept/)
+})
+
+test('a configured skill that is not installed here is not requested and shows as not installed here', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS }, { skills: ['pdf'] })
+  await start($)
+  const r = await $.prompt.submit({ text: 'hello' })
+  expect(r.context).toBe(undefined)
+  expect(await table($)).toMatch(/\| writing-guide \| not installed here \|/)
+  expect(w.statuses.at(-1)).toBe('observe · 0 loaded, 1 not installed here')
+})
+
+
+// ---- fix round: live setup ----
+
+const LISTED = (names: string[]) => names
+const FLOW_HOOK = { SessionStart: [{ hooks: [{ type: 'command', command: '${CLAUDE_PLUGIN_ROOT}/hooks/session-start' }] }] }
+const flowInjected = JSON.stringify({ skills: { 'flow:plan': { always: true, startup: 'injected' } } })
+
+test('a command list fallback marks nothing and the skill is still requested', async ($, on) => {
+  world(on, { [USER_FILE]: ALWAYS }, { listOnly: ['pdf'] })
+  await start($)
+  const r = await $.prompt.submit({ text: 'hello' })
+  expect(r.context?.join('\n')).toMatch(/writing-guide/)
+  expect(await table($)).not.toMatch(/not installed here/)
+})
+
+test('an incomplete skill listing marks nothing', async ($, on) => {
+  world(on, { [USER_FILE]: ALWAYS }, { skills: LISTED(['pdf']), incomplete: true })
+  await start($)
+  await $.prompt.submit({ text: 'hello' })
+  expect(await table($)).not.toMatch(/not installed here/)
+})
+
+test('a bare config name matches a plugin skill in the list, and the other way round', async ($, on) => {
+  world(on, { [USER_FILE]: JSON.stringify({ skills: { 'writing-guide': { always: true }, 'docs:ui-checklist': { always: true } } }) }, { skills: ['docs:writing-guide', 'ui-checklist'] })
+  await start($)
+  await $.prompt.submit({ text: 'hello' })
+  expect(await table($)).not.toMatch(/not installed here/)
+})
+
+test('a skill injected at startup but missing from the list shows as not installed here', async ($, on) => {
+  world(on, { [USER_FILE]: flowInjected }, { skills: ['pdf'] })
+  await start($)
+  await $.prompt.submit({ text: 'hello' })
+  expect(await table($)).toMatch(/\| flow:plan \| not installed here \|/)
+})
+
+test('a skill not installed here is left out of the system prompt section', async ($, on) => {
+  world(on, { [USER_FILE]: ALWAYS }, { skills: ['pdf'] })
+  on('prompt.compose', () => ({ sections: [] }))
+  await start($)
+  const r = await $.prompt.compose(COMPOSE)
+  const section = r.sections.find((x: { id: string }) => x.id === 'souffleur')
+  expect(section?.text).not.toMatch(/writing-guide/)
+})
+
+test('session.start on a reload gives a skill added to the config a ledger entry', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  w.files[USER_FILE] = JSON.stringify({ skills: { 'writing-guide': { always: true }, 'ui-checklist': { always: true } } })
+  await start($)
+  expect(await table($)).toMatch(/\| ui-checklist \| absent \|/)
+})
+
+test('a stored session that lacks a configured skill is healed on its first event', async ($, on) => {
+  const config = parseConfig(ALWAYS, undefined).config
+  const old = { ...initSession(config, 's1', 1, 'startup'), ledger: {} }
+  world(on, { [USER_FILE]: ALWAYS }, { stored: { 'session:s1': old } })
+  expect(await table($)).toMatch(/\| writing-guide \| absent \|/)
+})
+
+test('a skill listing that never answers does not hold the prompt back', async ($, on) => {
+  const w = world(on, { [USER_FILE]: UI }, { classify: 'match', hangUsage: true })
+  const started = start($)
+  await w.clock.advance(300)
+  await started
+  const p = $.prompt.submit({ text: 'build me a login screen' })
+  await w.clock.advance(300)
+  const r = await p
+  expect(r.context?.join('\n')).toMatch(/ui-checklist/)
+})
+
+test('init still says the entries apply now when the skill listing fails', async ($, on) => {
+  world(on, {}, { skills: ['ui-checklist'], proposals: PICKS, answers: ['When the task needs it'], failUsage: true })
+  await start($)
+  // With the listing down init has no candidates, so give it the command list instead.
+  expect(await run($, 'init')).not.toMatch(/could not be applied/)
+})
+
+const plugins = (entries: Record<string, string[]>, files: Record<string, string> = {}) => ({
+  [PLUGINS]: JSON.stringify({ version: 2, plugins: Object.fromEntries(Object.entries(entries).map(([k, paths]) => [k, paths.map((installPath) => ({ installPath }))])) }),
+  ...files,
+})
+
+test('a SessionStart hook gives a soft line, not a warning', async ($, on) => {
+  world(on, pluginFiles(FLOW_HOOK), { skills: ['flow:plan'], proposals: FLOW_PICKS, answers: ['Loaded by its own plugin at start (rare)'] })
+  await start($)
+  const text = await run($, 'init')
+  expect(text).toMatch(/Note: the plugin flow has a SessionStart hook; Souffleur cannot tell whether it prints flow:plan/)
+  expect(text).not.toMatch(/Warning/)
+})
+
+test('no note when a hook command names the skill', async ($, on) => {
+  const hook = { SessionStart: [{ hooks: [{ type: 'command', command: 'cat plan.md' }] }] }
+  world(on, pluginFiles(hook), { skills: ['flow:plan'], proposals: FLOW_PICKS, answers: ['Loaded by its own plugin at start (rare)'] })
+  await start($)
+  expect(await run($, 'init')).not.toMatch(/Note:|Warning/)
+})
+
+test('any installed copy of the plugin with a SessionStart hook counts', async ($, on) => {
+  const files = plugins({ 'flow@a': ['/p1'], 'flow@b': ['/p2'] }, { '/p1/hooks/hooks.json': JSON.stringify({ hooks: {} }), '/p2/hooks/hooks.json': JSON.stringify({ hooks: FLOW_HOOK }) })
+  world(on, files, { skills: ['flow:plan'], proposals: FLOW_PICKS, answers: ['Loaded by its own plugin at start (rare)'] })
+  await start($)
+  const text = await run($, 'init')
+  expect(text).toMatch(/Note: the plugin flow has a SessionStart hook/)
+  expect(text).not.toMatch(/Warning/)
+})
+
+test('hooks declared inline in plugin.json count', async ($, on) => {
+  const files = plugins({ 'flow@a': ['/p1'] }, { '/p1/.claude-plugin/plugin.json': JSON.stringify({ name: 'flow', hooks: FLOW_HOOK }) })
+  world(on, files, { skills: ['flow:plan'], proposals: FLOW_PICKS, answers: ['Loaded by its own plugin at start (rare)'] })
+  await start($)
+  expect(await run($, 'init')).toMatch(/Note: the plugin flow has a SessionStart hook/)
+})
+
+test('an unreadable plugin gives the unknown line, not the no-hook warning', async ($, on) => {
+  const files = plugins({ 'flow@a': ['/p1'] }, { '/p1/hooks/hooks.json': '{ broken' })
+  world(on, files, { skills: ['flow:plan'], proposals: FLOW_PICKS, answers: ['Loaded by its own plugin at start (rare)'] })
+  await start($)
+  const text = await run($, 'init')
+  expect(text).toMatch(/could not check/i)
+  expect(text).not.toMatch(/has no SessionStart hook/)
+})
+
+test('an injected skill that init keeps still gets the warning', async ($, on) => {
+  const files = { ...pluginFiles({ PostToolUse: [] }), [USER_FILE]: flowInjected }
+  world(on, files, { skills: ['flow:plan'], answers: ['Loaded by its own plugin at start (rare)'] })
+  await start($)
+  const text = await run($, 'init')
+  expect(text).toMatch(/Kept flow:plan/)
+  expect(text).toMatch(/Warning: the plugin flow has no SessionStart hook/)
+})
+
+test('the no-dialog text warns about an injected skill too', async ($, on) => {
+  const files = { ...pluginFiles({ PostToolUse: [] }), [USER_FILE]: flowInjected }
+  world(on, files, { skills: ['flow:plan'], answers: 'reject' })
+  await start($)
+  expect(await run($, 'init')).toMatch(/Warning: the plugin flow has no SessionStart hook/)
+})
+
+const HOOK_SETTINGS = (command: string) => JSON.stringify({ hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command }] }] } })
+
+test('migrate: a hook that names an installed skill Souffleur does not watch says so and lists Keep first', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS, [SETTINGS_PATH]: HOOK_SETTINGS('bash ~/.claude/hooks/ui-checklist.sh') }, { skills: SKILLS, answers: ['Keep'] })
+  await start($)
+  await run($, 'migrate')
+  expect(w.asked[0]).toMatch(/does not watch ui-checklist yet/)
+  expect(w.options[0]![0]).toBe('Keep')
+})
+
+test('migrate: only skills in the user file count as watched', async ($, on) => {
+  const files = { [USER_FILE]: ALWAYS, [PROJECT_FILE]: JSON.stringify({ skills: { 'ui-checklist': { always: true } } }), [SETTINGS_PATH]: HOOK_SETTINGS('bash ~/.claude/hooks/ui-checklist-reload.sh') }
+  const w = world(on, files, { skills: SKILLS, answers: ['Keep'] })
+  await start($)
+  await run($, 'migrate')
+  expect(w.asked[0]).toMatch(/does not watch ui-checklist yet/)
+})
+
+test('migrate: a bare word that names a watched skill is a guess with the warning', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS, [SETTINGS_PATH]: HOOK_SETTINGS('echo writing-guide') }, { skills: SKILLS, answers: ['Keep'] })
+  await start($)
+  await run($, 'migrate')
+  expect(w.asked[0]).toMatch(/guess: /)
+  expect(w.asked[0]).toMatch(/without reminders/)
+  expect(w.options[0]![0]).toBe('Keep')
+})
+
+test('migrate: a script file that names a watched skill has no warning and Turn off first', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS, [SETTINGS_PATH]: HOOK_SETTINGS('bash ~/.claude/hooks/writing-guide-reload.sh') }, { skills: SKILLS, answers: ['Keep'] })
+  await start($)
+  await run($, 'migrate')
+  expect(w.asked[0]).not.toMatch(/without reminders/)
+  expect(w.options[0]![0]).toBe('Turn off')
+})
+
+test('migrate notes a watched skill that is not installed in this session', async ($, on) => {
+  world(on, { [USER_FILE]: ALWAYS, [SETTINGS_PATH]: HOOK_SETTINGS('bash ~/.claude/hooks/writing-guide-reload.sh') }, { skills: ['pdf'], answers: ['Keep'] })
+  await start($)
+  await $.prompt.submit({ text: 'hello' })
+  expect(await run($, 'migrate')).toMatch(/writing-guide is configured but not installed in this session/)
+})
+
+test('migrate reads the config fresh', async ($, on) => {
+  const w = world(on, { [USER_FILE]: '{}', [SETTINGS_PATH]: HOOK_SETTINGS('bash ~/.claude/hooks/writing-guide-reload.sh') }, { skills: SKILLS, answers: ['Keep'] })
+  await start($)
+  w.files[USER_FILE] = ALWAYS
+  await run($, 'migrate')
+  expect(w.asked[0]).not.toMatch(/does not watch writing-guide/)
 })

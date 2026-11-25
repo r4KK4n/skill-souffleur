@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { parseConfig } from '../src/core/config.ts'
-import { applyChoice, candidates, cleanNeedText, options, parsePicks, SETUP_INTRO } from '../src/core/setup.ts'
+import { applyChoice, candidates, cleanNeedText, CHOICE_LABEL, explicitOnly, injectedWarning, options, parsePicks, parseSkips, picksPrompt, setupSteps, SETUP_INTRO, INJECTED_HELP } from '../src/core/setup.ts'
 
 const config = (user: unknown, project?: unknown) => parseConfig(JSON.stringify(user), project === undefined ? undefined : JSON.stringify(project)).config
 const doc = (c: unknown) => c as { mode?: string; skills: Record<string, Record<string, unknown>>; needs: Record<string, string> }
@@ -10,12 +10,12 @@ test('options for a plain skill end with Stop', () => {
   const o = options('writing-guide', undefined, 'need')
   assert.equal(o.length, 4)
   assert.equal(o.at(-1), 'Stop')
-  assert.ok(!o.includes('Injected by its plugin'))
+  assert.ok(!o.includes(CHOICE_LABEL.injected))
 })
 
 test('options for a plugin skill offer Injected', () => {
   const o = options('terse:terse-mode', undefined, 'start')
-  assert.ok(o.includes('Injected by its plugin'))
+  assert.ok(o.includes(CHOICE_LABEL.injected))
   assert.ok(!o.includes('Stop'))
   assert.ok(o.length <= 4)
 })
@@ -24,7 +24,7 @@ test('current choice is listed first, else the recommended one', () => {
   assert.equal(options('writing-guide', 'need', 'start')[0], 'When the task needs it')
   assert.equal(options('writing-guide', undefined, 'start')[0], 'From the start')
   assert.equal(options('writing-guide', undefined, 'none')[0], "Don't watch")
-  assert.equal(options('terse:terse-mode', 'injected', 'start')[0], 'Injected by its plugin')
+  assert.equal(options('terse:terse-mode', 'injected', 'start')[0], CHOICE_LABEL.injected)
 })
 
 test('applyChoice start writes always', () => {
@@ -131,13 +131,13 @@ test('parsePicks keeps installed names, reuses existing need keys, caps at 10', 
 })
 
 test('SETUP_INTRO names the four answers and points to migrate', () => {
-  for (const w of ['From the start', 'Injected by its plugin', 'When the task needs it', "Don't watch", '/souffleur migrate']) assert.ok(SETUP_INTRO.includes(w), w)
+  for (const w of ['From the start', CHOICE_LABEL.injected, 'When the task needs it', "Don't watch", '/souffleur migrate']) assert.ok(SETUP_INTRO.includes(w), w)
   assert.doesNotMatch(SETUP_INTRO, /[–—]/)
 })
 
 test('a non-plugin skill whose current setting is injected is offered Injected in place of Stop', () => {
   const o = options('writing-guide', 'injected', 'start')
-  assert.equal(o[0], 'Injected by its plugin')
+  assert.equal(o[0], CHOICE_LABEL.injected)
   assert.ok(!o.includes('Stop'))
   assert.equal(o.length, 4)
 })
@@ -184,4 +184,64 @@ test('the shared-need check counts skills of the project file', () => {
   const key = doc(r.config).skills['writing-guide']!.need as string
   assert.notEqual(key, 'ui')
   assert.equal(doc(r.config).needs.ui, 'Building a screen.')
+})
+
+test('the injected label says it is rare and is never the first answer unless it is the current setting', () => {
+  assert.equal(CHOICE_LABEL.injected, 'Loaded by its own plugin at start (rare)')
+  for (const rec of ['start', 'need', 'none', 'injected'] as const) {
+    assert.notEqual(options('terse:terse-mode', undefined, rec)[0], CHOICE_LABEL.injected)
+    assert.notEqual(options('terse:terse-mode', 'need', rec)[0], CHOICE_LABEL.injected)
+  }
+  assert.equal(options('terse:terse-mode', 'injected', 'start')[0], CHOICE_LABEL.injected)
+})
+
+test('the help text for the injected answer gives an example and names the other answers', () => {
+  assert.match(INJECTED_HELP, /session start/i)
+  assert.match(INJECTED_HELP, /for example/i)
+  assert.ok(INJECTED_HELP.includes(CHOICE_LABEL.injected))
+  assert.doesNotMatch(INJECTED_HELP, /[–—]/)
+})
+
+test('injectedWarning has a line for every result except a hook that names the skill', () => {
+  assert.equal(injectedWarning('flow:plan', 'mentions'), undefined)
+  assert.match(injectedWarning('flow:plan', 'none')!, /^Warning: the plugin flow has no SessionStart hook/)
+  assert.match(injectedWarning('flow:plan', 'exists')!, /^Note: the plugin flow has a SessionStart hook; Souffleur cannot tell whether it prints flow:plan/)
+  assert.match(injectedWarning('flow:plan', 'unknown')!, /could not check/i)
+  assert.equal(injectedWarning('plain-skill', 'none'), undefined)
+})
+
+test('explicitOnly spots descriptions that run only on request', () => {
+  assert.equal(explicitOnly('Use ONLY when the owner asks for it by name'), true)
+  assert.equal(explicitOnly('Only use when the user explicitly asks for a deep review.'), true)
+  assert.equal(explicitOnly('Review code. Invoke only when explicitly requested.'), true)
+  assert.equal(explicitOnly('Draft notes. Run it only when the owner asks.'), true)
+  assert.equal(explicitOnly('Use when writing text that people read'), false)
+  assert.equal(explicitOnly(undefined), false)
+})
+
+test('picksPrompt asks for a clear match before a need is reused and allows no need', () => {
+  const p = picksPrompt([{ name: 'a', description: 'x' }], { prose: 'Writing text people read.' })
+  assert.match(p, /only when the description clearly/i)
+  assert.match(p, /"need": null/)
+  assert.match(p, /explicit request/i)
+})
+
+test('parseSkips lists installed skills the model gave no need', () => {
+  const raw = JSON.stringify({ skills: [{ name: 'a', need: null }, { name: 'b', need: 'ui', needText: 't' }, { name: 'ghost', need: null }, { name: 'c', need: 'none' }] })
+  assert.deepEqual(parseSkips(raw, ['a', 'b', 'c']), ['a', 'c'])
+  assert.deepEqual(parseSkips('no json', ['a']), [])
+})
+
+test('explicitOnly leaves skills that merely mention explicit requests alone', () => {
+  for (const text of [
+    'Security guidance. Run the complete workflow only for explicit codebase audit or pen-test requests',
+    'Only use the strict mode if the user asks',
+    'Review the plan, then explicitly invoke the detector at the end',
+  ]) assert.equal(explicitOnly(text), false, text)
+})
+
+test('setupSteps lists warnings after the recommendations', () => {
+  const plans = [{ skill: 'flow:plan', source: 'user' as const, current: 'injected' as const, recommended: 'injected' as const }]
+  const text = setupSteps({ plans, userConfig: undefined, configPath: '~/c.json', unwatched: [], warnings: ['Warning: x.'] })
+  assert.match(text, /Warning: x\./)
 })

@@ -7,7 +7,7 @@ declare module 'claude-code' {
         ledger: Record<
           string,
           {
-            state: 'absent' | 'loaded' | 'stale' | 'restoring' | 'unavailable'
+            state: 'absent' | 'loaded' | 'stale' | 'restoring' | 'unavailable' | 'not installed here'
             since: number
             reason: string
             lastCompactAt?: number
