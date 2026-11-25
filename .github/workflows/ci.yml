@@ -31,3 +31,26 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run typecheck
       - run: npm test
+
+  mod:
+    # Runs the mod's own checks on the Claude Code version the mod was verified on (docs/compatibility.md).
+    # `plugin validate` and `plugin test` need no login and no network access beyond the npm install.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      # --ignore-scripts skips the package's postinstall, which would link the native binary. The package ships
+      # cli-wrapper.cjs for that case; it starts the same binary from the optional platform package.
+      - name: Install Claude Code 2.1.332
+        run: |
+          npm i -g --ignore-scripts @anthropic-ai/claude-code@2.1.332
+          echo "CLAUDE_WRAPPER=$(npm root -g)/@anthropic-ai/claude-code/cli-wrapper.cjs" >> "$GITHUB_ENV"
+      - name: Check the installed version
+        run: test "$(node "$CLAUDE_WRAPPER" --version)" = "2.1.332 (Claude Code)"
+      - run: node "$CLAUDE_WRAPPER" plugin validate .
+      - run: node "$CLAUDE_WRAPPER" plugin test .

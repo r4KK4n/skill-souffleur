@@ -124,3 +124,16 @@ test('open duties of a skill not installed here are not listed', () => {
   const s = { ...s0, duties: [{ skill: 'ui-checklist', openedAt: T1, by: 'Write', denied: false }] }
   assert.doesNotMatch(renderTable(config, s, T1), /Open duties/)
 })
+
+test('the table carries the version notice when Claude Code is newer than the verified version, and the status line stays quiet', () => {
+  const newer = fresh(config, '99.0.0')
+  const table = renderTable(config, newer, T0)
+  assert.match(table, /^Running Claude Code 99\.0\.0; Souffleur was checked up to \d+\.\d+\.\d+\. Report problems with `claude --version`\.$/m)
+  assert.equal(table.split('\n').filter((l) => l.startsWith('Running Claude Code')).length, 1)
+  assert.doesNotMatch(statusLine(newer, 'observe') ?? '', /Claude Code|checked up to/)
+})
+
+test('the table has no version notice for a verified or unknown version', () => {
+  assert.doesNotMatch(renderTable(config, fresh(config, '2.1.322'), T0), /checked up to/)
+  assert.doesNotMatch(renderTable(config, fresh(config), T0), /checked up to/)
+})

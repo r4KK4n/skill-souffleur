@@ -1,0 +1,60 @@
+name: Mod checks on the latest Claude Code
+
+# The mod API changes between Claude Code releases. Once a week this installs the newest release, runs the
+# same two checks as the `mod` job in ci.yml and opens (or updates) one issue when either fails.
+
+on:
+  schedule:
+    - cron: '23 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.install.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Install the latest Claude Code
+        id: install
+        run: |
+          npm i -g --ignore-scripts @anthropic-ai/claude-code@latest
+          wrapper="$(npm root -g)/@anthropic-ai/claude-code/cli-wrapper.cjs"
+          echo "CLAUDE_WRAPPER=$wrapper" >> "$GITHUB_ENV"
+          echo "version=$(node -p "require('$(npm root -g)/@anthropic-ai/claude-code/package.json').version")" >> "$GITHUB_OUTPUT"
+      - run: node "$CLAUDE_WRAPPER" plugin validate .
+      - run: node "$CLAUDE_WRAPPER" plugin test .
+
+  report:
+    needs: check
+    # The version output is set once the install step ran, so an npm outage fails the run without an issue.
+    if: ${{ always() && needs.check.result == 'failure' && needs.check.outputs.version != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.check.outputs.version }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Open or update the issue
+        run: |
+          title="Mod checks fail on Claude Code ${VERSION}"
+          body="\`claude plugin validate .\` or \`claude plugin test .\` failed on Claude Code ${VERSION}. Run: ${RUN_URL}"
+          number="$(gh issue list --state open --limit 100 --json number,title --jq "map(select(.title == \"${title}\")) | .[0].number // empty")"
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "Failed again. ${body}"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi

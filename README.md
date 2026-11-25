@@ -63,7 +63,16 @@ claude plugin marketplace add r4KK4n/skill-souffleur
 claude plugin install skill-souffleur@skill-souffleur --scope user
 ```
 
-New sessions load it. A running session picks it up after `/reload-plugins` or a restart. To update later, run `claude plugin marketplace update skill-souffleur` and `claude plugin update skill-souffleur@skill-souffleur`, then restart.
+New sessions load it. A running session picks it up after `/reload-plugins` or a restart.
+
+### Update
+
+```
+claude plugin marketplace update skill-souffleur
+claude plugin update skill-souffleur@skill-souffleur
+```
+
+Restart Claude Code afterwards. Every change that users notice raises the plugin version, so the update finds it. If Claude Code is newer than the version Souffleur was checked on, `/souffleur` says so in one line.
 
 ## Quick start
 
