@@ -17,6 +17,10 @@ type World = {
   clock: { advance: (ms: number) => Promise<void> }
   hide: (path: string) => void
   files: Record<string, string>
+  tools: { name: string }[]
+  toasts: string[]
+  failRead: string[]
+  stored: Record<string, unknown>
 }
 
 type Opts = {
@@ -45,6 +49,12 @@ type Opts = {
   failUsage?: boolean
   /** Runs when a dialog opens. */
   onAsk?: () => void
+  /** The main repository root `$.session.repo` answers. */
+  repoRoot?: string
+  /** `$.tool.register` rejects. */
+  failToolRegister?: boolean
+  /** What the small model answers to `/souffleur rule`. */
+  shaped?: string
 }
 
 /** Answers every call the mod makes on `$`; files maps an absolute path to its text, a missing path throws. */
@@ -64,12 +74,24 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   const options: string[][] = []
   on('session.id', () => ({ value: id }))
   on('session.cwd', () => ({ value: '/work/proj' }))
-  on('session.repo', () => ({ value: null }))
+  on('session.repo', () => ({ value: opts.repoRoot ? { root: opts.repoRoot, remote: null, internal: false, name: null } : null }))
+  const tools: { name: string }[] = []
+  const failRead: string[] = []
+  const toasts: string[] = []
+  on('tool.register', (_, e) => {
+    if (opts.failToolRegister) throw new Error('refused')
+    tools.push(e as { name: string })
+    return { value: { tool: `mcp__skill-souffleur__${e.name}` } } as never
+  })
+  on('ui.toast', (_, e) => {
+    toasts.push(e.text)
+    return { value: undefined } as never
+  })
   on('session.version', () => ({ value: { version: '2.1.332' } }))
   on('env.get', () => ({ value: HOME }))
   on('fs.exists', (_, e) => ({ value: files[e.path] !== undefined && !hidden.has(e.path) }))
   on('fs.read', (_, e) => {
-    if (opts.failRead?.includes(e.path)) throw new Error('EACCES: permission denied')
+    if (failRead.includes(e.path) || opts.failRead?.includes(e.path)) throw new Error('EACCES: permission denied')
     const text = files[e.path]
     if (text === undefined) throw new Error('ENOENT')
     return { value: text }
@@ -106,7 +128,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
       },
     } as never
   })
-  on('model.complete', () => ({ value: { isAnswered: true, text: opts.proposals ?? '{"skills":[]}', usage: {} } }) as never)
+  on('model.complete', (_, e) => ({ value: { isAnswered: true, text: /Turn the user instruction/.test(String((e as { prompt?: string }).prompt)) ? (opts.shaped ?? '') : (opts.proposals ?? '{"skills":[]}'), usage: {} } }) as never)
   on('tool.call', (_, e) => {
     if (e.tool !== 'AskUserQuestion') return { result: {} }
     const question = (e as unknown as { questions: { question: string }[] }).questions[0]!.question
@@ -119,9 +141,10 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
     return { result: { questions: [], answers: { [question]: label } } } as never
   })
   on('skill.prompt', (_, e) => ({ text: e.text }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
   on('session.compact', () => (opts.skipCompact ? { skip: 'vetoed' } : { messages: [{ role: 'user', text: 'summary', toolUses: [] }] }))
   on('command.run', () => ({}))
-  return { statuses, setId: (next) => { id = next }, seen, writes, asked, options, clock, hide: (path) => void hidden.add(path), files }
+  return { statuses, setId: (next) => { id = next }, seen, writes, asked, options, clock, hide: (path) => void hidden.add(path), files, tools, toasts, failRead, stored: opts.stored ?? {} }
 }
 
 const COMPOSE = { model: 'm', promptModel: 'm', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] } as never
@@ -422,7 +445,7 @@ test('the /souffleur command shows its arguments in the typeahead', async ($, on
   registeredCommands.length = 0
   world(on, { [USER_FILE]: ALWAYS })
   await start($)
-  expect(JSON.stringify(registeredCommands)).toContain('"argumentHint":"[status | need <name> | drop <name> | pause | init | migrate]"')
+  expect(JSON.stringify(registeredCommands)).toContain('"argumentHint":"[status | need <name> | drop <name> | pause | init | migrate | rule <text> | review | accept <id>]"')
 })
 
 // ---- review fixes ----
@@ -875,4 +898,240 @@ test('migrate reads the config fresh', async ($, on) => {
   w.files[USER_FILE] = ALWAYS
   await run($, 'migrate')
   expect(w.asked[0]).not.toMatch(/does not watch writing-guide/)
+})
+
+
+// --- Rules, notes and proposals ---
+
+const PROPOSE_TOOL = 'mcp__skill-souffleur__souffleur_propose'
+const ENFORCE = JSON.stringify({ mode: 'enforce', skills: {}, needs: {} })
+const propose = ($: any, input: Record<string, unknown>) => $.tool.run({ tool: PROPOSE_TOOL, ...input } as never)
+const turnEnd = ($: any, extra: Record<string, unknown> = {}) => $.turn.complete({ answer: 'ok', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer', ...extra })
+const userFile = (w: World) => JSON.parse(w.files[USER_FILE]!)
+const AGENT_RULE = { kind: 'rule', before: { tools: ['Agent'] }, skill: 'dev-workflow' }
+
+test('the model proposes through the registered tool and nothing is written without a dialog', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  expect(w.tools.map((t) => t.name)).toEqual(['souffleur_propose'])
+  const r = await propose($, { kind: 'note', text: 'Answer in German.', source: 'user' })
+  expect(String(r.result)).toMatch(/Queued as note-/)
+  const text = await run($, 'review')
+  expect(text).toMatch(/no dialog can open/)
+  expect(text).toMatch(/Answer in German/)
+  expect(w.writes.length).toBe(0)
+  expect(w.asked.length).toBe(1)
+})
+
+test('a bad proposal is refused with the reason and queues nothing', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE })
+  await start($)
+  const r = await propose($, { kind: 'rule', before: { tools: ['Agent'] } })
+  expect(String(r.result)).toMatch(/Not queued/)
+  expect(await run($, 'review')).toMatch(/no proposals/)
+  expect(w.asked.length).toBe(0)
+})
+
+test('turn end asks one question, and yes everywhere writes the rule and keeps every other key', async ($, on) => {
+  const file = JSON.stringify({ mode: 'enforce', trustProjects: ['/w'], skills: { a: { always: true } } })
+  const w = world(on, { [USER_FILE]: file }, { answers: ['Yes, everywhere'] })
+  await start($)
+  await propose($, AGENT_RULE)
+  await propose($, { kind: 'note', text: 'Answer in German.' })
+  expect(w.asked.length).toBe(0)
+  await turnEnd($)
+  expect(w.asked).toEqual(['Add rule: before Agent: skill dev-workflow loaded?'])
+  expect(w.options[0]).toEqual(['Yes, everywhere', 'Yes, this project only', 'No'])
+  const doc = userFile(w)
+  expect(doc.mode).toBe('enforce')
+  expect(doc.trustProjects).toEqual(['/w'])
+  expect(doc.skills).toEqual({ a: { always: true } })
+  expect(doc.rules.length).toBe(1)
+  expect('where' in doc.rules[0]).toBe(false)
+  expect(w.toasts.join('\n')).toMatch(/added rule/)
+  // The new rule is live at once: dev-workflow is a ledger entry and the rule denies.
+  const denied = await $.tool.call({ tool: 'Agent', prompt: 'x' } as never)
+  expect(denied.deny).toMatch(/dev-workflow/)
+})
+
+test('yes for this project writes where as the main repository root', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: ['Yes, this project only'], repoRoot: '/work/main' })
+  await start($)
+  await propose($, AGENT_RULE)
+  await turnEnd($)
+  expect(userFile(w).rules[0].where).toBe('/work/main')
+})
+
+test('no declines it for good: the hash is stored and the proposal is not queued again', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: ['No'] })
+  await start($)
+  await propose($, AGENT_RULE)
+  await turnEnd($)
+  expect(w.writes.length).toBe(0)
+  const again = await propose($, AGENT_RULE)
+  expect(String(again.result)).toMatch(/declined this before/)
+  expect(await run($, 'review')).toMatch(/no proposals/)
+})
+
+test('a turn end in a session without a person asks nothing', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: ['Yes, everywhere'] })
+  await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: false })
+  await propose($, AGENT_RULE)
+  await turnEnd($)
+  expect(w.asked.length).toBe(0)
+  expect(w.writes.length).toBe(0)
+})
+
+test('a subagent turn end asks nothing', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: ['Yes, everywhere'] })
+  await start($)
+  await propose($, AGENT_RULE)
+  await turnEnd($, { agentId: 'a1' })
+  expect(w.asked.length).toBe(0)
+})
+
+test('a dismissed dialog leaves the proposal queued and stops asking this session', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  await propose($, AGENT_RULE)
+  await turnEnd($)
+  await turnEnd($)
+  expect(w.asked.length).toBe(1)
+  expect(await table($)).toMatch(/Open proposals \(1\)/)
+  expect(w.writes.length).toBe(0)
+})
+
+test('/souffleur accept writes in text mode, and "here" scopes it to the project', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', repoRoot: '/work/main' })
+  await start($)
+  const r1 = await propose($, AGENT_RULE)
+  const id = /Queued as (\S+)\./.exec(String(r1.result))![1]!
+  expect(await run($, 'accept nope')).toMatch(/no proposal nope/)
+  expect(await run($, `accept ${id} here`)).toMatch(/added rule/)
+  expect(userFile(w).rules[0].where).toBe('/work/main')
+  expect(await run($, 'review')).toMatch(/no proposals/)
+})
+
+test('a user file that cannot be read keeps the proposal and writes nothing', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  const r = await propose($, AGENT_RULE)
+  const id = /Queued as (\S+)\./.exec(String(r.result))![1]!
+  w.files[USER_FILE] = '{ broken'
+  const text = await run($, `accept ${id}`)
+  expect(text).toMatch(/not valid JSON/)
+  expect(text).toMatch(/stays queued/)
+  expect(w.writes.length).toBe(0)
+})
+
+test('a user file whose rules key is not a list is never edited', async ($, on) => {
+  const w = world(on, { [USER_FILE]: JSON.stringify({ rules: 'nope' }) }, { answers: 'reject' })
+  await start($)
+  const r = await propose($, AGENT_RULE)
+  const id = /Queued as (\S+)\./.exec(String(r.result))![1]!
+  expect(await run($, `accept ${id}`)).toMatch(/"rules" is not a list/)
+  expect(w.writes.length).toBe(0)
+})
+
+test('a missing user file is created with just the new entry', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  const r = await propose($, AGENT_RULE)
+  const id = /Queued as (\S+)\./.exec(String(r.result))![1]!
+  const l = w as unknown as { files: Record<string, string> }
+  delete l.files[USER_FILE]
+  w.hide(USER_FILE)
+  // Missing file: it is created with just the new entry.
+  expect(await run($, `accept ${id}`)).toMatch(/added rule/)
+  expect(Object.keys(JSON.parse(w.writes.at(-1)!.text))).toEqual(['rules'])
+})
+
+test('text typed under Other asks the model to revise, in the next prompt context', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: ['Only when the brief is long'] })
+  await start($)
+  await propose($, AGENT_RULE)
+  await turnEnd($)
+  expect(w.writes.length).toBe(0)
+  const r = await $.prompt.submit({ text: 'go on' })
+  expect(r.context?.join('\n')).toMatch(/Only when the brief is long/)
+  expect(r.context?.join('\n')).toMatch(/souffleur_propose/)
+  const r2 = await $.prompt.submit({ text: 'and more' })
+  expect(r2.context?.join('\n') ?? '').not.toMatch(/Only when the brief is long/)
+})
+
+test('/souffleur rule: the small model shapes the words, and failure keeps them as a note', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: ['Yes, everywhere'], shaped: '{"kind":"rule","before":{"tools":["Agent"]},"field":"model"}' })
+  await start($)
+  expect(await run($, 'rule name a model for every Agent call')).toMatch(/added rule/)
+  expect(userFile(w).rules[0].field).toBe('model')
+})
+
+test('/souffleur rule: a garbled model answer keeps the words as a note, queued without a dialog', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', shaped: 'garbage' })
+  await start($)
+  expect(await run($, 'rule Always answer in German')).toMatch(/queued note/)
+  expect(await run($, 'review')).toMatch(/note .*Always answer in German/)
+  expect(w.writes.length).toBe(0)
+})
+
+test('a confirmed note is sent once in the next prompt, and notes show in the system prompt section', async ($, on) => {
+  const w = world(on, { [USER_FILE]: JSON.stringify({ notes: [{ id: 'lang', text: 'Reply in German.', source: 'user' }] }) }, { answers: ['Yes, everywhere'] })
+  on('prompt.compose', () => ({ sections: [] }))
+  await start($)
+  const section = (await $.prompt.compose(COMPOSE)).sections.find((s: { id: string }) => s.id === 'souffleur')
+  expect(section?.text).toMatch(/Reply in German\./)
+  expect(section?.text).toMatch(/souffleur_propose/)
+  await propose($, { kind: 'note', text: 'Keep answers short.' })
+  await turnEnd($)
+  expect(userFile(w).notes.length).toBe(2)
+  const r = await $.prompt.submit({ text: 'hello' })
+  expect(r.context?.join('\n')).toMatch(/Keep answers short\./)
+  expect(r.context?.join('\n') ?? '').not.toMatch(/Reply in German/)
+  expect((await $.prompt.submit({ text: 'again' })).context?.join('\n') ?? '').not.toMatch(/Keep answers short/)
+})
+
+test('the section leaves out the propose sentence when the tool did not register', async ($, on) => {
+  world(on, { [USER_FILE]: ENFORCE }, { failToolRegister: true })
+  on('prompt.compose', () => ({ sections: [] }))
+  await start($)
+  const section = (await $.prompt.compose(COMPOSE)).sections.find((s: { id: string }) => s.id === 'souffleur')
+  expect(section?.text).not.toMatch(/souffleur_propose/)
+})
+
+test('a field rule denies an Agent call without model once, with the real call fields', async ($, on) => {
+  world(on, { [USER_FILE]: JSON.stringify({ mode: 'enforce', rules: [{ id: 'agent-names-model', before: { tools: ['Agent'] }, field: 'model', source: 'slip' }] }) })
+  await start($)
+  const first = await $.tool.call({ tool: 'Agent', prompt: 'x' } as never)
+  expect(first.deny).toMatch(/agent-names-model/)
+  expect((await $.tool.call({ tool: 'Agent', prompt: 'x' } as never)).deny).toBe(undefined)
+  expect((await $.tool.call({ tool: 'Agent', prompt: 'x', model: 'sonnet' } as never)).deny).toBe(undefined)
+})
+
+test('migrate queues the standing instructions it found as note proposals and writes nothing', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS, [CLAUDE_MD]: 'Always invoke writing-guide before writing prose.\nOther text.' }, { skills: ['writing-guide'], answers: 'reject' })
+  await start($)
+  const text = await run($, 'migrate')
+  expect(text).toMatch(/1 passage queued as note proposals/)
+  expect(await run($, 'review')).toMatch(/invoke writing-guide before writing prose/)
+  expect(w.writes.length).toBe(0)
+})
+
+test('a proposal from a session stored before rules existed still works', async ($, on) => {
+  const old = { ...initSession(parseConfig(ALWAYS, undefined).config, 's1', 0, 'startup'), proposals: undefined, declined: undefined }
+  world(on, { [USER_FILE]: ALWAYS }, { stored: { 'session:s1': old } })
+  await start($)
+  const r = await propose($, { kind: 'note', text: 'Reply in German.' })
+  expect(String(r.result)).toMatch(/Queued/)
+})
+
+test('a read error on the user file stops the write and keeps the proposal', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  const r = await propose($, AGENT_RULE)
+  const id = /Queued as (\S+)\./.exec(String(r.result))![1]!
+  w.failRead.push(USER_FILE)
+  const text = await run($, `accept ${id}`)
+  expect(text).toMatch(/could not read ~\/\.claude\/souffleur\.json/)
+  expect(text).toMatch(/stays queued/)
+  expect(w.writes.length).toBe(0)
 })

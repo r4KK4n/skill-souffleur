@@ -25,6 +25,31 @@ declare module 'claude-code' {
         observed: { at: number; reason: string }[]
         errors: string[]
         version?: string
+        ruleSkills: string[]
+        openRules: { id: string; by: string; denied: boolean }[]
+        fieldDenied: string[]
+        proposals: {
+          hash: string
+          kind: 'rule' | 'note'
+          entry: {
+            id: string
+            source: string
+            where?: string
+            before?: { tools: string[]; paths?: string[] }
+            skill?: string
+            field?: string
+            after?: { tools: string[]; paths?: string[] }
+            evidence?: { tool: string; command?: string }
+            text?: string
+            need?: string
+          }
+          scope?: 'everywhere' | 'project'
+          from: string
+        }[]
+        declined: string[]
+        notesSent: string[]
+        freshNotes: string[]
+        revise: string[]
       }
     }
   }

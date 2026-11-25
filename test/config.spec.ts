@@ -52,7 +52,7 @@ test('unknown need on a skill is an error and drops the skill', () => {
 test('missing files give an empty config without errors', () => {
   const { config, errors } = parseConfig(undefined, undefined)
   assert.deepEqual(errors, [])
-  assert.deepEqual(config, { mode: 'observe', skills: {}, needs: {}, trustProjects: [] })
+  assert.deepEqual(config, { mode: 'observe', skills: {}, needs: {}, trustProjects: [], rules: [], notes: [], learn: { skills: true } })
 })
 
 test('mode defaults to observe', () => {

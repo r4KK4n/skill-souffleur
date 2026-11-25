@@ -2,6 +2,8 @@ import { matches, matchesCommand } from './config.ts'
 import { compacted, initLedger, markInstalled, requested, skillLoaded, syncLedger } from './ledger.ts'
 import type { Ledger } from './ledger.ts'
 import { neededSkills } from './needs.ts'
+import type { Proposal } from './proposals.ts'
+import { checkRules, contextNotes, ruleKind, ruleSkillNames } from './rules.ts'
 import { renderTable } from './status.ts'
 import type { Config, NeedName, SkillName } from './types.ts'
 
@@ -22,15 +24,31 @@ export type Session = {
   observed: { at: number; reason: string }[]
   errors: string[]
   version?: string
+  /** Skills of rules that fired or were loaded: needed for the rest of the session. */
+  ruleSkills: SkillName[]
+  /** Open `after` rules; `denied` is set once one has denied a call, so the retry passes. */
+  openRules: { id: string; by: string; denied: boolean }[]
+  /** Field rules that denied and wait for the retry. */
+  fieldDenied: string[]
+  proposals: Proposal[]
+  /** Hashes of declined proposals. */
+  declined: string[]
+  /** Need notes already sent since the last compaction. */
+  notesSent: string[]
+  /** Confirmed notes without a need, sent once in the next context. */
+  freshNotes: string[]
+  /** Requests to revise a proposal, sent once in the next context. */
+  revise: string[]
 }
 
 export type CoreEvent =
   | { type: 'start'; now: number; start: 'startup' | 'resume' | 'clear'; version?: string }
   | { type: 'skill'; now: number; skill: string }
   | { type: 'compact'; now: number; phase: 'before' | 'after'; trigger: string; skipped?: boolean; agentId?: string }
-  | { type: 'prompt'; now: number; text: string; fromUser: boolean; matched: NeedName[] }
-  | { type: 'tool'; now: number; tool: string; path?: string; command?: string; brief?: string; skill?: string; model?: string; agentId?: string; root?: string }
-  | { type: 'command'; now: number; args: string }
+  | { type: 'prompt'; now: number; text: string; fromUser: boolean; matched: NeedName[]; root?: string }
+  /** `present` names the arguments the call carries, for field rules. */
+  | { type: 'tool'; now: number; tool: string; path?: string; command?: string; brief?: string; skill?: string; model?: string; present?: string[]; agentId?: string; root?: string }
+  | { type: 'command'; now: number; args: string; root?: string }
   | { type: 'typed'; now: number; name: string }
   | { type: 'agentDone'; now: number }
   /** The config was read again (after `/souffleur init`): the ledger follows it, and `errors` replace the old config errors. */
@@ -55,7 +73,7 @@ const PAUSE_HINT = 'To turn checks off for this session: /souffleur pause.'
 
 export function initSession(config: Config, id: string, now: number, start: 'startup' | 'resume' | 'clear', version?: string): Session {
   const s: Session = {
-    ledger: initLedger(config, now, start),
+    ledger: initLedger(config, now, start, ruleSkillNames(config)),
     needs: {},
     duties: [],
     paused: false,
@@ -66,13 +84,25 @@ export function initSession(config: Config, id: string, now: number, start: 'sta
     agentDenied: false,
     observed: [],
     errors: [],
+    ...emptyRules(),
   }
   if (version !== undefined) s.version = version
   return s
 }
 
-export function statusText(config: Config, session: Session, now: number): string {
-  return renderTable(config, session, now)
+function emptyRules() {
+  return { ruleSkills: [], openRules: [], fieldDenied: [], proposals: [], declined: [], notesSent: [], freshNotes: [], revise: [] }
+}
+
+/** A session stored before a field existed gets that field empty. */
+export function normalizeSession(s: Session): Session {
+  const have = s as unknown as Record<string, unknown>
+  const missing = Object.entries(emptyRules()).filter(([key]) => !Array.isArray(have[key]))
+  return missing.length ? ({ ...s, ...Object.fromEntries(missing) } as Session) : s
+}
+
+export function statusText(config: Config, session: Session, now: number, root?: string): string {
+  return renderTable(config, session, now, root)
 }
 
 const lastN = <T>(list: T[], item: T): T[] => [...list, item].slice(-KEEP)
@@ -84,9 +114,9 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
       if (e.start === 'resume') return { session: e.version === undefined ? s : { ...s, version: e.version }, actions: [] }
       return { session: initSession(config, s.id, e.now, e.start, e.version), actions: [] }
     case 'skill':
-      return { session: onSkill(s, e), actions: [] }
+      return { session: onSkill(config, s, e), actions: [] }
     case 'compact':
-      return { session: onCompact(s, e), actions: [] }
+      return { session: onCompact(config, s, e), actions: [] }
     case 'prompt':
       return onPrompt(config, s, e)
     case 'tool':
@@ -94,9 +124,9 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
     case 'command':
       return onCommand(config, s, e)
     case 'typed':
-      return { session: e.name in s.ledger ? { ...s, mainSkillCalls: [...s.mainSkillCalls, e.name] } : s, actions: [] }
+      return { session: e.name in s.ledger ? { ...s, mainSkillCalls: [...s.mainSkillCalls, e.name], ruleSkills: withRuleSkill(config, s, e.name) } : s, actions: [] }
     case 'config':
-      return { session: { ...s, ledger: syncLedger(s.ledger, config, e.now), needs: Object.fromEntries(Object.entries(s.needs).filter(([name]) => name in config.needs)), duties: s.duties.filter((d) => d.skill in config.skills), errors: [...s.errors.filter((m) => !m.startsWith('config: ')), ...e.errors.map((m) => `config: ${m}`)].slice(-KEEP) }, actions: [] }
+      return { session: { ...s, ledger: syncLedger(s.ledger, config, e.now, ruleSkillNames(config)), ruleSkills: s.ruleSkills.filter((n) => ruleSkillNames(config).includes(n)), openRules: s.openRules.filter((o) => config.rules.some((r) => r.id === o.id)), needs: Object.fromEntries(Object.entries(s.needs).filter(([name]) => name in config.needs)), duties: s.duties.filter((d) => d.skill in config.skills), errors: [...s.errors.filter((m) => !m.startsWith('config: ')), ...e.errors.map((m) => `config: ${m}`)].slice(-KEEP) }, actions: [] }
     case 'installed':
       return { session: { ...s, ledger: markInstalled(s.ledger, e.names, e.now) }, actions: [] }
     case 'agentDone':
@@ -106,16 +136,23 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
   }
 }
 
-function onSkill(s: Session, e: Extract<CoreEvent, { type: 'skill' }>): Session {
+/** A skill a rule names, once loaded, stays needed for the session. */
+function withRuleSkill(config: Config, s: Session, skill: SkillName): SkillName[] {
+  return ruleSkillNames(config).includes(skill) && !s.ruleSkills.includes(skill) ? [...s.ruleSkills, skill] : s.ruleSkills
+}
+
+function onSkill(config: Config, s: Session, e: Extract<CoreEvent, { type: 'skill' }>): Session {
   const i = s.mainSkillCalls.indexOf(e.skill)
   if (i < 0 && s.subagentsRunning > 0) return s // a subagent's load
   const calls = i < 0 ? s.mainSkillCalls : s.mainSkillCalls.filter((_, k) => k !== i)
-  return { ...s, mainSkillCalls: calls, ledger: skillLoaded(s.ledger, e.skill, e.now, 'skill.prompt') }
+  return { ...s, mainSkillCalls: calls, ledger: skillLoaded(s.ledger, e.skill, e.now, 'skill.prompt'), ruleSkills: withRuleSkill(config, s, e.skill) }
 }
 
-function onCompact(s: Session, e: Extract<CoreEvent, { type: 'compact' }>): Session {
+function onCompact(config: Config, s: Session, e: Extract<CoreEvent, { type: 'compact' }>): Session {
   if (e.agentId !== undefined || e.phase !== 'after' || e.skipped || !COMPACT_TRIGGERS.includes(e.trigger)) return s
-  return { ...s, ledger: compacted(s.ledger, e.now), compactedSincePrompt: true }
+  // Need notes went out in a context block the compaction cut: send them again while their need stays active.
+  const needNotes = new Set(config.notes.filter((n) => n.need !== undefined).map((n) => n.id))
+  return { ...s, ledger: compacted(s.ledger, e.now), compactedSincePrompt: true, notesSent: s.notesSent.filter((id) => !needNotes.has(id)) }
 }
 
 /**
@@ -124,7 +161,7 @@ function onCompact(s: Session, e: Extract<CoreEvent, { type: 'compact' }>): Sess
  * add a priority cap if restores push sessions into the next compaction early).
  */
 function restore(config: Config, s: Session, now: number): { ledger: Ledger; text?: string } {
-  const missing = neededSkills(config, s.needs).filter((name) => {
+  const missing = neededSkills(config, s.needs, s.ruleSkills).filter((name) => {
     const st = s.ledger[name]?.state
     return st === 'absent' || st === 'stale' || st === 'restoring'
   })
@@ -148,7 +185,17 @@ function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'pro
   const r = restore(config, next, e.now)
   next.ledger = r.ledger
   const lines = r.text === undefined ? [] : [r.text]
+  const notes = contextNotes(config, next, e.root)
+  if (notes.length) {
+    lines.push(`Souffleur notes from the user's config:\n${notes.map((n) => `- ${n.text}`).join('\n')}`)
+    const ids = notes.map((n) => n.id)
+    next.notesSent = [...next.notesSent, ...ids.filter((id) => !next.notesSent.includes(id))]
+    next.freshNotes = next.freshNotes.filter((id) => !ids.includes(id) && config.notes.some((n) => n.id === id))
+  }
+  lines.push(...next.revise)
+  next.revise = []
   for (const d of next.duties) if (next.ledger[d.skill]?.state !== 'not installed here') lines.push(`Open duty: ${d.skill} (${d.by}).`)
+  for (const o of next.openRules) lines.push(`Open rule: ${o.id} (${o.by}).`)
   return { session: next, actions: lines.length ? [{ kind: 'context', text: lines.join('\n') }] : [] }
 }
 
@@ -194,7 +241,7 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
       }
     }
 
-    const needed = neededSkills(config, next.needs)
+    const needed = neededSkills(config, next.needs, next.ruleSkills)
     for (const [name, rule] of Object.entries(config.skills)) {
       if (!rule.gate || next.ledger[name]?.state === 'not installed here' || !matches(rule.gate, e.tool, e.path, e.root)) continue
       const trusted = rule.from === 'user' || trustedRoot
@@ -212,6 +259,14 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
     }
   }
 
+  // Rules: evidence closes and a first match opens even while paused; only the denials and the needed skills stop.
+  const checked = checkRules(config, next, e)
+  const rr = next.paused ? { ...checked, reasons: [], denied: [], fired: [] } : checked
+  for (const reason of rr.reasons) found.push({ text: `${reason} ${PAUSE_HINT}`, trusted: true })
+  next.openRules = next.openRules.filter((o) => !rr.closed.includes(o.id)).map((o) => (rr.denied.includes(o.id) ? { ...o, denied: true } : o))
+  next.fieldDenied = [...next.fieldDenied.filter((id) => !rr.released.includes(id)), ...rr.denied.filter((id) => config.rules.some((r) => r.id === id && ruleKind(r) === 'field'))]
+  if (rr.fired.length) next.ruleSkills = [...next.ruleSkills, ...rr.fired.filter((n) => !next.ruleSkills.includes(n))]
+
   let denied = false
   const trustedText = found.filter((f) => f.trusted).map((f) => f.text).join('\n')
   const untrustedText = found.filter((f) => !f.trusted).map((f) => f.text).join('\n')
@@ -225,6 +280,8 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
 
   if (!denied) {
     if (e.tool === 'Agent') next.subagentsRunning += 1
+    const by = e.path === undefined ? e.tool : `${e.tool} ${e.path}`
+    next.openRules = [...next.openRules, ...rr.opened.map((id) => ({ id, by, denied: false }))]
     for (const [name, rule] of Object.entries(config.skills)) {
       if (!rule.duty || next.ledger[name]?.state === 'not installed here' || !matches(rule.duty.after, e.tool, e.path, e.root)) continue
       if (next.duties.some((d) => d.skill === name)) continue
@@ -241,7 +298,7 @@ function onCommand(config: Config, s: Session, e: Extract<CoreEvent, { type: 'co
   switch (verb) {
     case '':
     case 'status':
-      return reply(s, statusText(config, s, e.now))
+      return reply(s, statusText(config, s, e.now, e.root))
     case 'pause':
       return reply({ ...s, paused: true }, 'Souffleur: checks are off for this session (no gate, duty or brief denial).')
     case 'need':
@@ -253,6 +310,6 @@ function onCommand(config: Config, s: Session, e: Extract<CoreEvent, { type: 'co
       return reply({ ...s, needs: rest }, `Need ${arg} is off.`)
     }
     default:
-      return reply(s, 'Usage: /souffleur [status | need <name> | drop <name> | pause | init | migrate]')
+      return reply(s, 'Usage: /souffleur [status | need <name> | drop <name> | pause | init | migrate | rule <text> | review | accept <id>]')
   }
 }

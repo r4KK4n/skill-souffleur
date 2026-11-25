@@ -116,6 +116,7 @@ export function configProblem(userConfig: unknown): string | undefined {
   if (userConfig === undefined) return undefined
   if (!isObject(userConfig)) return 'it is not a JSON object'
   for (const key of ['skills', 'needs']) if (userConfig[key] !== undefined && !isObject(userConfig[key])) return `"${key}" is not an object`
+  for (const key of ['rules', 'notes']) if (userConfig[key] !== undefined && !Array.isArray(userConfig[key])) return `"${key}" is not a list`
   return undefined
 }
 

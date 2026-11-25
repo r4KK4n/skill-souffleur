@@ -1,10 +1,13 @@
-import type { Config, Match, Mode, NeedName, Origin, SkillName, SkillRule } from './types.ts'
+import type { Config, Match, Mode, NeedName, Note, Origin, Rule, SkillName, SkillRule } from './types.ts'
 
 type FileConfig = {
   mode?: Mode
   trustProjects?: string[]
   skills: Record<SkillName, SkillRule>
   needs: Record<NeedName, string>
+  rules: Rule[]
+  notes: Note[]
+  learn?: { skills: boolean }
   /** Every skill and need key the file spells out, valid or not, for clash checks. */
   skillKeys: string[]
   needKeys: string[]
@@ -57,6 +60,86 @@ function parseMatch(v: unknown, where: string): Match {
     for (const glob of match.paths) checkGlob(glob, `${where}.paths`)
   }
   return match
+}
+
+
+const SOURCE = /^(skill(:[A-Za-z0-9:_-]{1,64})?|slip|user)$/
+const FIELD = /^[A-Za-z0-9_]{1,40}$/
+const ENTRY_ID = /^[A-Za-z0-9:_-]{1,64}$/
+const MAX_NOTE = 500
+
+function entryCommon(obj: Record<string, unknown>, where: string): { id: string; source: string; where?: string } {
+  check(typeof obj.id === 'string' && ENTRY_ID.test(obj.id) && obj.id !== '__proto__', `${where}.id`, `must be a name of letters, digits, ":", "_" or "-", got ${show(obj.id)}`)
+  const out: { id: string; source: string; where?: string } = { id: obj.id as string, source: 'user' }
+  if (obj.source !== undefined) {
+    check(typeof obj.source === 'string' && SOURCE.test(obj.source), `${where}.source`, `must be "user", "slip" or "skill:<name>", got ${show(obj.source)}`)
+    out.source = obj.source as string
+  }
+  if (obj.where !== undefined) {
+    check(typeof obj.where === 'string' && /^(\/|[A-Za-z]:[\\/])/.test(obj.where), `${where}.where`, 'must be an absolute path')
+    out.where = obj.where as string
+  }
+  return out
+}
+
+/** One rule entry: exactly one kind. Throws a SchemaError that names the problem. */
+export function parseRuleEntry(v: unknown, where: string): Rule {
+  check(isObject(v), where, 'must be an object')
+  const obj = v as Record<string, unknown>
+  onlyKeys(obj, ['id', 'where', 'source', 'before', 'skill', 'field', 'after', 'evidence'], where)
+  const rule: Rule = entryCommon(obj, where)
+  const kinds = [obj.before !== undefined && obj.skill !== undefined, obj.before !== undefined && obj.field !== undefined, obj.after !== undefined && obj.evidence !== undefined].filter(Boolean).length
+  const keys = ['before', 'skill', 'field', 'after', 'evidence'].filter((k) => obj[k] !== undefined).length
+  check(kinds === 1 && keys === 2, where, 'needs exactly one of: before + skill, before + field, after + evidence')
+  if (obj.before !== undefined) rule.before = parseMatch(obj.before, `${where}.before`)
+  if (obj.skill !== undefined) {
+    check(typeof obj.skill === 'string' && NAME.test(obj.skill) && obj.skill !== '__proto__', `${where}.skill`, `must be a skill name, got ${show(obj.skill)}`)
+    rule.skill = obj.skill as string
+  }
+  if (obj.field !== undefined) {
+    check(typeof obj.field === 'string' && FIELD.test(obj.field), `${where}.field`, `must be a field name, got ${show(obj.field)}`)
+    rule.field = obj.field as string
+  }
+  if (obj.after !== undefined) rule.after = parseMatch(obj.after, `${where}.after`)
+  if (obj.evidence !== undefined) {
+    check(isObject(obj.evidence), `${where}.evidence`, 'must be an object')
+    const ev = obj.evidence as Record<string, unknown>
+    onlyKeys(ev, ['tool', 'command'], `${where}.evidence`)
+    check(typeof ev.tool === 'string' && ev.tool.length > 0, `${where}.evidence.tool`, 'must be a string')
+    const evidence: { tool: string; command?: string } = { tool: ev.tool as string }
+    if (ev.command !== undefined) {
+      check(typeof ev.command === 'string', `${where}.evidence.command`, 'must be a string')
+      checkGlob(ev.command as string, `${where}.evidence.command`)
+      evidence.command = ev.command as string
+    }
+    rule.evidence = evidence
+  }
+  return rule
+}
+
+/** One note entry. `needs` are the need names the file defines. */
+export function parseNoteEntry(v: unknown, where: string, needs: readonly string[]): Note {
+  check(isObject(v), where, 'must be an object')
+  const obj = v as Record<string, unknown>
+  onlyKeys(obj, ['id', 'text', 'need', 'where', 'source'], where)
+  const note: Note = { ...entryCommon(obj, where), text: '' }
+  check(typeof obj.text === 'string' && obj.text.trim().length >= 1 && obj.text.length <= MAX_NOTE && !hasLineBreak(obj.text), `${where}.text`, `must be one line of 1 to ${MAX_NOTE} characters`)
+  note.text = (obj.text as string).trim()
+  if (obj.need !== undefined) {
+    check(typeof obj.need === 'string' && needs.includes(obj.need), `${where}.need`, `must name a need of the file, got ${show(obj.need)}`)
+    note.need = obj.need as string
+  }
+  return note
+}
+
+/** Checks an entry a proposal brings, with the same rules the file is read by. */
+export function checkEntry(kind: 'rule' | 'note', value: unknown, needs: readonly string[]): { entry?: Rule | Note; error?: string } {
+  try {
+    return { entry: kind === 'rule' ? parseRuleEntry(value, 'rule') : parseNoteEntry(value, 'note', needs) }
+  } catch (e) {
+    if (e instanceof SchemaError) return { error: e.message }
+    throw e
+  }
 }
 
 function parseName(name: string, kind: 'skill' | 'need'): void {
@@ -115,11 +198,11 @@ function parseFile(text: string, source: Origin, errors: string[]): FileConfig {
   }
   check(isObject(data), 'top level', 'must be an object')
   const obj = data as Record<string, unknown>
-  const file: FileConfig = { skills: {}, needs: {}, skillKeys: [], needKeys: [] }
+  const file: FileConfig = { skills: {}, needs: {}, rules: [], notes: [], skillKeys: [], needKeys: [] }
 
   for (const key of Object.keys(obj)) {
     if (key === 'skills' || key === 'needs') continue
-    if (key === 'mode' || key === 'trustProjects') {
+    if (key === 'mode' || key === 'trustProjects' || key === 'rules' || key === 'notes' || key === 'learn') {
       if (source === 'project') fail(`${key} is only allowed in the user config; ignored`)
       continue
     }
@@ -137,6 +220,12 @@ function parseFile(text: string, source: Origin, errors: string[]): FileConfig {
     } else {
       fail('trustProjects: must be a list of absolute paths; ignored')
     }
+  }
+
+  if (source === 'user' && obj.learn !== undefined) {
+    const l = obj.learn
+    if (isObject(l) && Object.keys(l).every((k) => k === 'skills') && (l.skills === undefined || typeof l.skills === 'boolean')) file.learn = { skills: l.skills !== false }
+    else fail('learn: must be { "skills": true or false }; ignored')
   }
 
   for (const [kind, key] of [['skill', 'skills'], ['need', 'needs']] as const) {
@@ -164,6 +253,31 @@ function parseFile(text: string, source: Origin, errors: string[]): FileConfig {
       }
     }
   }
+
+  if (source === 'user') {
+    const ids = new Set<string>()
+    for (const [kind, key] of [['rule', 'rules'], ['note', 'notes']] as const) {
+      const list = obj[key]
+      if (list === undefined) continue
+      if (!Array.isArray(list)) {
+        fail(`${key}: must be a list; ignored`)
+        continue
+      }
+      for (const [i, value] of list.entries()) {
+        try {
+          const label = `${kind} ${i + 1}`
+          const entry = kind === 'rule' ? parseRuleEntry(value, label) : parseNoteEntry(value, label, Object.keys(file.needs))
+          check(!ids.has(entry.id), label, `id ${show(entry.id)} is already used`)
+          ids.add(entry.id)
+          if (kind === 'rule') file.rules.push(entry as Rule)
+          else file.notes.push(entry as Note)
+        } catch (e) {
+          if (!(e instanceof SchemaError)) throw e
+          fail(`${e.message}; entry dropped`)
+        }
+      }
+    }
+  }
   return file
 }
 
@@ -179,7 +293,7 @@ export function parseConfig(
   projectText: string | undefined,
 ): { config: Config; errors: string[] } {
   const errors: string[] = []
-  const config: Config = { mode: 'observe', skills: {}, needs: {}, trustProjects: [] }
+  const config: Config = { mode: 'observe', skills: {}, needs: {}, trustProjects: [], rules: [], notes: [], learn: { skills: true } }
 
   const read = (source: Origin, text: string | undefined): FileConfig | undefined => {
     if (text === undefined) return undefined
@@ -206,6 +320,9 @@ export function parseConfig(
   if (user) {
     if (user.mode !== undefined) config.mode = user.mode
     if (user.trustProjects) config.trustProjects = user.trustProjects
+    if (user.learn) config.learn = user.learn
+    config.rules = user.rules
+    config.notes = user.notes
     dropUnknownNeed(user, 'user', new Set(Object.keys(user.needs)))
     Object.assign(config.skills, user.skills)
     Object.assign(config.needs, user.needs)

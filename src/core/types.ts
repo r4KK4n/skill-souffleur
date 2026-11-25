@@ -18,4 +18,26 @@ export type Config = {
   needs: Record<NeedName, string>
   /** Absolute project roots whose gates and duties may deny. Only the user file sets it. */
   trustProjects: string[]
+  /** Only the user file holds these. */
+  rules: Rule[]
+  notes: Note[]
+  learn: { skills: boolean }
 }
+
+/**
+ * A check with a trace Souffleur can see, in one of three kinds: `before` + `skill` (the skill is loaded before a matching call),
+ * `before` + `field` (a matching call carries the field), `after` + `evidence` (evidence follows a matching call).
+ * `source` is `user`, `slip` or `skill:<name>`. `where` is a main repository root.
+ */
+export type Rule = {
+  id: string
+  where?: string
+  source: string
+  before?: Match
+  skill?: SkillName
+  field?: string
+  after?: Match
+  evidence?: { tool: string; command?: string }
+}
+/** A standing instruction. Never checked. Without `need` it goes into the system prompt section, with `need` into the prompt context. */
+export type Note = { id: string; text: string; need?: NeedName; where?: string; source: string }

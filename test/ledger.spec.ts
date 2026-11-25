@@ -11,7 +11,7 @@ const config: Config = {
     plain: { always: true, from: 'user' },
   },
   needs: {},
-  trustProjects: [],
+  trustProjects: [], rules: [], notes: [], learn: { skills: true },
 }
 
 test('injected skill is loaded at startup and absent after clear', () => {
@@ -123,7 +123,7 @@ test('replays compact-in-process.json: bigtest ends stale', () => {
     mode: 'observe',
     skills: { bigtest: { always: true, from: 'user' } },
     needs: {},
-    trustProjects: [],
+    trustProjects: [], rules: [], notes: [], learn: { skills: true },
   }
   let l = initLedger(bigConfig, 0, 'startup')
   for (const e of loadFixture('compact-in-process')) {
@@ -168,7 +168,7 @@ test('markInstalled treats an empty list as unknown and never touches a loaded s
 })
 
 test('markInstalled matches a bare name with a plugin name either way, but not two different plugins', () => {
-  const c: Config = { mode: 'observe', needs: {}, trustProjects: [], skills: { plan: { always: true, from: 'user' }, 'flow:check': { always: true, from: 'user' }, 'a:thing': { always: true, from: 'user' } } }
+  const c: Config = { mode: 'observe', needs: {}, trustProjects: [], rules: [], notes: [], learn: { skills: true }, skills: { plan: { always: true, from: 'user' }, 'flow:check': { always: true, from: 'user' }, 'a:thing': { always: true, from: 'user' } } }
   const l = markInstalled(initLedger(c, 0, 'clear'), ['flow:plan', 'check', 'b:thing'], 5)
   assert.equal(l.plan.state, 'absent')
   assert.equal(l['flow:check'].state, 'absent')
