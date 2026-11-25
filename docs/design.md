@@ -18,6 +18,7 @@ Success: the user stops asking whether a skill still runs, and Claude can answer
 6. Show the ledger on request and in the status line.
 7. When the main session hands work to a subagent, make it state which skills the subagent needs.
 8. Work the same after startup, compaction, resume, clear, a lost connection and a reload of the mod.
+9. Learn the rules that matter from the skills a user actually has, from slips and from the user's own words, and keep them in one place: Souffleur's config, not memory files or scattered notes. Nothing becomes a rule without the user's yes.
 
 ## Non-goals
 
@@ -31,6 +32,8 @@ Success: the user stops asking whether a skill still runs, and Claude can answer
 These would make Souffleur a failure even if it technically works:
 
 - Pasting full skill texts into every prompt.
+- A rule or note the user never confirmed.
+- More than one question per turn, or a question in the middle of a turn.
 - Reminder noise: text in every turn when nothing is missing.
 - A silent failure. If Souffleur cannot read an event or the API changed, it says so; it never reports "all loaded" by default.
 - Blocking the user's work on a false positive without a way out.
@@ -142,12 +145,64 @@ A short, stable section added through `prompt.compose`:
 
 > Souffleur keeps track of skills in this session. If a message from Souffleur asks you to load skills, invoke each one with the Skill tool before you continue. Always-on skills: chisle:chisle.
 
-It holds the rule and the `always` skills from the config, never the changing ledger, because sections are cached per thread and must not break the prompt cache.
+It holds the rule and the `always` skills from the config, never the changing ledger, because sections are cached per thread and must not break the prompt cache. It also carries the notes without `need`, and one sentence asking the model to call `souffleur_propose` when a slip happened that a rule would have caught or the user asks it to remember a rule. Notes in the section are capped at 2,000 characters; above that the status line says so and `/souffleur` lists the notes that were left out.
 
 ### Gates and duties
 
 - Gate: on `tool.call` for a configured tool and path, if a skill whose gate matches is needed and not `loaded`, deny with a reason that names the skill and says how to proceed. The model then loads it and retries. `/souffleur pause` turns gates off for the session.
 - Duty: when a call matches `after`, Souffleur records an open duty. A later tool call matching `evidence` closes it. While a duty is open, the next call that matches the skill's gate (writing or publishing the next prototype file, for example) is denied with the duty named, which enforces it in the same turn without a paid turn of its own. An open duty at turn end is also listed in the context of the next user prompt.
+
+### Rules and notes
+
+Skills carry rules that are easy to miss at the moment they matter. Example: a workflow skill says "name a model for every subagent, or it inherits the session's most expensive one". If that skill is not loaded when the session dispatches a subagent, the rule is lost and nothing notices. Users also give standing instructions ("answer in German", "never translate quoted English") that today live in memory files, project notes or nowhere.
+
+Souffleur keeps both in its config, next to the skills:
+
+```json
+{
+  "rules": [
+    { "id": "agent-needs-workflow", "before": { "tools": ["Agent"] }, "skill": "dev-workflow", "source": "skill:dev-workflow" },
+    { "id": "agent-names-model", "before": { "tools": ["Agent"] }, "field": "model", "source": "slip" },
+    { "id": "test-after-edit", "after": { "tools": ["Edit"], "paths": ["src/**"] }, "evidence": { "tool": "Bash", "command": "npm test" }, "source": "user" }
+  ],
+  "notes": [
+    { "id": "reply-language", "text": "Reply to the user in German, briefly.", "source": "user" },
+    { "id": "ui-copy", "text": "Show UI copy to the user before writing it.", "need": "ui", "source": "user" }
+  ]
+}
+```
+
+A rule has a trace Souffleur can see, in one of three kinds: a skill that must be loaded before a matching call (`skill`), a field the call must carry (`field`), or evidence that must follow a matching call (`after` with `evidence`, the same as a duty). Rules follow `mode`: in `observe` a broken rule is listed, in `enforce` the call is denied with the rule named. How each kind enforces:
+
+- `skill`: a matching call is denied until the skill is `loaded`, like a gate. Once a rule has fired or its skill was loaded in a session, the skill counts as needed for the rest of that session, so it is restored after compaction like any needed skill. A skill named only in a rule gets a ledger entry too.
+- `field`: a matching call without that field is denied once; the retry passes, so a wrong rule cannot trap the session.
+- `after` with `evidence`: a matching call opens the rule; while it is open, the next call that matches `after` again is denied once, and an open rule is listed at turn end. Evidence closes it.
+
+When one call breaks several rules, or a rule and the subagent brief check below, the denial lists all of them in one reason. A rule may carry `where`, a project root, to apply in one project only.
+
+Rules and notes are read from the user file only. A project file that contains them gets an error for those keys, because a cloned repository must not be able to deny calls or write into the system prompt.
+
+A note has no trace and is never checked. A note without `need` goes into the system prompt section, so it survives compaction without a message per turn. A note with `need` goes into the `prompt.submit` context block when that need first matches and again after each compaction while the need stays active. A note confirmed during a session is also sent once in the next context block, because the cached system prompt section only changes after a compaction or a new thread.
+
+#### Where proposals come from
+
+- Skills. When `skill.prompt` delivers a skill version Souffleur has not read before (by a hash of name and text), a small model reads the text once and proposes rules and notes that have a trace or are standing instructions. The hash is stored, so a skill is read again only when it changes.
+- Slips. Souffleur registers a tool, `souffleur_propose`, and the system prompt section asks the model to call it when something went wrong that a rule would have caught (a denial, a "would have denied" entry, a correction from the user). The main model knows what happened in the conversation; a small model reading events does not.
+- The user. "Remember as a rule: ..." in chat goes through the same tool. `/souffleur rule <text>` does too: Souffleur passes the text to the model to shape into a rule or note.
+
+#### Asking
+
+Proposals wait in a queue. On `turn.complete`, if the queue is not empty and the session is interactive, Souffleur asks about the first one with `$.ui.ask`, Claude Code's own choice dialog: "Add rule: before Agent calls, dev-workflow is loaded?" with `Yes, everywhere`, `Yes, this project only`, `No`. The dialog shows the rule in its exact short form (`before Agent: skill dev-workflow loaded`), not a paraphrase. Text typed under "Other" goes to the main model in the next context block as a request to revise the proposal, whatever its source; the revision is asked about at a later turn end. One question per turn at most. A dismissed dialog leaves the proposal queued; `/souffleur` lists open proposals, and `/souffleur review` asks about them one by one. A declined proposal is remembered by its hash and not proposed again. Without an interactive surface (`claude -p`), or where `$.ui.ask` fails, nothing is asked: proposals stay queued, and `/souffleur review` and `/souffleur accept <id>` handle them in text. If the registered tool does not reach the model, `/souffleur rule` is the only path for the user's own rules and the system prompt sentence about the tool is left out.
+
+Confirmed rules and notes are written to the user file, `~/.claude/souffleur.json`, never to a project file, so what Souffleur learns about a user's way of working stays on their machine.
+
+#### Approaches considered
+
+| Approach | Trade-off |
+|---|---|
+| A small model in the mod does all of it | No cost in the main conversation, but it lacks the conversation, so it cannot tell why a slip happened. |
+| The main model does all of it through the tool | Has the context, but reading every skill would cost tokens and context in the main conversation. |
+| Mixed (chosen 2026-11-25) | The small model reads skills, which needs no conversation and happens once per version. Slips and the user's words go through the main model. Souffleur asks in both cases. |
 
 ### Subagents
 
@@ -180,6 +235,12 @@ Instead Souffleur makes the main session decide, at the moment it hands work off
 3. Does `$.state` survive a reload of the mod and a resume, and does `$.store` keyed by session id cover the rest?
 4. How does the status line render in the desktop and mobile clients?
 5. Plugin skill names: is the `skill.prompt` key `chisle:chisle` or `chisle`?
+
+Items 1 to 5 were answered on 2.1.332; see [background.md](background.md). Open for rules and notes:
+
+6. Does `$.ui.ask` show its dialog in a Remote Control session in the desktop and mobile apps, and does it reject cleanly where nobody can answer?
+7. Does a tool registered with `$.tool.register` reach the model in the main session, and does the model call it when the system prompt section asks?
+8. How long and how reliable is one small-model call over a 40 KB skill text through `$.model.complete`?
 
 ## Left to the builder
 
