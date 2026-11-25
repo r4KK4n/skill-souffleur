@@ -99,6 +99,8 @@ JSON, so the mod needs no parser dependency. A user file `~/.claude/souffleur.js
 
 A skill with `always` is needed from the first turn. A skill with `need` is needed once the classifier has matched that need in the session. `gate` and `duty` are optional.
 
+The top-level `mode` key decides whether Souffleur may block anything. In `observe`, the default, Souffleur keeps the ledger, asks for restores and reports through `/souffleur`, but denies no tool call; `/souffleur` lists each call it would have denied. In `enforce`, gates and duties deny as described below. Only the user file can set `enforce`. A project file that sets it gets an error and the mode stays as the user file has it, so a cloned repository cannot switch gates on for whoever opens it.
+
 ### Ledger
 
 One entry per configured skill, kept in `$.state` for the session and mirrored to `$.store` keyed by session id so a resume finds it.
