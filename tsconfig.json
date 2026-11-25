@@ -13,5 +13,6 @@
     "resolveJsonModule": true,
     "skipLibCheck": true
   },
-  "include": ["src", "test"]
+  "include": ["src", "test"],
+  "exclude": ["src/mod/register.ts", "src/mod/register.test.ts"]
 }

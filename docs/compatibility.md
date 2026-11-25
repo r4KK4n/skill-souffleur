@@ -13,3 +13,9 @@ Souffleur depends on Claude Code's mod API, which is early access and changes be
 | `$.state` is empty after a resume; `$.store` keeps values across sessions (no fixture) | 2.1.332 |
 | `tool.call` carries tool arguments flat on the event and `agentId` for subagent calls | 2.1.332 |
 | A hooks module outside `hooks/` can import sibling `.ts` files (no fixture) | 2.1.332 |
+| After `/compact` in the same process, the engine re-attaches the skill with the note "Do NOT re-execute these skills". A plain request to load them again is ignored; a request that names that note and says it does not apply is followed | 2.1.332 |
+| A `prompt.submit` `context` entry reaches the model as a hook note on the user's turn, also on the first prompt after `/compact` | 2.1.332 |
+| `$.ui.status(text)` shows in headless stream-json output as a `ui_status` system message | 2.1.332 |
+| `$.command.register` makes `/souffleur` reach a `command.run` hook with `command: "souffleur"` | 2.1.332 |
+| `$.fs.exists` and `$.fs.read` read `~/.claude/souffleur.json` and `<project>/.claude/souffleur.json`; `$.env.get("HOME")` gives the home folder | 2.1.332 |
+| `claude plugin test` cannot set `origin`, `command` or `isMeta` on a `prompt.submit` call, and a `session.compact` call carries no `messages`, so the adapter tests treat a prompt without `origin` as typed | 2.1.332 |

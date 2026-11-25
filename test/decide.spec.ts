@@ -340,3 +340,11 @@ test('session survives JSON round trip', () => {
   const again = decide(base, JSON.parse(JSON.stringify(s)) as Session, prompt('more'))
   assert.deepEqual(JSON.parse(JSON.stringify(again.session)), again.session)
 })
+
+test('a restore after compaction says the engine note about earlier skills does not apply', () => {
+  const config = cfg({ skills: { bigtest: { always: true, from: 'user' } } })
+  const r = run(config, [loadSkill('bigtest'), compact(), prompt('next')])
+  assert.match(ctx(r.out.at(-1)!), /invoke these skills .*: bigtest\. .*must not be run again does not apply/)
+  const first = run(config, [prompt('first')])
+  assert.doesNotMatch(ctx(first.out.at(-1)!), /does not apply/)
+})
