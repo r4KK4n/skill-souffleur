@@ -118,3 +118,9 @@ test('status line counts skills not installed here separately', () => {
   assert.equal(statusLine(s, 'enforce'), '0 loaded, 3 not installed here')
   assert.match(renderTable(config, s, T1), /\| ui-checklist \| not installed here \|/)
 })
+
+test('open duties of a skill not installed here are not listed', () => {
+  const s0 = decide(config, fresh(), { type: 'installed', now: T1, names: ['writing-guide'] }).session
+  const s = { ...s0, duties: [{ skill: 'ui-checklist', openedAt: T1, by: 'Write', denied: false }] }
+  assert.doesNotMatch(renderTable(config, s, T1), /Open duties/)
+})

@@ -96,7 +96,7 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
     case 'typed':
       return { session: e.name in s.ledger ? { ...s, mainSkillCalls: [...s.mainSkillCalls, e.name] } : s, actions: [] }
     case 'config':
-      return { session: { ...s, ledger: syncLedger(s.ledger, config, e.now), errors: [...s.errors.filter((m) => !m.startsWith('config: ')), ...e.errors.map((m) => `config: ${m}`)].slice(-KEEP) }, actions: [] }
+      return { session: { ...s, ledger: syncLedger(s.ledger, config, e.now), needs: Object.fromEntries(Object.entries(s.needs).filter(([name]) => name in config.needs)), duties: s.duties.filter((d) => d.skill in config.skills), errors: [...s.errors.filter((m) => !m.startsWith('config: ')), ...e.errors.map((m) => `config: ${m}`)].slice(-KEEP) }, actions: [] }
     case 'installed':
       return { session: { ...s, ledger: markInstalled(s.ledger, e.names, e.now) }, actions: [] }
     case 'agentDone':
@@ -148,7 +148,7 @@ function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'pro
   const r = restore(config, next, e.now)
   next.ledger = r.ledger
   const lines = r.text === undefined ? [] : [r.text]
-  for (const d of next.duties) lines.push(`Open duty: ${d.skill} (${d.by}).`)
+  for (const d of next.duties) if (next.ledger[d.skill]?.state !== 'not installed here') lines.push(`Open duty: ${d.skill} (${d.by}).`)
   return { session: next, actions: lines.length ? [{ kind: 'context', text: lines.join('\n') }] : [] }
 }
 
@@ -188,7 +188,7 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
       else {
         next.agentDenied = true
         found.push({
-          text: `Souffleur: add a line "skills: <names>" (or "skills: none" for mechanical work) to the brief, then retry. Configured skills: ${Object.keys(config.skills).join(', ') || 'none'}. Active needs: ${active.join(', ')}. ${PAUSE_HINT}`,
+          text: `Souffleur: add a line "skills: <names>" (or "skills: none" for mechanical work) to the brief, then retry. Configured skills: ${Object.keys(config.skills).filter((n) => next.ledger[n]?.state !== 'not installed here').join(', ') || 'none'}. Active needs: ${active.join(', ')}. ${PAUSE_HINT}`,
           trusted: true,
         })
       }
@@ -196,10 +196,10 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
 
     const needed = neededSkills(config, next.needs)
     for (const [name, rule] of Object.entries(config.skills)) {
-      if (!rule.gate || !matches(rule.gate, e.tool, e.path, e.root)) continue
+      if (!rule.gate || next.ledger[name]?.state === 'not installed here' || !matches(rule.gate, e.tool, e.path, e.root)) continue
       const trusted = rule.from === 'user' || trustedRoot
       const state = next.ledger[name]?.state
-      if (needed.includes(name) && state !== undefined && state !== 'loaded' && state !== 'unavailable' && state !== 'not installed here') {
+      if (needed.includes(name) && state !== undefined && state !== 'loaded' && state !== 'unavailable') {
         found.push({ text: `Souffleur: load ${name} with the Skill tool first, then retry. ${PAUSE_HINT}`, trusted })
       }
       const duty = next.duties.find((d) => d.skill === name)
@@ -226,7 +226,7 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
   if (!denied) {
     if (e.tool === 'Agent') next.subagentsRunning += 1
     for (const [name, rule] of Object.entries(config.skills)) {
-      if (!rule.duty || !matches(rule.duty.after, e.tool, e.path, e.root)) continue
+      if (!rule.duty || next.ledger[name]?.state === 'not installed here' || !matches(rule.duty.after, e.tool, e.path, e.root)) continue
       if (next.duties.some((d) => d.skill === name)) continue
       next.duties = [...next.duties, { skill: name, openedAt: e.now, by: e.path === undefined ? e.tool : `${e.tool} ${e.path}`, denied: false }]
     }

@@ -14,7 +14,7 @@ export function renderTable(config: Config, s: Session, now: number): string {
   for (const [name, e] of Object.entries(s.ledger)) {
     lines.push(`| ${cell(name)} | ${e.state} | ${clock(e.since)} | ${cell(e.reason)} |`)
   }
-  const duties = s.duties.map((d) => `- ${d.skill} (${d.by})`)
+  const duties = s.duties.filter((d) => s.ledger[d.skill]?.state !== 'not installed here').map((d) => `- ${d.skill} (${d.by})`)
   if (duties.length) lines.push('', 'Open duties:', ...duties)
   const needs = Object.entries(s.needs).map(([name, n]) => `- ${name}: ${n.reason}`)
   if (needs.length) lines.push('', 'Active needs:', ...needs)

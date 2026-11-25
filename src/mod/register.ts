@@ -4,7 +4,7 @@ import { decide, initSession } from '../core/decide.ts'
 import { MIGRATE_INTRO, describeHook, findHookOverlaps, findPassages, hookQuestion, hookSteps, isGuess, migrateSteps, passageLines, removeHook } from '../core/migrate.ts'
 import type { HookOverlap, Passage } from '../core/migrate.ts'
 import { CHOICE_LABEL, INJECTED_HELP, NOT_SET_UP, SETUP_INTRO, applyChoice, candidates, choiceOf, cleanNeedText, configProblem, currentChoice, describePlan, explicitOnly, injectedWarning, needKeyFor, options, parsePicks, parseSkips, picksPrompt, setupSteps } from '../core/setup.ts'
-import type { LoadChoice, NeedText, Plan, Suggestion } from '../core/setup.ts'
+import type { LoadChoice, NeedText, Plan, StartHooks, Suggestion } from '../core/setup.ts'
 import type { Action, CoreEvent, Session } from '../core/decide.ts'
 import { classifyPrompt } from '../core/needs.ts'
 import { statusLine } from '../core/status.ts'
@@ -80,12 +80,20 @@ async function current($: Dollar): Promise<{ l: Loaded; session: Session }> {
   const l = await getLoaded($)
   const id: string = await $.session.id()
   const held: Session | undefined = (await $.state.get(REF)).value
-  if (held && held.id === id) return { l, session: held }
+  if (held && held.id === id) return { l, session: heal(l, held) }
   // A different id with no session.start in between is /clear (D6).
   if (held) return { l, session: await freshSession($, l, id, 'clear') }
   const stored = await $.store.get(`session:${id}`)
-  if (isSession(stored, id)) return { l, session: stored }
+  if (isSession(stored, id)) return { l, session: heal(l, stored) }
   return { l, session: await freshSession($, l, id, 'startup') }
+}
+
+/** A session whose ledger lists other skills than the config (a session that missed a config change) follows the config. */
+function heal(l: Loaded, s: Session): Session {
+  const want = Object.keys(l.config.skills)
+  const have = Object.keys(s.ledger)
+  if (want.length === have.length && want.every((name) => name in s.ledger)) return s
+  return decide(l.config, s, { type: 'config', now: now(), errors: l.errors }).session
 }
 
 async function persist($: Dollar, l: Loaded, s: Session): Promise<void> {
@@ -117,12 +125,89 @@ async function safe<T>($: Dollar, where: string, fallback: T, work: () => Promis
   }
 }
 
-/** Names of the skills this session lists. `$.session.usage` carries the skill listing; `$.command.list` is the fallback. */
+/** How long the skill listing may take before the prompt goes on without it. */
+const LIST_BUDGET_MS = 300
+
+/**
+ * The names `$.session.usage` lists (observed on 2.1.332: plugin skills as `plugin:skill`, others bare), or undefined when
+ * that list is missing, empty or incomplete. The command list is not used: it is a different list, so it would mark skills wrongly.
+ */
+async function listedSkills($: Dollar): Promise<string[] | undefined> {
+  try {
+    const skills = (await $.session.usage({ breakdown: 'summary' }))?.context?.breakdown?.skills
+    const listed: { name: string }[] | undefined = skills?.skillFrontmatter
+    if (!listed?.length) return undefined
+    if (typeof skills.totalSkills === 'number' && typeof skills.includedSkills === 'number' && skills.includedSkills < skills.totalSkills) return undefined
+    return [...new Set(listed.map((x) => x.name))]
+  } catch {
+    return undefined
+  }
+}
+
+/** Tells the ledger which skills this session lists, so configured skills it lacks are neither requested nor gated. Gives up after the budget. */
+async function refreshInstalled($: Dollar): Promise<void> {
+  const names = await Promise.race([listedSkills($), $.clock.sleep(LIST_BUDGET_MS).then(() => undefined)])
+  if (names?.length) await apply($, () => ({ type: 'installed', now: now(), names }))
+}
+
+/**
+ * What the plugin behind `skill` (`plugin:name`) says about SessionStart hooks, over every installed copy of it: its
+ * `hooks/hooks.json` and the hooks declared in `plugin.json`. `mentions`: a hook command names the skill. `none` only
+ * when every file could be read and none declares one; anything unsure is `unknown`.
+ */
+async function pluginStartHooks($: Dollar, home: string, skill: string): Promise<StartHooks> {
+  const plugin = skill.split(':')[0]!
+  const bareName = skill.split(':').pop()!
+  const names = new RegExp(`(^|[^A-Za-z0-9])${bareName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^A-Za-z0-9]|$)`)
+  try {
+    const listed: unknown = parseJson(await $.fs.read(`${home}/.claude/plugins/installed_plugins.json`))
+    const plugins = (listed as { plugins?: Record<string, { installPath?: unknown }[]> }).plugins ?? {}
+    const dirs = Object.entries(plugins)
+      .filter(([key]) => key.split('@')[0] === plugin)
+      .flatMap(([, copies]) => (Array.isArray(copies) ? copies : []))
+      .flatMap((copy) => (typeof copy?.installPath === 'string' ? [copy.installPath] : []))
+    if (!dirs.length) return 'unknown'
+    let read = 0
+    let unsure = false
+    let declared = false
+    const commands: string[] = []
+    const take = (hooks: unknown) => {
+      const groups = typeof hooks === 'object' && hooks !== null ? (hooks as Record<string, unknown>).SessionStart : undefined
+      if (!Array.isArray(groups) || groups.length === 0) return
+      declared = true
+      for (const g of groups) for (const h of Array.isArray(g?.hooks) ? g.hooks : []) if (typeof h?.command === 'string') commands.push(h.command)
+    }
+    for (const dir of dirs) {
+      for (const file of [`${dir}/hooks/hooks.json`, `${dir}/.claude-plugin/plugin.json`]) {
+        if (!(await $.fs.exists(file))) continue
+        try {
+          const doc = parseJson(await $.fs.read(file)) as { hooks?: unknown }
+          read += 1
+          if (typeof doc.hooks === 'string') {
+            const more = `${dir}/${doc.hooks.replace(/^\.\//, '')}`
+            if (await $.fs.exists(more)) take((parseJson(await $.fs.read(more)) as { hooks?: unknown }).hooks)
+            else unsure = true
+          } else take(doc.hooks)
+        } catch {
+          unsure = true
+        }
+      }
+    }
+    if (declared) return commands.some((c) => names.test(c)) ? 'mentions' : 'exists'
+    return read > 0 && !unsure ? 'none' : 'unknown'
+  } catch {
+    return 'unknown'
+  }
+}
+
+/** The names `$.session.usage` lists, with the command list as a fallback. For init's candidates only: it says nothing about what is installed here. */
 async function installedSkills($: Dollar): Promise<string[]> {
+  const listed = await listedSkills($)
+  if (listed) return listed
   try {
     const usage = await $.session.usage({ breakdown: 'summary' })
-    const listed: { name: string }[] | undefined = usage?.context?.breakdown?.skills?.skillFrontmatter
-    if (listed?.length) return [...new Set(listed.map((x) => x.name))]
+    const partial: { name: string }[] | undefined = usage?.context?.breakdown?.skills?.skillFrontmatter
+    if (partial?.length) return [...new Set(partial.map((x) => x.name))]
   } catch {
     // fall through to the command list
   }
@@ -130,28 +215,6 @@ async function installedSkills($: Dollar): Promise<string[]> {
     return (await $.command.list()).map((c: { name: string }) => c.name)
   } catch {
     return []
-  }
-}
-
-/** Tells the ledger which skills this session lists, so configured skills it lacks are neither requested nor gated. */
-async function refreshInstalled($: Dollar): Promise<void> {
-  const names = await installedSkills($)
-  if (names.length) await apply($, () => ({ type: 'installed', now: now(), names }))
-}
-
-/** Whether the plugin behind `skill` (`plugin:name`) declares a SessionStart hook; undefined when its files cannot be read. */
-async function pluginHasStartHook($: Dollar, home: string, skill: string): Promise<boolean | undefined> {
-  try {
-    const plugin = skill.split(':')[0]!
-    const listed: unknown = parseJson(await $.fs.read(`${home}/.claude/plugins/installed_plugins.json`))
-    const plugins = (listed as { plugins?: Record<string, { installPath?: unknown }[]> }).plugins ?? {}
-    const entry = Object.entries(plugins).find(([key]) => key.split('@')[0] === plugin)?.[1]?.[0]
-    if (typeof entry?.installPath !== 'string') return undefined
-    const manifest: unknown = parseJson(await $.fs.read(`${entry.installPath}/hooks/hooks.json`))
-    const hooks = (manifest as { hooks?: Record<string, unknown> }).hooks
-    return typeof hooks === 'object' && hooks !== null && Array.isArray(hooks.SessionStart) && hooks.SessionStart.length > 0
-  } catch {
-    return undefined
   }
 }
 
@@ -308,7 +371,16 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
   const unwatched = installed.filter((name) => !watched.has(name))
   const toAsk = plans.filter((p) => p.source !== 'project')
 
-  const noDialog = () => withNotes(setupSteps({ plans, userConfig: userDoc, configPath: shown(configPath), unwatched }), notes)
+  /** The line for an injected result: the plugin's SessionStart hooks decide which one. */
+  const injectedLine = async (skill: string) => injectedWarning(skill, await pluginStartHooks($, home, skill))
+  const noDialog = async () => {
+    const warnings: string[] = []
+    for (const p of toAsk) {
+      const line = p.recommended === 'injected' ? await injectedLine(p.skill) : undefined
+      if (line) warnings.push(`${p.skill}: ${line}`)
+    }
+    return withNotes(setupSteps({ plans, userConfig: userDoc, configPath: shown(configPath), unwatched, warnings }), notes)
+  }
   const done: string[] = []
   let asked = false
   let wrote = false
@@ -383,7 +455,13 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
       if (r.note) done.push(r.note)
       const label = choice === 'none' ? 'not watched' : CHOICE_LABEL[choice]
       if (r.note || JSON.stringify(r.config) === JSON.stringify(doc) || (now2.kind === 'missing' && choice === 'none')) {
-        if (!r.note) done.push(`Kept ${p.skill}: ${label}. Nothing was written.`)
+        if (!r.note) {
+          done.push(`Kept ${p.skill}: ${label}. Nothing was written.`)
+          if (choice === 'injected') {
+            const line = await injectedLine(p.skill)
+            if (line) done.push(line)
+          }
+        }
         continue
       }
       await $.fs.write(configPath, `${JSON.stringify(r.config, null, 2)}\n`)
@@ -391,8 +469,8 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
       loaded = undefined // the session reads the new file on its next event
       done.push(`${p.skill}: ${label}.`)
       if (choice === 'injected') {
-        const warning = injectedWarning(p.skill, await pluginHasStartHook($, home, p.skill))
-        if (warning) done.push(warning)
+        const line = await injectedLine(p.skill)
+        if (line) done.push(line)
       }
       if (r.pruned?.length) done.push(`Removed the unused ${r.pruned.length === 1 ? 'need' : 'needs'} ${r.pruned.join(', ')}.`)
     }
@@ -408,11 +486,12 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
       loaded = undefined
       const { l, session } = await current($)
       await persist($, l, decide(l.config, session, { type: 'config', now: now(), errors: l.errors }).session)
-      await refreshInstalled($)
     } catch (err) {
       notes.push(`The new entries could not be applied to this session (${scrub(home, message(err))}). They apply from the next session start.`)
       wrote = false
     }
+    // The skill listing is its own step: when it fails the entries are still applied.
+    if (wrote) await safe($, 'installed', undefined, () => refreshInstalled($))
   }
 
   const out = ['Souffleur init', '', ...(toAsk.length || done.length ? done.map((d) => `- ${d}`) : ['- Nothing to ask: no skill is configured yet and none looks worth watching.'])]
@@ -446,12 +525,21 @@ async function runMigrate($: Dollar, l: Loaded): Promise<string> {
 
   const files = await readStanding($, l, home, notes)
   const configured = Object.keys(l.config.skills)
+  // Only skills of the user file count as watched: a project file's entry works in that project alone.
+  const watched = Object.entries(l.config.skills).filter(([, r]) => r.from === 'user').map(([name]) => name)
   const installed = await installedSkills($)
   const hooks: HookOverlap[] = findHookOverlaps(settings.value, configured, installed.filter((n) => !configured.includes(n)))
   const passages: Passage[] = findPassages(files, configured, Infinity)
   const known = { configured, installedOnly: installed.filter((n) => !configured.includes(n)) }
 
-  const noDialog = () => withNotes(migrateSteps({ hooks, passages, settingsPath: shown(settingsPath), watched: configured }), notes)
+  const { session } = await current($)
+  for (const o of hooks) {
+    for (const name of o.skills ?? []) {
+      const note = `${name} is configured but not installed in this session, so Souffleur cannot keep it loaded here. Check before turning the hook off.`
+      if (watched.includes(name) && session.ledger[name]?.state === 'not installed here' && !notes.includes(note)) notes.push(note)
+    }
+  }
+  const noDialog = () => withNotes(migrateSteps({ hooks, passages, settingsPath: shown(settingsPath), watched }), notes)
   const done: string[] = []
   const manual: string[] = []
   const label = (o: HookOverlap) => `${o.event} hook ${o.command}`
@@ -460,7 +548,7 @@ async function runMigrate($: Dollar, l: Loaded): Promise<string> {
   let expected = settings.text // what settings.json should hold; anything else means it changed under us
   try {
     for (const [i, o] of hooks.entries()) {
-      const q = hookQuestion(o, configured)
+      const q = hookQuestion(o, watched)
       const question = `${asked ? '' : `${MIGRATE_INTRO}\n\n`}${q.text}`
       const answer: unknown = await $.ui.ask(question, { options: q.options, header: 'Souffleur' })
       asked = true
@@ -534,11 +622,11 @@ export const register: Register = (on) => {
       if (before) {
         // Resume or reload: the ledger stays, what the config said last time does not.
         s = decide(l.config, { ...before, errors: [] }, { type: 'start', now: now(), start: 'resume', version }).session
-        for (const msg of l.errors) s = decide(l.config, s, { type: 'error', now: now(), where: 'config', message: msg }).session
+        s = decide(l.config, s, { type: 'config', now: now(), errors: l.errors }).session
       } else s = await freshSession($, l, id, 'startup')
       await persist($, l, s)
-      await refreshInstalled($)
     })
+    await safe($, 'installed', undefined, () => refreshInstalled($))
     await safe($, 'command.register', undefined, async () => {
       await $.command.register({ name: 'souffleur', description: 'Show which skills Souffleur keeps loaded', argumentHint: '[status | need <name> | drop <name> | pause | init | migrate]' })
     })
@@ -570,6 +658,8 @@ export const register: Register = (on) => {
     const fromUser = isFromUser(e)
     const texts = await safe($, 'prompt.submit', [] as string[], async () => {
       const { config } = await getLoaded($)
+      // The skill listing runs beside the classification and gives up after its own short budget.
+      const listing = fromUser ? safe($, 'installed', undefined, () => refreshInstalled($)) : undefined
       const matched =
         fromUser && Object.keys(config.needs).length > 0
           ? await classifyPrompt(
@@ -579,7 +669,7 @@ export const register: Register = (on) => {
               (ms) => $.clock.sleep(ms),
             )
           : []
-      if (fromUser) await refreshInstalled($)
+      await listing
       const { actions } = await apply($, () => ({ type: 'prompt', now: now(), text: e.text, fromUser, matched }))
       return actions.flatMap((a) => (a.kind === 'context' ? [a.text] : []))
     })
@@ -589,9 +679,9 @@ export const register: Register = (on) => {
   on('prompt.compose', async ($, e, next) => {
     const r = await next(e)
     const text = await safe($, 'prompt.compose', undefined as string | undefined, async () => {
-      const { config } = await getLoaded($)
-      const always = Object.entries(config.skills)
-        .filter(([, rule]) => rule.always === true)
+      const { l, session } = await current($)
+      const always = Object.entries(l.config.skills)
+        .filter(([name, rule]) => rule.always === true && session.ledger[name]?.state !== 'not installed here')
         .map(([name]) => name)
       return `${RULE}${always.length ? ` Always-on skills: ${always.join(', ')}.` : ''}`
     })
@@ -633,6 +723,7 @@ export const register: Register = (on) => {
       const verb0 = (e.args ?? '').trim().split(/\s+/)[0]
       if (verb0 === 'init' || verb0 === 'migrate') {
         const text = await safe($, 'command.run', undefined as string | undefined, async () => {
+          loaded = undefined // read the files again: another session may have changed them
           const { l } = await current($)
           return verb0 === 'init' ? runInit($, l) : runMigrate($, l)
         })

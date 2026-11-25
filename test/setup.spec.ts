@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { parseConfig } from '../src/core/config.ts'
-import { applyChoice, candidates, cleanNeedText, CHOICE_LABEL, explicitOnly, injectedWarning, options, parsePicks, parseSkips, picksPrompt, SETUP_INTRO, INJECTED_HELP } from '../src/core/setup.ts'
+import { applyChoice, candidates, cleanNeedText, CHOICE_LABEL, explicitOnly, injectedWarning, options, parsePicks, parseSkips, picksPrompt, setupSteps, SETUP_INTRO, INJECTED_HELP } from '../src/core/setup.ts'
 
 const config = (user: unknown, project?: unknown) => parseConfig(JSON.stringify(user), project === undefined ? undefined : JSON.stringify(project)).config
 const doc = (c: unknown) => c as { mode?: string; skills: Record<string, Record<string, unknown>>; needs: Record<string, string> }
@@ -202,18 +202,19 @@ test('the help text for the injected answer gives an example and names the other
   assert.doesNotMatch(INJECTED_HELP, /[–—]/)
 })
 
-test('injectedWarning fires unless the plugin is known to have a SessionStart hook', () => {
-  assert.equal(injectedWarning('flow:plan', true), undefined)
-  assert.match(injectedWarning('flow:plan', false)!, /flow/)
-  assert.match(injectedWarning('flow:plan', false)!, /SessionStart/)
-  assert.match(injectedWarning('flow:plan', undefined)!, /could not check/i)
-  assert.equal(injectedWarning('plain-skill', false), undefined)
+test('injectedWarning has a line for every result except a hook that names the skill', () => {
+  assert.equal(injectedWarning('flow:plan', 'mentions'), undefined)
+  assert.match(injectedWarning('flow:plan', 'none')!, /^Warning: the plugin flow has no SessionStart hook/)
+  assert.match(injectedWarning('flow:plan', 'exists')!, /^Note: the plugin flow has a SessionStart hook; Souffleur cannot tell whether it prints flow:plan/)
+  assert.match(injectedWarning('flow:plan', 'unknown')!, /could not check/i)
+  assert.equal(injectedWarning('plain-skill', 'none'), undefined)
 })
 
 test('explicitOnly spots descriptions that run only on request', () => {
   assert.equal(explicitOnly('Use ONLY when the owner asks for it by name'), true)
-  assert.equal(explicitOnly('Run the full workflow only on an explicit request.'), true)
   assert.equal(explicitOnly('Only use when the user explicitly asks for a deep review.'), true)
+  assert.equal(explicitOnly('Review code. Invoke only when explicitly requested.'), true)
+  assert.equal(explicitOnly('Draft notes. Run it only when the owner asks.'), true)
   assert.equal(explicitOnly('Use when writing text that people read'), false)
   assert.equal(explicitOnly(undefined), false)
 })
@@ -229,4 +230,18 @@ test('parseSkips lists installed skills the model gave no need', () => {
   const raw = JSON.stringify({ skills: [{ name: 'a', need: null }, { name: 'b', need: 'ui', needText: 't' }, { name: 'ghost', need: null }, { name: 'c', need: 'none' }] })
   assert.deepEqual(parseSkips(raw, ['a', 'b', 'c']), ['a', 'c'])
   assert.deepEqual(parseSkips('no json', ['a']), [])
+})
+
+test('explicitOnly leaves skills that merely mention explicit requests alone', () => {
+  for (const text of [
+    'Security guidance. Run the complete workflow only for explicit codebase audit or pen-test requests',
+    'Only use the strict mode if the user asks',
+    'Review the plan, then explicitly invoke the detector at the end',
+  ]) assert.equal(explicitOnly(text), false, text)
+})
+
+test('setupSteps lists warnings after the recommendations', () => {
+  const plans = [{ skill: 'flow:plan', source: 'user' as const, current: 'injected' as const, recommended: 'injected' as const }]
+  const text = setupSteps({ plans, userConfig: undefined, configPath: '~/c.json', unwatched: [], warnings: ['Warning: x.'] })
+  assert.match(text, /Warning: x\./)
 })

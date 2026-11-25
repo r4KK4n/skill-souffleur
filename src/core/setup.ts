@@ -32,19 +32,27 @@ export const SETUP_INTRO = [
 /** The explanation a dialog adds for plugin skills, with an example of what injected means and what it does not. */
 export const INJECTED_HELP = `Choose ${CHOICE_LABEL.injected} only when the plugin puts the skill's text into every session by itself, for example with a hook that runs at session start. A plugin that only lists its skills, or a skill you invoke with the Skill tool, is not injected: choose From the start or When the task needs it, or Souffleur will report the skill as loaded when it is not.`
 
-/** The warning for `Loaded by its own plugin at start (rare)` on a plugin skill; `hasStartHook` is undefined when the plugin's hooks could not be read. */
-export function injectedWarning(skill: string, hasStartHook: boolean | undefined): string | undefined {
+/** What the adapter found about a plugin's SessionStart hooks: none declared, declared, declared and naming the skill, or not readable. */
+export type StartHooks = 'none' | 'exists' | 'mentions' | 'unknown'
+
+/** The line `Loaded by its own plugin at start (rare)` gets in the summary for a plugin skill; none when a hook command names the skill. */
+export function injectedWarning(skill: string, hooks: StartHooks): string | undefined {
   const plugin = skill.split(':')[0]!
-  if (!skill.includes(':') || hasStartHook === true) return undefined
-  return hasStartHook === false
-    ? `Warning: the plugin ${plugin} has no SessionStart hook, so it probably does not put ${skill} in at start. Souffleur will report the skill as loaded when it is not. Choose From the start if you want it loaded.`
-    : `Warning: Souffleur could not check whether the plugin ${plugin} has a SessionStart hook. If it has none, it does not put ${skill} in at start, and Souffleur will report the skill as loaded when it is not.`
+  if (!skill.includes(':') || hooks === 'mentions') return undefined
+  switch (hooks) {
+    case 'none':
+      return `Warning: the plugin ${plugin} has no SessionStart hook, so it probably does not put ${skill} in at start. Souffleur will report the skill as loaded when it is not. Choose From the start if you want it loaded.`
+    case 'exists':
+      return `Note: the plugin ${plugin} has a SessionStart hook; Souffleur cannot tell whether it prints ${skill}. If it does not, the skill shows as loaded when it is not.`
+    default:
+      return `Warning: Souffleur could not check whether the plugin ${plugin} has a SessionStart hook. If it has none, it does not put ${skill} in at start, and Souffleur will report the skill as loaded when it is not.`
+  }
 }
 
-/** True when a skill description says the skill runs only on an explicit request. */
+/** True when a skill's own description says it runs only on an explicit request, in the usual skill phrasing. */
 export function explicitOnly(description: string | undefined): boolean {
   if (!description) return false
-  return /\bonly\b[^.]{0,40}\b(when|if|on|for)\b[^.]{0,60}\b(ask|asks|asked|request|requests|requested|invoke|invokes|invoked|by name)\b|\bexplicit(ly)?\b[^.]{0,30}\b(ask|asks|request|requests|invocation|invoke)/i.test(description)
+  return /^\s*(?:use|run|invoke)\s+only\s+(?:when|if)\b|^\s*only\s+use\s+(?:when|if)\s+the\s+(?:user|owner)\b|\bonly\s+(?:when|if)\s+the\s+(?:user|owner|person)\s+(?:explicitly\s+)?(?:asks|requests|invokes|names)\b|\binvoke\s+only\s+when\s+explicitly\b/im.test(description)
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -247,7 +255,7 @@ export function describePlan(p: Plan): string {
 }
 
 /** The text `/souffleur init` returns when it cannot ask: the explanation, the recommendations and the config they give. */
-export function setupSteps(a: { plans: Plan[]; userConfig: unknown; configPath: string; unwatched: string[] }): string {
+export function setupSteps(a: { plans: Plan[]; userConfig: unknown; configPath: string; unwatched: string[]; warnings?: string[] }): string {
   const out = [SETUP_INTRO, '', 'No dialog is available here, so nothing was changed.', '']
   const asked = a.plans.filter((p) => p.source !== 'project')
   const project = a.plans.filter((p) => p.source === 'project')
@@ -257,6 +265,7 @@ export function setupSteps(a: { plans: Plan[]; userConfig: unknown; configPath: 
     for (const p of asked) if (p.recommended !== p.current) config = applyChoice(config, p.skill, p.recommended, p.need).config
     out.push(`With these answers ${a.configPath} would read:`, '', '```json', JSON.stringify(config ?? { mode: 'observe', skills: {}, needs: {} }, null, 2), '```', '')
   } else out.push('No skills to ask about.', '')
+  if (a.warnings?.length) out.push(...a.warnings, '')
   if (project.length) out.push(`Set only in a project file, so init leaves ${project.length === 1 ? 'it' : 'them'} alone:`, ...project.map((p) => `- ${p.skill}`), '')
   if (a.unwatched.length) out.push(`Installed and not watched: ${a.unwatched.join(', ')}.`, '')
   out.push('Steps:', `1. Put the entries you want into ${a.configPath}, keeping what the file already holds. A new file starts in observe mode.`, '2. Run /souffleur init in a session with a dialog to let it ask per skill and write the answers.')

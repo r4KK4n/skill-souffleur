@@ -370,3 +370,29 @@ test('a config event adds new skills as absent, drops removed ones and swaps con
   assert.equal(s.ledger['pdf-tool']!.state, 'absent')
   assert.deepEqual(s.errors, ['hook: kept'])
 })
+
+test('a skill not installed here opens no duty and is left out of the Agent brief list', () => {
+  const c = cfg({ mode: 'observe' })
+  const gone = [{ type: 'installed', now: at(), names: ['writing-guide'] } as CoreEvent]
+  const { s, out } = run(c, [...gone, prompt('x', ['ui']), tool('Write', { path: 'x.html' }), tool('Agent', { brief: 'no skills line' })])
+  assert.deepEqual(s.duties, [])
+  const denied = JSON.stringify(out)
+  assert.doesNotMatch(denied, /ui-checklist/)
+  const enforced = run(cfg(), [...gone, prompt('x', ['prose']), tool('Agent', { brief: 'no skills line' })])
+  const deny = enforced.out[2]!.find((a) => a.kind === 'deny') as { reason: string } | undefined
+  assert.ok(deny)
+  assert.doesNotMatch(deny.reason, /ui-checklist/)
+  assert.match(deny.reason, /writing-guide/)
+})
+
+test('a config event drops needs the config no longer has and duties of removed skills', () => {
+  const c = cfg()
+  const start = {
+    ...initSession(c, 'session-1', 0, 'clear'),
+    needs: { ui: { since: 1, reason: 'x' }, gone: { since: 1, reason: 'y' } },
+    duties: [{ skill: 'ui-checklist', openedAt: 1, by: 'Write', denied: false }, { skill: 'removed', openedAt: 1, by: 'Write', denied: false }],
+  }
+  const { s } = run(c, [{ type: 'config', now: at(), errors: [] }], start)
+  assert.deepEqual(Object.keys(s.needs), ['ui'])
+  assert.deepEqual(s.duties.map((d) => d.skill), ['ui-checklist'])
+})

@@ -61,21 +61,30 @@ export function syncLedger(l: Ledger, config: Config, now: number): Ledger {
   return next
 }
 
+const bare = (name: string) => name.split(':').pop() ?? name
+
+/** The session lists `name`: the full name, or a bare name against a plugin name (either side) with the same part after the colon. */
+export function isListed(name: string, listed: readonly string[]): boolean {
+  return listed.some((x) => x === name || (!name.includes(':') && bare(x) === name) || (!x.includes(':') && bare(name) === x))
+}
+
 /**
- * Compares the configured skills with the session's skill list. An absent skill missing from the list becomes
- * `not installed here`; one that is on the list again becomes absent. Loaded, stale and requested skills stay as they are.
- * An empty list means the list could not be read, so nothing changes.
+ * Compares the configured skills with the session's skill list. An absent skill (or one counted loaded only because its
+ * plugin injects it at startup) that the list lacks becomes `not installed here`; one that is on the list again becomes
+ * absent. Other loaded skills, stale and requested skills stay as they are. An empty list means the list could not be
+ * read, so nothing changes.
  */
 export function markInstalled(l: Ledger, names: string[], now: number): Ledger {
   if (names.length === 0) return l
-  const here = new Set(names)
   let changed = false
   const next: Ledger = {}
   for (const [name, e] of Object.entries(l)) {
-    if (e.state === 'absent' && !here.has(name)) {
+    const here = isListed(name, names)
+    const injected = e.state === 'loaded' && e.reason === 'injected at startup'
+    if ((e.state === 'absent' || injected) && !here) {
       next[name] = { ...e, state: 'not installed here', since: now, reason: 'not in this session\'s skill list' }
       changed = true
-    } else if (e.state === 'not installed here' && here.has(name)) {
+    } else if (e.state === 'not installed here' && here) {
       next[name] = { ...e, state: 'absent', since: now, reason: '' }
       changed = true
     } else next[name] = e

@@ -95,10 +95,26 @@ test('guess rule flags preload style scripts of skills that are not installed', 
   assert.equal(found.find((o) => o.event === 'PostToolUse')?.matcher, 'Skill')
 })
 
-test('a hook that names a skill is not a guess', () => {
+test('a hook whose script file or matcher names a skill is not a guess; a bare word is', () => {
   const found = findHookOverlaps(settings(), SKILLS)
   assert.ok(found.length > 0)
-  for (const o of found) assert.doesNotMatch(o.why, /^guess:/)
+  for (const o of found) {
+    const bareWord = o.command.includes('remind.sh ui-checklist')
+    assert.equal(/^guess:/.test(o.why), bareWord, o.command)
+  }
+})
+
+test('a hook that names several skills lists them all and warns when any is unwatched', () => {
+  const [o] = findHookOverlaps(one('bash ~/h/writing-guide-ui-checklist.sh'), SKILLS)
+  assert.deepEqual(o!.skills, ['writing-guide', 'ui-checklist'])
+  assert.match(watchWarning(o!, ['writing-guide'])!, /does not watch ui-checklist yet/)
+  assert.equal(watchWarning(o!, ['writing-guide', 'ui-checklist']), undefined)
+})
+
+test('a hook that names a watched skill only as a bare word gets the cannot-tell warning', () => {
+  const [o] = findHookOverlaps(one('echo writing-guide'), SKILLS)
+  assert.match(o!.why, /^guess: /)
+  assert.match(watchWarning(o!, ['writing-guide'])!, /cannot tell/)
 })
 
 test('guess rule needs a script name, not a bare word', () => {
