@@ -4,7 +4,9 @@ Keeps Claude Code skills loaded and in use for the whole session, including afte
 
 In a theatre, the souffleur sits out of sight at the edge of the stage and gives an actor the line they forgot, at the moment they need it. Souffleur does the same for skills: when compaction drops a skill the current task needs, it brings the skill back.
 
-> **Status:** work in progress. The mod runs from a checkout and installs from this repository, but there is no release yet. See the [roadmap](#roadmap) for what is done and what comes next.
+> **Status:** work in progress, no release yet. See the [roadmap](#roadmap).
+>
+> **Early access.** Souffleur is a Claude Code mod: TypeScript that runs inside Claude Code through its mod API, shipped and installed as a plugin. Anthropic still changes that API between releases, so an update of Claude Code can break Souffleur until it is adapted. It is provided as is, with no guarantee of fixes or dates. [docs/compatibility.md](docs/compatibility.md) lists the versions each behaviour was checked on.
 
 ## The problem
 
@@ -27,6 +29,22 @@ The skill list itself comes back after compaction since Claude Code 2.1.304. Wha
 You choose the skills and the rules in a configuration file. Souffleur never pastes a full skill text into every prompt.
 
 Souffleur is a Claude Code mod, an in-process plugin. For why, including test results on Claude Code 2.1.322, see [docs/background.md](docs/background.md).
+
+## How it works in a session
+
+You work as usual. Souffleur stays quiet while nothing is missing. You notice it in three places:
+
+- When the task needs a skill that is not loaded, or a compaction has cut one, Souffleur adds a short note to your prompt asking the model to invoke that skill first. The model loads it before it answers.
+- The status line shows a summary such as `souffleur (observe): 3 loaded, 1 restoring`. If your app does not show it, `/souffleur` gives the same summary as a table.
+- In `enforce` mode, a step that needs a missing skill is refused once with the reason, and the model loads the skill and tries again.
+
+A good way to start: install it, run `/souffleur init`, keep `observe` for a few sessions, and look at `/souffleur` after a compaction. If the ledger matches what you saw, switch to `enforce`.
+
+Instructions you give in the chat still win. If you tell the model not to invoke any skill, it follows you and only mentions Souffleur's request.
+
+## Why your own reload hooks are no longer needed
+
+Hooks that re-inject a skill at session start or remind the model on every prompt run blind: they do not know whether the skill text is still there, so they repeat it when nothing is missing and cannot tell when compaction cut it in the middle of a turn. Souffleur sees each skill load and each compaction as it happens and asks for a skill again only when it is missing or cut. Keeping both doubles every reminder and leaves your rules in two places, which is why `/souffleur init` offers to turn the old hooks off.
 
 ## Install
 
@@ -84,6 +102,26 @@ If you already keep skills alive with a `SessionStart` or `UserPromptSubmit` hoo
 `Turn off` first copies `settings.json` to `settings.json.bak-souffleur-<date>-<time>`, then removes only that one hook entry. Existing keys in `souffleur.json` stay as they are. `init` never edits a hook script, `CLAUDE.md` or a memory file. It lists passages that name a skill with file and line, and you decide what to do with them.
 
 Where no dialog can answer, for example under `claude -p`, `init` prints the proposals, the config entries as JSON and the steps, and changes nothing.
+
+## What Souffleur reads, stores and costs
+
+- It reads `~/.claude/souffleur.json`, the project's `.claude/souffleur.json` and, only during `/souffleur init`, your `settings.json`, `CLAUDE.md` files and the current project's memory index.
+- It writes `~/.claude/souffleur.json` and `settings.json` only after you confirm a change in `/souffleur init`, with a backup of `settings.json` first.
+- It keeps the ledger per session in Claude Code's plugin store on your machine. Nothing is sent anywhere except through Claude Code's own model calls.
+- Detecting needs costs one small-model call per configured need on each prompt you type, about 0.8 seconds, with a 1.5 second limit after which the prompt goes on without a verdict. A restored skill adds its full text to the context again.
+
+## Limits
+
+- Subagents are not gated. When the session hands work to a subagent while a need is active, the brief has to name the skills the subagent should load, or say `skills: none`.
+- Souffleur checks that a skill is loaded and that a duty left its trace. It does not judge how well the model followed a skill.
+- A restore request after a compaction in the middle of a long turn rides on the next tool result. Models may treat such notes as untrusted and skip them; in `enforce` the gate still catches the next gated step.
+- A skill that does not load after two requests is marked `unavailable` and is neither requested nor gated again in that session.
+
+## Troubleshooting
+
+- The status line says `souffleur: degraded, see /souffleur`: Souffleur could not read its config or an event changed shape after a Claude Code update. `/souffleur` lists what failed.
+- No status line at all: your app may not show mod status lines. Use `/souffleur`.
+- Please report problems with your Claude Code version (`claude --version`) through the [issue tracker](https://github.com/r4KK4n/skill-souffleur/issues).
 
 ## Switching off
 
