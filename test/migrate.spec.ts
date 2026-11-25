@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { MIGRATE_INTRO, findHookOverlaps, findPassages, migrateSteps, removeHook } from '../src/core/migrate.ts'
+import { MIGRATE_INTRO, findHookOverlaps, findPassages, migrateSteps, passageLines, removeHook } from '../src/core/migrate.ts'
 
 const SKILLS = ['writing-guide', 'ui-checklist', 'terse:terse-mode']
 
@@ -51,7 +51,7 @@ test('ignores unrelated hooks', () => {
 })
 
 test('a short skill name inside another word is not an overlap', () => {
-  assert.deepEqual(findHookOverlaps({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'git init' }] }] } }, ['init']), [])
+  assert.deepEqual(findHookOverlaps({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'git init' }] }] } }, [], ['init']), [])
 })
 
 test('removeHook removes only that entry and keeps the rest byte-equal in content', () => {
@@ -146,4 +146,46 @@ test('migrateSteps starts with the explanation and lists hooks and steps for the
   assert.match(text, /writing-guide-reload\.sh/)
   assert.match(text, /CLAUDE\.md:2/)
   assert.match(text, /Steps/)
+})
+
+const one = (command: string, event = 'Stop') => ({ hooks: { [event]: [{ hooks: [{ type: 'command', command }] }] } })
+
+test('installed but unconfigured names do not match plain words, and guesses stay guesses', () => {
+  const installed = ['review', 'brief', 'config', 'schedule']
+  assert.deepEqual(findHookOverlaps(one('notify-send "ready for review"'), [], installed), [])
+  assert.deepEqual(findHookOverlaps(one('git status --brief'), [], installed), [])
+  for (const command of ['~/bin/update-config.sh', 'python3 ~/.claude/hooks/schedule-guard.py']) {
+    for (const o of findHookOverlaps(one(command), [], installed)) assert.match(o.why, /^guess:/)
+  }
+})
+
+test('an installed plugin skill counts by its full name or inside a script file name, as a guess', () => {
+  const full = findHookOverlaps(one('run-skill terse:terse-mode'), [], ['terse:terse-mode'])
+  assert.equal(full.length, 1)
+  assert.match(full[0]!.why, /^guess:/)
+  assert.equal(full[0]!.skill, 'terse:terse-mode')
+  const script = findHookOverlaps(one('bash ~/hooks/writing-guide-run.sh'), [], ['writing-guide'])
+  assert.match(script[0]!.why, /^guess:/)
+  assert.deepEqual(findHookOverlaps(one('echo writing-guide'), [], ['writing-guide']), [])
+})
+
+test('short configured names match, short installed names do not', () => {
+  const s = one('bash ~/hooks/pdf.sh')
+  assert.match(findHookOverlaps(s, ['pdf'], [])[0]!.why, /^names the skill pdf/)
+  assert.deepEqual(findHookOverlaps(s, [], ['pdf']), [])
+})
+
+test('guess rule skips URLs and needs a script extension or a hooks folder', () => {
+  assert.deepEqual(findHookOverlaps(one('curl https://example.com/reload.sh'), [], []), [])
+  assert.deepEqual(findHookOverlaps(one('bash ~/x/reload'), [], []), [])
+  assert.equal(findHookOverlaps(one('~/.claude/hooks/preload'), [], []).length, 1)
+  assert.equal(findHookOverlaps(one('node ~/x/inject.mjs'), [], []).length, 1)
+})
+
+test('passageLines cuts at 20 and says how many more', () => {
+  const many = Array.from({ length: 25 }, (_, i) => ({ file: 'CLAUDE.md', line: i + 1, text: 'load writing-guide' }))
+  const lines = passageLines(many)
+  assert.equal(lines.length, 21)
+  assert.match(lines.at(-1)!, /and 5 more/)
+  assert.equal(passageLines(many.slice(0, 3)).length, 3)
 })

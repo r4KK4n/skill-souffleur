@@ -21,15 +21,15 @@ const isWordChar = (c: string | undefined) => c !== undefined && /[A-Za-z0-9]/.t
 
 /**
  * True when `text` names `skill` (a script name like `skill-x-reload.sh` counts; letters or digits around it do not). A plugin skill `plugin:name` also counts by its
- * part after the colon. Names shorter than 5 characters without `-` or `:` (`init`, `run`, `pdf`)
- * are too common in ordinary commands (`git init`) and never count.
+ * part after the colon. With `allowShort` false, names shorter than 5 characters without `-` or `:` (`init`, `run`, `pdf`)
+ * never count: they are too common in ordinary commands (`git init`). A skill the user configured passes `allowShort`.
  */
-function names(text: string, skill: string): boolean {
+function names(text: string, skill: string, allowShort: boolean): boolean {
   const forms = [skill]
   const bare = skill.split(':').pop()
   if (bare !== undefined && bare !== skill) forms.push(bare)
   return forms.some((form) => {
-    if (form.length < 5 && !/[-:]/.test(form)) return false
+    if (!allowShort && form.length < 5 && !/[-:]/.test(form)) return false
     for (let at = text.indexOf(form); at !== -1; at = text.indexOf(form, at + 1)) {
       if (!isWordChar(text[at - 1]) && !isWordChar(text[at + form.length])) return true
     }
@@ -37,18 +37,43 @@ function names(text: string, skill: string): boolean {
   })
 }
 
-/** The first of `skills` that `text` names, if any. */
-const namedSkill = (text: string, skills: string[]): string | undefined => skills.find((s) => names(text, s))
+/** The first of the user's configured `skills` that `text` names, if any. */
+const namedSkill = (text: string, skills: string[]): string | undefined => skills.find((s) => names(text, s, true))
+
+const tokens = (command: string) => command.split(/\s+/).map((t) => t.replace(/^["']+|["']+$/g, '')).filter((t) => t !== '' && !t.includes('://'))
+
+/**
+ * The installed skill (not configured) a command points at: its full `plugin:skill` name, or its name inside a
+ * script file name (a token with `/` or `.`). Plain words never count, so `notify-send "ready for review"` is not about a skill `review`.
+ */
+function installedMatch(command: string, installedOnly: string[]): string | undefined {
+  const files = tokens(command).filter((t) => /[/.]/.test(t))
+  return installedOnly.find((skill) => (skill.includes(':') && command.includes(skill)) || files.some((t) => names(t, skill, false)))
+}
+
+export const isGuess = (o: HookOverlap): boolean => o.why.startsWith('guess:')
+
+/** The `preload`, `reload` or `inject` in the name of a script in `command`. Needs a script extension or a `hooks/` path; URLs and bare words do not count. */
+function scriptName(command: string): string | undefined {
+  for (const token of tokens(command)) {
+    if (!/\.(sh|js|mjs|ts|py)$/i.test(token) && !token.includes('hooks/')) continue
+    const name = token.slice(token.lastIndexOf('/') + 1)
+    const hit = RELOAD_SCRIPT.exec(name)?.[1]
+    if (hit !== undefined) return hit.toLowerCase()
+  }
+  return undefined
+}
 
 /**
  * Finds settings hooks that do what Souffleur does. A hook entry overlaps when
- *  1. its command or its matcher names a known skill (installed or configured), or
+ *  1. its command or its matcher names a configured skill, or points at an installed one by its full
+ *     `plugin:skill` name or inside a script file name (then `why` starts with `guess:`), or
  *  2. it runs a script whose name contains `preload`, `reload` or `inject`, even when the skill it
  *     serves is not installed. `why` then starts with `guess:`.
  * The rules err toward listing; the user decides per hook and nothing changes without a yes.
  * `index` is `[group, hook]` inside `hooks[event]`.
  */
-export function findHookOverlaps(settings: unknown, skillNames: string[]): HookOverlap[] {
+export function findHookOverlaps(settings: unknown, configured: string[], installedOnly: string[] = []): HookOverlap[] {
   if (!isObject(settings) || !isObject(settings.hooks)) return []
   const found: HookOverlap[] = []
   for (const [event, groups] of Object.entries(settings.hooks)) {
@@ -59,28 +84,20 @@ export function findHookOverlaps(settings: unknown, skillNames: string[]): HookO
       group.hooks.forEach((hook, h) => {
         if (!isObject(hook) || typeof hook.command !== 'string') return
         const command = hook.command
-        const bySkill = namedSkill(command, skillNames) ?? (matcher === undefined ? undefined : namedSkill(matcher, skillNames))
+        const bySkill = namedSkill(command, configured) ?? (matcher === undefined ? undefined : namedSkill(matcher, configured))
+        const byInstalled = bySkill === undefined ? installedMatch(command, installedOnly) : undefined
         const word = scriptName(command)
         let why: string | undefined
         if (bySkill !== undefined) why = `names the skill ${bySkill}`
+        else if (byInstalled !== undefined) why = `guess: the script name contains ${byInstalled}`
         else if (word !== undefined) why = `guess: the script name contains ${word}`
         if (why === undefined) return
-        found.push({ event, ...(matcher === undefined ? {} : { matcher }), command, index: [g, h], why, ...(bySkill === undefined ? {} : { skill: bySkill }) })
+        const skill = bySkill ?? byInstalled
+        found.push({ event, ...(matcher === undefined ? {} : { matcher }), command, index: [g, h], why, ...(skill === undefined ? {} : { skill }) })
       })
     })
   }
   return found
-}
-
-/** The `preload`, `reload` or `inject` in the name of a script in `command`; bare words such as `echo reload` do not count. */
-function scriptName(command: string): string | undefined {
-  for (const token of command.split(/\s+/)) {
-    if (!/[/.]/.test(token)) continue
-    const name = token.slice(token.lastIndexOf('/') + 1)
-    const hit = RELOAD_SCRIPT.exec(name)?.[1]
-    if (hit !== undefined) return hit.toLowerCase()
-  }
-  return undefined
 }
 
 /** A copy of `settings` without exactly the hook `o` names; emptied groups and events go too. Unchanged when the entry no longer matches. */
@@ -102,17 +119,23 @@ export function removeHook(settings: unknown, o: HookOverlap): unknown {
   return { ...rest, hooks }
 }
 
-/** Lines of CLAUDE.md or memory text that name a configured skill and read like a loading or reminding instruction, with file and line, at most 20. Never edited. */
-export function findPassages(files: { file: string; text: string }[], configuredSkills: string[]): Passage[] {
+/** Lines of CLAUDE.md or memory text that name a configured skill and read like a loading or reminding instruction, with file and line, at most `max` (20). Never edited. */
+export function findPassages(files: { file: string; text: string }[], configuredSkills: string[], max = MAX_PASSAGES): Passage[] {
   const out: Passage[] = []
   for (const { file, text } of files) {
     const lines = text.split(/\r\n|\r|\n/)
-    for (let i = 0; i < lines.length && out.length < MAX_PASSAGES; i++) {
+    for (let i = 0; i < lines.length && out.length < max; i++) {
       const line = lines[i]!.trim()
       if (line && LOADING_WORDS.test(line) && namedSkill(line, configuredSkills) !== undefined) out.push({ file, line: i + 1, text: line.length > MAX_LINE ? `${line.slice(0, MAX_LINE)}...` : line })
     }
   }
   return out
+}
+
+/** Report lines for passages: the first 20, then how many more there are. */
+export function passageLines(passages: Passage[], max = MAX_PASSAGES): string[] {
+  const lines = passages.slice(0, max).map((p) => `- ${p.file}:${p.line} ${p.text}`)
+  return passages.length > max ? [...lines, `- and ${passages.length - max} more`] : lines
 }
 
 export const describeHook = (o: HookOverlap): string => `${o.event}${o.matcher === undefined ? '' : ` [${o.matcher}]`}: ${o.command} (${o.why})`
@@ -126,7 +149,7 @@ export function migrateSteps(a: { hooks: HookOverlap[]; passages: Passage[]; set
   const out = [MIGRATE_INTRO, '', 'No dialog is available here, so nothing was changed.', '']
   if (a.hooks.length) out.push('Hooks that do what Souffleur now does:', ...a.hooks.map((o) => `- ${describeHook(o)}`), '')
   else out.push('No overlapping hooks found.', '')
-  if (a.passages.length) out.push('Standing instructions that name a configured skill (Souffleur never edits these):', ...a.passages.map((p) => `- ${p.file}:${p.line} ${p.text}`), '')
+  if (a.passages.length) out.push('Standing instructions that name a configured skill (Souffleur never edits these):', ...passageLines(a.passages), '')
   out.push('Steps:')
   let n = 1
   for (const o of a.hooks) out.push(`${n++}. ${hookSteps(o, a.settingsPath)}`)

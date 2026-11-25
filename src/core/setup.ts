@@ -67,11 +67,29 @@ export function candidates(config: Config, installed: string[], reloadHooked: st
  */
 export function options(skill: string, current: LoadChoice | undefined, recommended: LoadChoice): string[] {
   const plugin = skill.includes(':')
-  const all: LoadChoice[] = plugin ? ['start', 'injected', 'need', 'none'] : ['start', 'need', 'none']
+  // A skill that is injected although it has no plugin name: keep the choice, and give up Stop (closing the dialog stops anyway).
+  const all: LoadChoice[] = plugin || current === 'injected' ? ['start', 'injected', 'need', 'none'] : ['start', 'need', 'none']
   const first = current ?? recommended
   const order = all.includes(first) ? [first, ...all.filter((c) => c !== first)] : all
   const labels = order.map((c) => CHOICE_LABEL[c])
-  return plugin ? labels : [...labels, STOP]
+  return all.length === 4 ? labels : [...labels, STOP]
+}
+
+/** A description as config.ts accepts it: whitespace collapsed to single spaces, 1 to 200 characters; undefined otherwise. */
+export function cleanNeedText(raw: string): string | undefined {
+  const text = raw.replace(/\s+/g, ' ').trim()
+  return text.length >= 1 && text.length <= 200 ? text : undefined
+}
+
+/** A valid need key made from a skill name. */
+export const needKeyFor = (skill: string): string => bare(skill).replace(/[^A-Za-z0-9:_-]/g, '-').slice(0, 64) || 'need'
+
+/** Why `userConfig` cannot be edited, or undefined when it can (or does not exist yet). */
+export function configProblem(userConfig: unknown): string | undefined {
+  if (userConfig === undefined) return undefined
+  if (!isObject(userConfig)) return 'it is not a JSON object'
+  for (const key of ['skills', 'needs']) if (userConfig[key] !== undefined && !isObject(userConfig[key])) return `"${key}" is not an object`
+  return undefined
 }
 
 /** A need key for `skill` that no other need uses. */
@@ -85,10 +103,22 @@ function forkKey(needs: Record<string, unknown>, key: string, skill: string): st
 /**
  * Applies one answer to the user config and returns the new config; the input is not changed.
  * Keeps every other key, and a gate or duty when the kind changes. `none` on an entry with a gate or
- * duty leaves it and says so. A need text that differs from a need other skills use gets a new key.
- * Needs no skill references any more are dropped.
+ * duty leaves it and says so. A need text that differs from a need other skills use (user or project file,
+ * `projectSkills`) gets a new key. Needs that no skill references any more are dropped and listed in `pruned`.
+ * A config that cannot be edited, or a need text config.ts would reject, comes back unchanged with a note.
  */
-export function applyChoice(userConfig: unknown, skill: string, choice: LoadChoice, need?: NeedText): { config: unknown; note?: string } {
+export function applyChoice(
+  userConfig: unknown,
+  skill: string,
+  choice: LoadChoice,
+  need?: NeedText,
+  projectSkills: Record<string, unknown> = {},
+): { config: unknown; note?: string; pruned?: string[] } {
+  const problem = configProblem(userConfig)
+  if (problem) return { config: userConfig, note: `${skill}: the config file was not changed because ${problem}.` }
+  if (need && (!NEED_KEY.test(need.key) || cleanNeedText(need.text) !== need.text)) {
+    return { config: userConfig, note: `${skill}: the description was skipped because it is not one line of 1 to 200 characters.` }
+  }
   const doc: Record<string, unknown> = isObject(userConfig) ? { ...userConfig } : { mode: 'observe' }
   const skills: Record<string, unknown> = isObject(doc.skills) ? { ...doc.skills } : {}
   const needs: Record<string, unknown> = isObject(doc.needs) ? { ...doc.needs } : {}
@@ -104,23 +134,29 @@ export function applyChoice(userConfig: unknown, skill: string, choice: LoadChoi
   else if (choice === 'injected') skills[skill] = { always: true, startup: 'injected', ...rest }
   else {
     const want: NeedText = need ?? {
-      key: typeof oldNeed === 'string' ? oldNeed : bare(skill).replace(/[^A-Za-z0-9:_-]/g, '-').slice(0, 64),
+      key: typeof oldNeed === 'string' ? oldNeed : needKeyFor(skill),
       text: typeof oldNeed === 'string' && typeof needs[oldNeed] === 'string' ? (needs[oldNeed] as string) : `The task calls for ${skill}.`,
     }
     let key = want.key
     if (key in needs && needs[key] !== want.text) {
-      const shared = Object.entries(skills).some(([name, r]) => name !== skill && isObject(r) && r.need === key)
-      if (shared) key = forkKey(needs, key, skill)
+      const uses = (all: Record<string, unknown>) => Object.entries(all).some(([name, r]) => name !== skill && isObject(r) && r.need === key)
+      if (uses(skills) || uses(projectSkills)) key = forkKey(needs, key, skill)
     }
     needs[key] = want.text
     skills[skill] = { need: key, ...rest }
   }
 
-  const used = new Set(Object.values(skills).flatMap((r) => (isObject(r) && typeof r.need === 'string' ? [r.need] : [])))
-  for (const key of Object.keys(needs)) if (!used.has(key)) delete needs[key]
-  doc.skills = skills
-  doc.needs = needs
-  return { config: doc }
+  const used = new Set([...Object.values(skills), ...Object.values(projectSkills)].flatMap((r) => (isObject(r) && typeof r.need === 'string' ? [r.need] : [])))
+  const pruned: string[] = []
+  for (const key of Object.keys(needs)) {
+    if (used.has(key)) continue
+    delete needs[key]
+    pruned.push(key)
+  }
+  // Keep the file's shape: an empty section is added only when something is in it or it was there.
+  if ('skills' in doc || Object.keys(skills).length) doc.skills = skills
+  if ('needs' in doc || Object.keys(needs).length) doc.needs = needs
+  return { config: doc, ...(pruned.length ? { pruned } : {}) }
 }
 
 /** Pulls JSON out of a model reply that may carry prose or code fences; undefined when none parses. */
@@ -162,7 +198,7 @@ export function parsePicks(raw: string, installed: string[], existingNeeds: Reco
     if (!isObject(item) || typeof item.name !== 'string' || !installed.includes(item.name) || out.some((p) => p.skill === item.name)) continue
     if (typeof item.need !== 'string' || !NEED_KEY.test(item.need)) continue
     const known = existingNeeds[item.need]
-    const given = typeof item.needText === 'string' && item.needText.trim() ? item.needText.trim().slice(0, 200) : undefined
+    const given = typeof item.needText === 'string' ? cleanNeedText(item.needText.slice(0, 200)) : undefined
     const text = known ?? given
     if (text === undefined) continue
     out.push({ skill: item.name, need: { key: item.need, text } })

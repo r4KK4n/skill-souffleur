@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { parseConfig } from '../src/core/config.ts'
-import { applyChoice, candidates, options, parsePicks, SETUP_INTRO } from '../src/core/setup.ts'
+import { applyChoice, candidates, cleanNeedText, options, parsePicks, SETUP_INTRO } from '../src/core/setup.ts'
 
 const config = (user: unknown, project?: unknown) => parseConfig(JSON.stringify(user), project === undefined ? undefined : JSON.stringify(project)).config
 const doc = (c: unknown) => c as { mode?: string; skills: Record<string, Record<string, unknown>>; needs: Record<string, string> }
@@ -133,4 +133,55 @@ test('parsePicks keeps installed names, reuses existing need keys, caps at 10', 
 test('SETUP_INTRO names the four answers and points to migrate', () => {
   for (const w of ['From the start', 'Injected by its plugin', 'When the task needs it', "Don't watch", '/souffleur migrate']) assert.ok(SETUP_INTRO.includes(w), w)
   assert.doesNotMatch(SETUP_INTRO, /[–—]/)
+})
+
+test('a non-plugin skill whose current setting is injected is offered Injected in place of Stop', () => {
+  const o = options('writing-guide', 'injected', 'start')
+  assert.equal(o[0], 'Injected by its plugin')
+  assert.ok(!o.includes('Stop'))
+  assert.equal(o.length, 4)
+})
+
+test('applyChoice leaves anything that is not a config object alone and says so', () => {
+  for (const bad of [[], 'text', 5, { skills: 'nope' }, { needs: [] }, { skills: [] }]) {
+    const r = applyChoice(bad, 'writing-guide', 'start')
+    assert.deepEqual(r.config, bad)
+    assert.match(r.note ?? '', /not|wrong|object/i)
+  }
+})
+
+test('applyChoice with the same choice returns an equal config', () => {
+  const start = { mode: 'observe', skills: { 'writing-guide': { always: true } }, needs: {} }
+  assert.deepEqual(applyChoice(start, 'writing-guide', 'start').config, start)
+})
+
+test('applyChoice refuses a need text that config.ts would reject', () => {
+  for (const text of ['', 'a\nb', 'x'.repeat(201)]) {
+    const r = applyChoice({ skills: {}, needs: {} }, 'writing-guide', 'need', { key: 'prose', text })
+    assert.deepEqual(r.config, { skills: {}, needs: {} })
+    assert.ok(r.note)
+  }
+})
+
+test('cleanNeedText collapses whitespace and keeps 1 to 200 characters', () => {
+  assert.equal(cleanNeedText('  a\n  b\t c '), 'a b c')
+  assert.equal(cleanNeedText('   '), undefined)
+  assert.equal(cleanNeedText('x'.repeat(201)), undefined)
+  assert.equal(cleanNeedText('x'.repeat(200))?.length, 200)
+})
+
+test('needs that a project-file skill uses survive pruning, and removed needs are reported', () => {
+  const start = { skills: { 'writing-guide': { need: 'ui' }, 'writing-check': { need: 'prose' } }, needs: { ui: 'u', prose: 'p' } }
+  const r = applyChoice(start, 'writing-guide', 'none', undefined, { 'ui-checklist': { need: 'ui' } })
+  assert.deepEqual(doc(r.config).needs, { ui: 'u', prose: 'p' })
+  const gone = applyChoice(start, 'writing-check', 'none')
+  assert.deepEqual(gone.pruned, ['prose'])
+})
+
+test('the shared-need check counts skills of the project file', () => {
+  const start = { skills: {}, needs: { ui: 'Building a screen.' } }
+  const r = applyChoice(start, 'writing-guide', 'need', { key: 'ui', text: 'Something else.' }, { 'ui-checklist': { need: 'ui' } })
+  const key = doc(r.config).skills['writing-guide']!.need as string
+  assert.notEqual(key, 'ui')
+  assert.equal(doc(r.config).needs.ui, 'Building a screen.')
 })

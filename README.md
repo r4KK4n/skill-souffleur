@@ -117,10 +117,10 @@ Each answer is written as it comes, with every other key in the file left as it 
 If you already keep skills alive with a `SessionStart` or `UserPromptSubmit` hook, or with a standing line in `CLAUDE.md`, running Souffleur next to them doubles every reminder. Souffleur changes none of your files on install. `/souffleur migrate` starts with a short explanation of what it does and then asks one question per hook:
 
 1. It reads the hooks in `~/.claude/settings.json`, your user and project `CLAUDE.md`, and the memory index of the current project.
-2. A hook is listed when its command or matcher names an installed or configured skill. A hook that runs a script with `preload`, `reload` or `inject` in its name is listed too, even when the skill is gone; the dialog marks it as a guess.
+2. A hook is listed when its command or matcher names a configured skill. A hook that points at an installed skill only by its script file name, or that runs a script with `preload`, `reload` or `inject` in its name, is listed too, even when the skill is gone; the dialog marks these as guesses.
 3. For each hook you answer `Turn off`, `Keep` or `Show me what to do`.
 
-`Turn off` first copies `settings.json` to `settings.json.bak-souffleur-<date>-<time>`, then removes only that one hook entry. `Show me what to do` changes nothing and adds the manual steps to the closing report. `migrate` never edits a hook script, `CLAUDE.md` or a memory file. It lists passages that name a configured skill and read like a loading or reminding instruction, with file and line, and you decide what to do with them.
+`Turn off` first copies `settings.json` to `settings.json.bak-souffleur-<date>-<time>` (it never overwrites an older copy), then removes only that one hook entry, and stops if the file changed in the meantime. `Show me what to do` changes nothing and adds the manual steps to the closing report. `migrate` never edits a hook script, `CLAUDE.md` or a memory file. It lists passages that name a configured skill and read like a loading or reminding instruction, with file and line, and you decide what to do with them.
 
 Where no dialog can answer, for example under `claude -p`, both commands print what they would ask, the config entries as JSON and the steps, and change nothing.
 
