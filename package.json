@@ -10,10 +10,10 @@
   },
   "scripts": {
     "test": "node --test --experimental-strip-types 'test/**/*.spec.ts'",
-    "typecheck": "tsc -p ."
+    "typecheck": "tsc -p . && tsc -p tsconfig.core.json"
   },
   "devDependencies": {
-    "@types/node": "^26.6.10",
+    "@types/node": "^22",
     "typescript": "^7.0.2"
   }
 }

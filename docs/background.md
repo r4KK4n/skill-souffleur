@@ -61,7 +61,7 @@ Before the implementation we repeated the tests on 2.1.332 with a mod that recor
 | Question | Result |
 |---|---|
 | Do the 2.1.322 results still hold? | Yes. After `/compact` in the same process the 43 KB skill came back cut, with the note `[... skill content truncated for compaction ...]`. After a resume and `/compact` the model saw only the one-line skill listing. |
-| Does `skill.prompt` fire for the re-attachment after compaction? | No. Between `session.compact` before and after, and on the next prompt, no `skill.prompt` fired. |
+| Does `skill.prompt` fire for the re-attachment after compaction? | No `skill.prompt` fired between the compaction hooks and the model's answer to the next prompt. The model answered without tools, so the recording ends there. |
 | Does the model load the skills a prompt's `context` block names, before other work? | Yes, in 10 of 10 fresh sessions (5 on Haiku, 5 on Opus). Each called the Skill tool for both named skills before answering. |
 | What key does `skill.prompt` use for a plugin skill? | The full name, `<plugin>:<skill>`. |
 | What does a typed `/name` fire? | `command.run`, then `prompt.submit` with `command` set, then `skill.prompt`. |
