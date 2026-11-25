@@ -6,6 +6,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- Install with `/plugin install skill-souffleur --marketplace r4KK4n/skill-souffleur`; the repository now holds a marketplace file.
+- `/souffleur init`: reads your hooks, `CLAUDE.md` files and memory index, proposes skill entries, and with your yes on each step adds them to `~/.claude/souffleur.json` and turns off overlapping hooks after a backup of `settings.json`. Without a dialog it prints the steps and changes nothing.
+- Status line `souffleur: not set up, run /souffleur init` while no user config exists.
 - Config file: user file `~/.claude/souffleur.json`, optional project file with restricted rights.
 - Need detection: a prompt is matched against the configured needs, and the skills those needs name are asked for when missing.
 - Gates and duties: a step can wait until its skills are loaded, and a duty can require evidence after a step. Nothing is denied in `observe` mode, the default.

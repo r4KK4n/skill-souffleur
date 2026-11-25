@@ -7,13 +7,34 @@ const HOME = '/users/test'
 const USER_FILE = `${HOME}/.claude/souffleur.json`
 const PROJECT_FILE = '/work/proj/.claude/souffleur.json'
 
-type World = { statuses: (string | undefined)[]; setId: (id: string) => void; seen: { prompts: { text: string; context?: readonly string[] }[] } }
+type World = {
+  statuses: (string | undefined)[]
+  setId: (id: string) => void
+  seen: { prompts: { text: string; context?: readonly string[] }[] }
+  writes: { path: string; text: string }[]
+  asked: string[]
+}
+
+type Opts = {
+  classify?: string
+  stored?: Record<string, unknown>
+  skipCompact?: boolean
+  /** Installed skill names `$.session.usage` lists. */
+  skills?: string[]
+  /** What the small model answers to the init prompt. */
+  proposals?: string
+  /** The labels the user picks, in order; 'reject' makes every dialog reject, as in a `-p` run. */
+  answers?: string[] | 'reject'
+}
 
 /** Answers every call the mod makes on `$`; files maps an absolute path to its text, a missing path throws. */
-function world(on: On, files: Record<string, string>, opts: { classify?: string; stored?: Record<string, unknown>; skipCompact?: boolean } = {}): World {
+function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   let id = 's1'
   const statuses: (string | undefined)[] = []
   const seen: World['seen'] = { prompts: [] }
+  const writes: World['writes'] = []
+  const asked: string[] = []
+  const answers = opts.answers === 'reject' ? [] : [...(opts.answers ?? [])]
   mock.store(on, opts.stored)
   mock.clock(on)
   mock.session(on)
@@ -39,11 +60,32 @@ function world(on: On, files: Record<string, string>, opts: { classify?: string;
     seen.prompts.push({ text: e.text, ...(e.context ? { context: e.context } : {}) })
     return { text: e.text, ...(e.context ? { context: e.context } : {}) }
   })
-  on('tool.call', () => ({ result: {} }))
+  on('fs.write', (_, e) => {
+    writes.push({ path: e.path, text: e.text })
+    files[e.path] = e.text
+    return { value: undefined }
+  })
+  on('session.usage', () => ({
+    value: {
+      startedAt: 0,
+      context: { window: 1, breakdown: { skills: { totalSkills: 0, includedSkills: 0, tokens: 0, skillFrontmatter: (opts.skills ?? []).map((name) => ({ name, source: 'plugin', tokens: 1 })) } } },
+      rateLimits: [],
+      cost: {},
+    },
+  }) as never)
+  on('model.complete', () => ({ value: { isAnswered: true, text: opts.proposals ?? '{"skills":[]}', usage: {} } }) as never)
+  on('tool.call', (_, e) => {
+    if (e.tool !== 'AskUserQuestion') return { result: {} }
+    const question = (e as unknown as { questions: { question: string }[] }).questions[0]!.question
+    asked.push(question)
+    const label = answers.shift()
+    if (opts.answers === 'reject' || label === undefined) throw new Error('nobody to ask')
+    return { result: { questions: [], answers: { [question]: label } } } as never
+  })
   on('skill.prompt', (_, e) => ({ text: e.text }))
   on('session.compact', () => (opts.skipCompact ? { skip: 'vetoed' } : { messages: [{ role: 'user', text: 'summary', toolUses: [] }] }))
   on('command.run', () => ({}))
-  return { statuses, setId: (next) => { id = next }, seen }
+  return { statuses, setId: (next) => { id = next }, seen, writes, asked }
 }
 
 const COMPOSE = { model: 'm', promptModel: 'm', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] } as never
@@ -200,4 +242,68 @@ test('the system prompt section names the always-on skills and depends on config
   expect(section?.scope).toBe('session')
   expect(section?.text).toMatch(/invoke each one with the Skill tool/)
   expect(section?.text).toMatch(/Always-on skills: writing-guide\./)
+})
+
+
+const SETTINGS_PATH = `${HOME}/.claude/settings.json`
+const SETTINGS = JSON.stringify(
+  {
+    theme: 'dark',
+    hooks: {
+      SessionStart: [{ matcher: 'compact|resume', hooks: [{ type: 'command', command: 'bash reload-writing-guide.sh' }] }],
+      PostToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'prettier --write .' }] }],
+    },
+  },
+  null,
+  2,
+)
+const PROPOSALS = JSON.stringify({ skills: [{ name: 'writing-guide', need: 'prose', needText: 'Writing text people read.' }] })
+const init = async ($: any) => (await $.command.run({ command: 'souffleur', args: 'init' })).text as string
+
+test('init without dialog prints steps and writes nothing', async ($, on) => {
+  const w = world(on, { [SETTINGS_PATH]: SETTINGS }, { skills: ['writing-guide', 'ui-checklist'], proposals: PROPOSALS, answers: 'reject' })
+  await start($)
+  const text = await init($)
+  expect(text).toMatch(/nothing was changed/i)
+  expect(text).toMatch(/"writing-guide"/)
+  expect(text).toMatch(/reload-writing-guide\.sh/)
+  expect(w.writes.length).toBe(0)
+})
+
+test('init writes backup before editing settings', async ($, on) => {
+  const w = world(on, { [SETTINGS_PATH]: SETTINGS }, { skills: ['writing-guide'], proposals: PROPOSALS, answers: ['Add', 'Turn off'] })
+  await start($)
+  const text = await init($)
+  const config = w.writes.find((x) => x.path === USER_FILE)
+  expect(JSON.parse(config!.text).skills['writing-guide']).toEqual({ need: 'prose' })
+  const backup = w.writes.findIndex((x) => /settings\.json\.bak-souffleur-\d{8}-\d{4}$/.test(x.path))
+  const edit = w.writes.findIndex((x) => x.path === SETTINGS_PATH)
+  expect(backup).toBeGreaterThan(-1)
+  expect(edit).toBeGreaterThan(backup)
+  expect(w.writes[backup]!.text).toBe(SETTINGS)
+  const after = JSON.parse(w.writes[edit]!.text)
+  expect(after.theme).toBe('dark')
+  expect(after.hooks.SessionStart).toBe(undefined)
+  expect(after.hooks.PostToolUse.length).toBe(1)
+  expect(text).toMatch(/Turned off/)
+})
+
+test('init keeps a hook the user wants to keep and edits nothing', async ($, on) => {
+  const w = world(on, { [SETTINGS_PATH]: SETTINGS }, { skills: ['writing-guide'], proposals: '{"skills":[]}', answers: ['Keep'] })
+  await start($)
+  await init($)
+  expect(w.writes.length).toBe(0)
+})
+
+test('no user config shows not-set-up status', async ($, on) => {
+  const w = world(on, {})
+  await start($)
+  expect(w.statuses.at(-1)).toBe('souffleur: not set up, run /souffleur init')
+  expect(await table($)).toMatch(/not set up/)
+})
+
+test('a user config silences the not-set-up status', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  expect(w.statuses.at(-1)).not.toMatch(/not set up/)
 })
