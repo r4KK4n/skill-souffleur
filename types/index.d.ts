@@ -26,7 +26,7 @@ declare module 'claude-code' {
         errors: string[]
         version?: string
         ruleSkills: string[]
-        openRules: { id: string; by: string; denied: boolean }[]
+        openRules: { id: string; by: string; denied: boolean; told: boolean }[]
         fieldDenied: string[]
         proposals: {
           hash: string
@@ -50,6 +50,8 @@ declare module 'claude-code' {
         notesSent: string[]
         freshNotes: string[]
         revise: string[]
+        proposed: string[]
+        rev?: number
       }
     }
   }

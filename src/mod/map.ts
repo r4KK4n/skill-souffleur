@@ -8,6 +8,11 @@ export function isFromUser(e: { isMeta?: unknown; command?: unknown; origin?: { 
   return e.command === undefined && !e.isMeta && (e.origin === undefined || USER_ORIGINS.includes(e.origin.kind))
 }
 
+/** True when a command was typed by the user (or sent by the bridge or SDK on their behalf); a plugin's `$.command.run` is not. */
+export function isUserOrigin(e: { origin?: { kind: string } }): boolean {
+  return e.origin === undefined || USER_ORIGINS.includes(e.origin.kind)
+}
+
 export type ToolFields = { path?: string; command?: string; brief?: string; skill?: string; model?: string }
 
 /** Tool arguments sit flat on `tool.call`; only string values count. */

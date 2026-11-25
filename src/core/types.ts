@@ -22,6 +22,8 @@ export type Config = {
   rules: Rule[]
   notes: Note[]
   learn: { skills: boolean }
+  /** The need names the user file defines: proposals may name only these. */
+  userNeeds?: string[]
 }
 
 /**

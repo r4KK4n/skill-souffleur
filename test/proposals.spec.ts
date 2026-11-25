@@ -112,3 +112,30 @@ test('parseShaped reads the small model answer, tolerates noise, falls back to a
   assert.equal((bad.entry as Note).text, 'Always answer in German')
   assert.equal(parseShaped('{"kind":"rule"}', 'x'.repeat(600), config).kind, 'note')
 })
+
+// --- Fix round ---
+
+test('a passage proposal shows its file and line, and a project passage offers this project first', () => {
+  const p = { ...prop({ kind: 'note', text: 'Load the guide first.' }, 'user'), origin: 'CLAUDE.md:12', project: true }
+  const s = enqueue(config, fresh(), p).session
+  const q = nextQuestion(s)!
+  assert.match(q.question, /CLAUDE\.md:12/)
+  assert.deepEqual(q.options, ['Yes, this project only', 'Yes, everywhere', 'No'])
+  const user = { ...prop({ kind: 'note', text: 'Another one here.' }, 'user'), origin: '~/.claude/CLAUDE.md:3' }
+  assert.deepEqual(nextQuestion(enqueue(config, fresh(), user).session)!.options, ['Yes, everywhere', 'Yes, this project only', 'No'])
+})
+
+test('a note needing a project-file need is refused when the user file lacks it', () => {
+  const mixed: Config = { ...config, needs: { ui: 'x', extra: 'y' }, userNeeds: ['ui'] }
+  assert.match(makeProposal({ kind: 'note', text: 'hi there', need: 'extra' }, 'user', mixed).error ?? '', /need/)
+  assert.ok(makeProposal({ kind: 'note', text: 'hi there', need: 'ui' }, 'user', mixed).proposal)
+})
+
+test('init pruning keeps a need that a note uses', async () => {
+  const { applyChoice } = await import('../src/core/setup.ts')
+  const doc = { needs: { ui: 'Screens.', old: 'Gone.' }, skills: {}, notes: [{ id: 'n', text: 'Show copy first.', need: 'ui', source: 'user' }] }
+  const r = applyChoice(doc, 'writing-guide', 'start')
+  const out = r.config as { needs: Record<string, string> }
+  assert.deepEqual(Object.keys(out.needs), ['ui'])
+  assert.deepEqual(r.pruned, ['old'])
+})

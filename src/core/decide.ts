@@ -27,7 +27,7 @@ export type Session = {
   /** Skills of rules that fired or were loaded: needed for the rest of the session. */
   ruleSkills: SkillName[]
   /** Open `after` rules; `denied` is set once one has denied a call, so the retry passes. */
-  openRules: { id: string; by: string; denied: boolean }[]
+  openRules: { id: string; by: string; denied: boolean; told: boolean }[]
   /** Field rules that denied and wait for the retry. */
   fieldDenied: string[]
   proposals: Proposal[]
@@ -39,6 +39,10 @@ export type Session = {
   freshNotes: string[]
   /** Requests to revise a proposal, sent once in the next context. */
   revise: string[]
+  /** Hashes of the proposals the model made through the tool: at most five per session. */
+  proposed: string[]
+  /** Counts the stores, so the newer of two copies can be told. */
+  rev?: number
 }
 
 export type CoreEvent =
@@ -47,7 +51,7 @@ export type CoreEvent =
   | { type: 'compact'; now: number; phase: 'before' | 'after'; trigger: string; skipped?: boolean; agentId?: string }
   | { type: 'prompt'; now: number; text: string; fromUser: boolean; matched: NeedName[]; root?: string }
   /** `present` names the arguments the call carries, for field rules. */
-  | { type: 'tool'; now: number; tool: string; path?: string; command?: string; brief?: string; skill?: string; model?: string; present?: string[]; agentId?: string; root?: string }
+  | { type: 'tool'; now: number; tool: string; path?: string; command?: string; brief?: string; skill?: string; model?: string; present?: string[]; agentId?: string; root?: string; tree?: string }
   | { type: 'command'; now: number; args: string; root?: string }
   | { type: 'typed'; now: number; name: string }
   | { type: 'agentDone'; now: number }
@@ -91,7 +95,7 @@ export function initSession(config: Config, id: string, now: number, start: 'sta
 }
 
 function emptyRules() {
-  return { ruleSkills: [], openRules: [], fieldDenied: [], proposals: [], declined: [], notesSent: [], freshNotes: [], revise: [] }
+  return { ruleSkills: [], openRules: [], fieldDenied: [], proposals: [], declined: [], notesSent: [], freshNotes: [], revise: [], proposed: [] }
 }
 
 /** A session stored before a field existed gets that field empty. */
@@ -185,7 +189,7 @@ function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'pro
   const r = restore(config, next, e.now)
   next.ledger = r.ledger
   const lines = r.text === undefined ? [] : [r.text]
-  const notes = contextNotes(config, next, e.root)
+  const notes = contextNotes(config, next, e.root).kept
   if (notes.length) {
     lines.push(`Souffleur notes from the user's config:\n${notes.map((n) => `- ${n.text}`).join('\n')}`)
     const ids = notes.map((n) => n.id)
@@ -195,7 +199,8 @@ function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'pro
   lines.push(...next.revise)
   next.revise = []
   for (const d of next.duties) if (next.ledger[d.skill]?.state !== 'not installed here') lines.push(`Open duty: ${d.skill} (${d.by}).`)
-  for (const o of next.openRules) lines.push(`Open rule: ${o.id} (${o.by}).`)
+  for (const o of next.openRules) if (!o.told) lines.push(`Open rule: ${o.id} (${o.by}).`)
+  next.openRules = next.openRules.map((o) => ({ ...o, told: true }))
   return { session: next, actions: lines.length ? [{ kind: 'context', text: lines.join('\n') }] : [] }
 }
 
@@ -243,7 +248,7 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
 
     const needed = neededSkills(config, next.needs, next.ruleSkills)
     for (const [name, rule] of Object.entries(config.skills)) {
-      if (!rule.gate || next.ledger[name]?.state === 'not installed here' || !matches(rule.gate, e.tool, e.path, e.root)) continue
+      if (!rule.gate || next.ledger[name]?.state === 'not installed here' || !matches(rule.gate, e.tool, e.path, e.tree ?? e.root)) continue
       const trusted = rule.from === 'user' || trustedRoot
       const state = next.ledger[name]?.state
       if (needed.includes(name) && state !== undefined && state !== 'loaded' && state !== 'unavailable') {
@@ -263,8 +268,6 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
   const checked = checkRules(config, next, e)
   const rr = next.paused ? { ...checked, reasons: [], denied: [], fired: [] } : checked
   for (const reason of rr.reasons) found.push({ text: `${reason} ${PAUSE_HINT}`, trusted: true })
-  next.openRules = next.openRules.filter((o) => !rr.closed.includes(o.id)).map((o) => (rr.denied.includes(o.id) ? { ...o, denied: true } : o))
-  next.fieldDenied = [...next.fieldDenied.filter((id) => !rr.released.includes(id)), ...rr.denied.filter((id) => config.rules.some((r) => r.id === id && ruleKind(r) === 'field'))]
   if (rr.fired.length) next.ruleSkills = [...next.ruleSkills, ...rr.fired.filter((n) => !next.ruleSkills.includes(n))]
 
   let denied = false
@@ -278,12 +281,22 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
   }
   if (untrustedText) next.observed = lastN(next.observed, { at: e.now, reason: untrustedText })
 
+  // Retry state moves only with the outcome of the whole call: a denial marks the rules that spoke, a pass uses up their retry
+  // and lets evidence close a rule. In observe nothing is denied, so every break is recorded and no retry state is kept.
+  if (denied) {
+    next.openRules = next.openRules.map((o) => (rr.denied.includes(o.id) ? { ...o, denied: true } : o))
+    next.fieldDenied = [...next.fieldDenied, ...rr.denied.filter((id) => !next.fieldDenied.includes(id) && config.rules.some((r) => r.id === id && ruleKind(r) === 'field'))]
+  } else {
+    next.openRules = next.openRules.filter((o) => !rr.closed.includes(o.id))
+    next.fieldDenied = next.fieldDenied.filter((id) => !rr.released.includes(id))
+  }
+
   if (!denied) {
     if (e.tool === 'Agent') next.subagentsRunning += 1
     const by = e.path === undefined ? e.tool : `${e.tool} ${e.path}`
-    next.openRules = [...next.openRules, ...rr.opened.map((id) => ({ id, by, denied: false }))]
+    next.openRules = [...next.openRules, ...rr.opened.map((id) => ({ id, by, denied: false, told: false }))]
     for (const [name, rule] of Object.entries(config.skills)) {
-      if (!rule.duty || next.ledger[name]?.state === 'not installed here' || !matches(rule.duty.after, e.tool, e.path, e.root)) continue
+      if (!rule.duty || next.ledger[name]?.state === 'not installed here' || !matches(rule.duty.after, e.tool, e.path, e.tree ?? e.root)) continue
       if (next.duties.some((d) => d.skill === name)) continue
       next.duties = [...next.duties, { skill: name, openedAt: e.now, by: e.path === undefined ? e.tool : `${e.tool} ${e.path}`, denied: false }]
     }
@@ -310,6 +323,6 @@ function onCommand(config: Config, s: Session, e: Extract<CoreEvent, { type: 'co
       return reply({ ...s, needs: rest }, `Need ${arg} is off.`)
     }
     default:
-      return reply(s, 'Usage: /souffleur [status | need <name> | drop <name> | pause | init | migrate | rule <text> | review | accept <id>]')
+      return reply(s, 'Usage: /souffleur [status | need <name> | drop <name> | pause | init | migrate | rule <text> | review | accept <id> | decline <id>]')
   }
 }

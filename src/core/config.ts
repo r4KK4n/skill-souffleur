@@ -37,9 +37,28 @@ function onlyKeys(obj: Record<string, unknown>, allowed: string[], where: string
   for (const key of Object.keys(obj)) check(allowed.includes(key), where, `unknown key ${show(key)}`)
 }
 
-function stringList(v: unknown, where: string): string[] {
+/** A project root without trailing slashes (`/` stays), so `where` compares by name. */
+export const normRoot = (p: string): string => (p.length > 1 ? p.replace(/\/+$/, '') || '/' : p)
+
+/** C0 and C1 controls, line separators and bidirectional controls: none belong in text that reaches the model or a dialog. */
+export function hasControl(s: string): boolean {
+  return [...s].some((c) => {
+    const n = c.charCodeAt(0)
+    return n < 0x20 || (n >= 0x7f && n <= 0x9f) || n === 0x2028 || n === 0x2029 || (n >= 0x202a && n <= 0x202e) || (n >= 0x2066 && n <= 0x2069) || n === 0x200e || n === 0x200f
+  })
+}
+
+const MAX_LIST = 20
+const MAX_TOOL = 100
+const MAX_GLOB = 200
+
+/** A list of at most 20 one-line strings, each at most `max` characters. */
+function stringList(v: unknown, where: string, max = MAX_GLOB): string[] {
   check(Array.isArray(v) && v.every((s) => typeof s === 'string'), where, 'must be a list of strings')
-  return [...(v as string[])]
+  const list = v as string[]
+  check(list.length <= MAX_LIST, where, `must hold at most ${MAX_LIST} items`)
+  for (const item of list) check(item.length <= max && !hasControl(item), where, `items must be one line of at most ${max} characters without control characters`)
+  return [...list]
 }
 
 function checkGlob(glob: string, where: string): void {
@@ -52,7 +71,7 @@ function parseMatch(v: unknown, where: string): Match {
   check(isObject(v), where, 'must be an object')
   const obj = v as Record<string, unknown>
   onlyKeys(obj, ['tools', 'paths'], where)
-  const match: Match = { tools: stringList(obj.tools, `${where}.tools`) }
+  const match: Match = { tools: stringList(obj.tools, `${where}.tools`, MAX_TOOL) }
   check(match.tools.length > 0, `${where}.tools`, 'must not be empty')
   if (obj.paths !== undefined) {
     match.paths = stringList(obj.paths, `${where}.paths`)
@@ -76,8 +95,8 @@ function entryCommon(obj: Record<string, unknown>, where: string): { id: string;
     out.source = obj.source as string
   }
   if (obj.where !== undefined) {
-    check(typeof obj.where === 'string' && /^(\/|[A-Za-z]:[\\/])/.test(obj.where), `${where}.where`, 'must be an absolute path')
-    out.where = obj.where as string
+    check(typeof obj.where === 'string' && /^(\/|[A-Za-z]:[\\/])/.test(obj.where) && !hasControl(obj.where) && obj.where.length <= 500, `${where}.where`, 'must be an absolute one-line path')
+    out.where = normRoot(obj.where as string)
   }
   return out
 }
@@ -92,6 +111,7 @@ export function parseRuleEntry(v: unknown, where: string): Rule {
   const keys = ['before', 'skill', 'field', 'after', 'evidence'].filter((k) => obj[k] !== undefined).length
   check(kinds === 1 && keys === 2, where, 'needs exactly one of: before + skill, before + field, after + evidence')
   if (obj.before !== undefined) rule.before = parseMatch(obj.before, `${where}.before`)
+  check(!(obj.skill !== undefined && rule.before?.tools.includes('Skill')), `${where}.before`, 'a skill rule cannot gate the Skill tool: it would block loading its own skill')
   if (obj.skill !== undefined) {
     check(typeof obj.skill === 'string' && NAME.test(obj.skill) && obj.skill !== '__proto__', `${where}.skill`, `must be a skill name, got ${show(obj.skill)}`)
     rule.skill = obj.skill as string
@@ -105,10 +125,10 @@ export function parseRuleEntry(v: unknown, where: string): Rule {
     check(isObject(obj.evidence), `${where}.evidence`, 'must be an object')
     const ev = obj.evidence as Record<string, unknown>
     onlyKeys(ev, ['tool', 'command'], `${where}.evidence`)
-    check(typeof ev.tool === 'string' && ev.tool.length > 0, `${where}.evidence.tool`, 'must be a string')
+    check(typeof ev.tool === 'string' && ev.tool.length > 0 && ev.tool.length <= MAX_TOOL && !hasControl(ev.tool), `${where}.evidence.tool`, `must be a one-line string of at most ${MAX_TOOL} characters`)
     const evidence: { tool: string; command?: string } = { tool: ev.tool as string }
     if (ev.command !== undefined) {
-      check(typeof ev.command === 'string', `${where}.evidence.command`, 'must be a string')
+      check(typeof ev.command === 'string' && ev.command.length <= MAX_GLOB && !hasControl(ev.command), `${where}.evidence.command`, `must be a one-line string of at most ${MAX_GLOB} characters`)
       checkGlob(ev.command as string, `${where}.evidence.command`)
       evidence.command = ev.command as string
     }
@@ -123,7 +143,7 @@ export function parseNoteEntry(v: unknown, where: string, needs: readonly string
   const obj = v as Record<string, unknown>
   onlyKeys(obj, ['id', 'text', 'need', 'where', 'source'], where)
   const note: Note = { ...entryCommon(obj, where), text: '' }
-  check(typeof obj.text === 'string' && obj.text.trim().length >= 1 && obj.text.length <= MAX_NOTE && !hasLineBreak(obj.text), `${where}.text`, `must be one line of 1 to ${MAX_NOTE} characters`)
+  check(typeof obj.text === 'string' && obj.text.trim().length >= 1 && obj.text.length <= MAX_NOTE && !hasControl(obj.text), `${where}.text`, `must be one line of 1 to ${MAX_NOTE} characters`)
   note.text = (obj.text as string).trim()
   if (obj.need !== undefined) {
     check(typeof obj.need === 'string' && needs.includes(obj.need), `${where}.need`, `must name a need of the file, got ${show(obj.need)}`)
@@ -323,6 +343,7 @@ export function parseConfig(
     if (user.learn) config.learn = user.learn
     config.rules = user.rules
     config.notes = user.notes
+    config.userNeeds = Object.keys(user.needs)
     dropUnknownNeed(user, 'user', new Set(Object.keys(user.needs)))
     Object.assign(config.skills, user.skills)
     Object.assign(config.needs, user.needs)

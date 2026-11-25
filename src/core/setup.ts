@@ -174,7 +174,8 @@ export function applyChoice(
     skills[skill] = { need: key, ...rest }
   }
 
-  const used = new Set([...Object.values(skills), ...Object.values(projectSkills)].flatMap((r) => (isObject(r) && typeof r.need === 'string' ? [r.need] : [])))
+  const notes = Array.isArray(doc.notes) ? doc.notes : []
+  const used = new Set([...Object.values(skills), ...Object.values(projectSkills), ...notes].flatMap((r) => (isObject(r) && typeof r.need === 'string' ? [r.need] : [])))
   const pruned: string[] = []
   for (const key of Object.keys(needs)) {
     if (used.has(key)) continue

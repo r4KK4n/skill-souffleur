@@ -20,6 +20,10 @@ type World = {
   tools: { name: string }[]
   toasts: string[]
   failRead: string[]
+  /** Answers a later dialog gives. */
+  answers: string[]
+  /** After `n` more reads of `path` its text changes under the reader. */
+  driftAfter: (path: string, n: number) => void
   stored: Record<string, unknown>
 }
 
@@ -77,6 +81,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   on('session.repo', () => ({ value: opts.repoRoot ? { root: opts.repoRoot, remote: null, internal: false, name: null } : null }))
   const tools: { name: string }[] = []
   const failRead: string[] = []
+  const drift = { path: '', left: -1 }
   const toasts: string[] = []
   on('tool.register', (_, e) => {
     if (opts.failToolRegister) throw new Error('refused')
@@ -94,6 +99,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
     if (failRead.includes(e.path) || opts.failRead?.includes(e.path)) throw new Error('EACCES: permission denied')
     const text = files[e.path]
     if (text === undefined) throw new Error('ENOENT')
+    if (e.path === drift.path && drift.left-- < 0) return { value: `${text} ` }
     return { value: text }
   })
   on('model.classify', () => ({ value: opts.classify ?? 'no-match' }))
@@ -144,7 +150,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   on('turn.complete', (_, e) => ({ text: e.answer }))
   on('session.compact', () => (opts.skipCompact ? { skip: 'vetoed' } : { messages: [{ role: 'user', text: 'summary', toolUses: [] }] }))
   on('command.run', () => ({}))
-  return { statuses, setId: (next) => { id = next }, seen, writes, asked, options, clock, hide: (path) => void hidden.add(path), files, tools, toasts, failRead, stored: opts.stored ?? {} }
+  return { statuses, setId: (next) => { id = next }, seen, writes, asked, options, clock, hide: (path) => void hidden.add(path), files, tools, toasts, failRead, answers, driftAfter: (path, n) => { drift.path = path; drift.left = n }, stored: opts.stored ?? {} }
 }
 
 const COMPOSE = { model: 'm', promptModel: 'm', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] } as never
@@ -445,7 +451,7 @@ test('the /souffleur command shows its arguments in the typeahead', async ($, on
   registeredCommands.length = 0
   world(on, { [USER_FILE]: ALWAYS })
   await start($)
-  expect(JSON.stringify(registeredCommands)).toContain('"argumentHint":"[status | need <name> | drop <name> | pause | init | migrate | rule <text> | review | accept <id>]"')
+  expect(JSON.stringify(registeredCommands)).toContain('"argumentHint":"[status | need <name> | drop <name> | pause | init | migrate | rule <text> | review | accept <id> | decline <id>]"')
 })
 
 // ---- review fixes ----
@@ -1040,7 +1046,6 @@ test('a missing user file is created with just the new entry', async ($, on) => 
   const id = /Queued as (\S+)\./.exec(String(r.result))![1]!
   const l = w as unknown as { files: Record<string, string> }
   delete l.files[USER_FILE]
-  w.hide(USER_FILE)
   // Missing file: it is created with just the new entry.
   expect(await run($, `accept ${id}`)).toMatch(/added rule/)
   expect(Object.keys(JSON.parse(w.writes.at(-1)!.text))).toEqual(['rules'])
@@ -1134,4 +1139,118 @@ test('a read error on the user file stops the write and keeps the proposal', asy
   expect(text).toMatch(/could not read ~\/\.claude\/souffleur\.json/)
   expect(text).toMatch(/stays queued/)
   expect(w.writes.length).toBe(0)
+})
+
+
+// --- Fix round ---
+
+const idOf = (r: { result?: unknown }) => /Queued as (\S+)\./.exec(String(r.result))![1]!
+const note = (text: string) => ({ kind: 'note', text })
+
+test('a written entry the reader drops is reported, not announced as added', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', onWrite: (path) => { if (path === USER_FILE) w.files[USER_FILE] = '{"mode":"enforce"}' } })
+  await start($)
+  const id = idOf(await propose($, note('Reply in German.')))
+  const text = await run($, `accept ${id}`)
+  expect(text).toMatch(/did not keep it/)
+  expect(text).not.toMatch(/added note/)
+})
+
+test('accept takes only here or project as a second word', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', repoRoot: '/work/main' })
+  await start($)
+  const id = idOf(await propose($, note('Reply in German.')))
+  expect(await run($, `accept ${id} banana`)).toMatch(/Usage: \/souffleur accept/)
+  expect(w.writes.length).toBe(0)
+  expect(await run($, `accept ${id} project`)).toMatch(/added note/)
+  expect(userFile(w).notes[0].where).toBe('/work/main')
+})
+
+test('decline records the hash like No, and it survives a new session id through the store', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  const id = idOf(await propose($, note('Reply in German.')))
+  expect(await run($, `decline ${id}`)).toMatch(/not added/)
+  expect(await run($, 'decline nope')).toMatch(/no proposal nope/)
+  expect(w.writes.length).toBe(0)
+  w.setId('s2')
+  await start($)
+  expect(String((await propose($, note('Reply in German.'))).result)).toMatch(/declined this before/)
+})
+
+test('accept, decline, rule and review only act when the user typed them', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', shaped: '' })
+  await start($)
+  const id = idOf(await propose($, note('Reply in German.')))
+  for (const args of [`accept ${id}`, `decline ${id}`, 'rule Always say hi', 'review']) {
+    const r = await $.command.run({ command: 'souffleur', args, origin: { kind: 'plugin', name: 'other' } } as never)
+    expect(String(r.text)).toMatch(/only the user can run/i)
+  }
+  expect(w.writes.length).toBe(0)
+  expect(await run($, 'review')).toMatch(new RegExp(id))
+})
+
+test('/souffleur rule asks nothing when no person is at the prompt', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: ['Yes, everywhere'], shaped: '{"kind":"note","text":"Always say hi"}' })
+  await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: false })
+  expect(await run($, 'rule Always say hi')).toMatch(/queued note/)
+  expect(w.asked.length).toBe(0)
+})
+
+test('the user file is read again just before the write, and a changed file stops it', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  const id = idOf(await propose($, note('Reply in German.')))
+  w.driftAfter(USER_FILE, 1)
+  const text = await run($, `accept ${id}`)
+  expect(text).toMatch(/changed since it was read/)
+  expect(text).toMatch(/stays queued/)
+  expect(w.writes.length).toBe(0)
+})
+
+test('proposals made at the same moment are all kept', async ($, on) => {
+  world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  const calls = ['a', 'b', 'c', 'd'].map((x) => propose($, note(`Note number ${x}.`)))
+  await Promise.all(calls)
+  const text = await run($, 'review')
+  for (const x of ['a', 'b', 'c', 'd']) expect(text).toMatch(new RegExp(`Note number ${x}`))
+})
+
+test('a subagent may not propose, and the model gets five proposals per session', async ($, on) => {
+  world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  expect(String((await propose($, { ...note('From a subagent.'), agentId: 'a1' })).result)).toMatch(/main session/)
+  for (let i = 0; i < 5; i++) expect(String((await propose($, note(`Note ${i} here.`))).result)).toMatch(/Queued/)
+  expect(String((await propose($, note('One too many.'))).result)).toMatch(/five proposals/)
+})
+
+test('the reply points to review once a dialog was dismissed', async ($, on) => {
+  world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  await propose($, note('First note here.'))
+  await turnEnd($)
+  expect(String((await propose($, note('Second note here.'))).result)).toMatch(/\/souffleur review/)
+})
+
+test('a dialog that fails under /souffleur rule does not stop the turn-end questions', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: [], shaped: '{"kind":"note","text":"Always say hi"}' })
+  await start($)
+  await run($, 'rule Always say hi')
+  w.answers.push('No')
+  await turnEnd($)
+  expect(w.asked.length).toBe(2)
+})
+
+test('a passage proposal names its file and line, and a project file offers this project first', async ($, on) => {
+  const line = 'Always invoke writing-guide before writing prose.'
+  const w = world(on, { [USER_FILE]: ALWAYS, ['/work/proj/CLAUDE.md']: `Intro\n${line}\n${line}` }, { skills: ['writing-guide'], answers: ['No'] })
+  await start($)
+  const text = await run($, 'migrate')
+  expect(text).toMatch(/1 passage queued/)
+  expect(text).toMatch(/1 skipped/)
+  expect(text).toMatch(/already (known|waiting)/)
+  await run($, 'review')
+  expect(w.asked[0]).toMatch(/from .*CLAUDE\.md:2/)
+  expect(w.options[0]![0]).toBe('Yes, this project only')
 })

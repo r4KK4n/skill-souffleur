@@ -1,10 +1,20 @@
-import { checkEntry } from './config.ts'
+import { checkEntry, normRoot } from './config.ts'
 import type { Session } from './decide.ts'
 import { describeNote, describeRule } from './rules.ts'
 import type { Config, Note, Rule } from './types.ts'
 
 /** A rule or note that waits for the user's answer. `from` is the entry's source: `user`, `slip` or `skill:<name>`. */
-export type Proposal = { hash: string; kind: 'rule' | 'note'; entry: Rule | Note; scope?: 'everywhere' | 'project'; from: string }
+export type Proposal = {
+  hash: string
+  kind: 'rule' | 'note'
+  entry: Rule | Note
+  scope?: 'everywhere' | 'project'
+  from: string
+  /** Where a note came from, for example `CLAUDE.md:12`. The dialog shows it. */
+  origin?: string
+  /** The passage sits in a file of the project: the dialog offers this project first. */
+  project?: boolean
+}
 
 export const QUEUE_CAP = 20
 export const YES_EVERYWHERE = 'Yes, everywhere'
@@ -33,14 +43,14 @@ export function hashEntry(kind: 'rule' | 'note', entry: Rule | Note): string {
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
 
 /** A proposal from tool input or the small model: `kind` plus the fields of a rule or note. The id comes from the content. */
-export function makeProposal(raw: unknown, from: string, config: Pick<Config, 'needs'>): { proposal?: Proposal; error?: string } {
+export function makeProposal(raw: unknown, from: string, config: Pick<Config, 'userNeeds'>): { proposal?: Proposal; error?: string } {
   if (!isObject(raw)) return { error: 'the proposal must be an object' }
   const kind = raw.kind
   if (kind !== 'rule' && kind !== 'note') return { error: 'kind must be "rule" or "note"' }
   const { kind: _kind, why: _why, id: _id, source: _source, where: _where, ...fields } = raw
   const drafts: Record<string, unknown> = { ...fields, id: 'draft', source: from }
   if (kind === 'note' && typeof drafts.text === 'string') drafts.text = drafts.text.trim()
-  const checked = checkEntry(kind, drafts, Object.keys(config.needs))
+  const checked = checkEntry(kind, drafts, config.userNeeds ?? [])
   if (checked.error !== undefined || checked.entry === undefined) return { error: checked.error ?? 'invalid entry' }
   const hash = hashEntry(kind, checked.entry)
   const entry = { ...checked.entry, id: `${kind}-${hash.slice(0, 8)}` }
@@ -64,7 +74,9 @@ export const describeProposal = (p: Proposal): string => (p.kind === 'rule' ? de
 /** The first waiting proposal as a dialog question. One question per turn: the caller asks once and stops. */
 export function nextQuestion(s: Session): { hash: string; question: string; options: string[] } | undefined {
   const p = s.proposals[0]
-  return p === undefined ? undefined : { hash: p.hash, question: `Add ${p.kind}: ${describeProposal(p)}?`, options: [...OPTIONS] }
+  if (p === undefined) return undefined
+  const from = p.origin === undefined ? '' : ` from ${p.origin}`
+  return { hash: p.hash, question: `Add ${p.kind}${from}: ${describeProposal(p)}?`, options: p.project ? [YES_PROJECT, YES_EVERYWHERE, NO] : [...OPTIONS] }
 }
 
 /** The proposal an id (the entry id or the hash) names. */
@@ -85,7 +97,7 @@ export function answer(config: Config, s: Session, hash: string, label: string, 
   if (label === NO) return { session: { ...s, proposals: rest, declined: [...s.declined, hash] } }
   if (label === YES_EVERYWHERE || label === YES_PROJECT) {
     if (label === YES_PROJECT && root === undefined) return { session: s, note: 'The project folder is unknown, so nothing was added.' }
-    const entry = label === YES_PROJECT ? { ...p.entry, where: root! } : { ...p.entry }
+    const entry = label === YES_PROJECT ? { ...p.entry, where: normRoot(root!) } : { ...p.entry }
     const fresh = p.kind === 'note' && (entry as Note).need === undefined ? [...s.freshNotes, entry.id] : s.freshNotes
     return { session: { ...s, proposals: rest, freshNotes: fresh }, write: { kind: p.kind, entry } }
   }
@@ -119,7 +131,7 @@ export function shapePrompt(text: string, needs: Record<string, string>): string
 }
 
 /** Reads the small model's answer for `text`; anything unusable becomes a note with the user's own words. */
-export function parseShaped(raw: string, text: string, config: Pick<Config, 'needs'>): Proposal {
+export function parseShaped(raw: string, text: string, config: Pick<Config, 'userNeeds'>): Proposal {
   const start = raw.indexOf('{')
   const end = raw.lastIndexOf('}')
   if (start >= 0 && end > start) {

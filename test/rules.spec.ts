@@ -176,3 +176,111 @@ test('confirmed note sent once in next context', () => {
   assert.match(ctx(out[0]!), /Reply in German\./)
   assert.equal(ctx(out[1]!), '')
 })
+
+// --- Fix round ---
+
+const parseRules = (rules: unknown[], extra: Record<string, unknown> = {}) => parseConfig(JSON.stringify({ rules, ...extra }), undefined)
+
+test('a skill rule does not deny the Skill call that loads its own skill', () => {
+  const c = cfg({ rules: [{ id: 'skill-first', before: { tools: ['Agent'] }, skill: 'dev-workflow', source: 'user' }] })
+  const { out } = run(c, [tool('Skill', { skill: 'dev-workflow' })])
+  assert.equal(denial(out[0]!), '')
+  const r = parseRules([{ id: 'loop', before: { tools: ['Skill'] }, skill: 'dev-workflow', source: 'user' }])
+  assert.equal(r.config.rules.length, 0)
+  assert.match(r.errors.join('\n'), /Skill/)
+  assert.equal(parseRules([{ id: 'fine', before: { tools: ['Skill'] }, field: 'skill', source: 'user' }]).config.rules.length, 1)
+})
+
+test('a retry denied by another rule does not use up the field retry', () => {
+  const c = cfg({ rules: [fieldRule, skillRule] })
+  const { out } = run(c, [tool('Agent', { present: [] }), tool('Agent', { present: [] }), loadSkill('dev-workflow'), tool('Agent', { present: [] })])
+  assert.match(denial(out[0]!), /agent-names-model/)
+  assert.match(denial(out[1]!), /agent-needs-workflow/)
+  assert.doesNotMatch(denial(out[1]!), /agent-names-model/, 'the field rule already denied once')
+  assert.equal(denial(out[3]!), '', 'the field retry is still unused, so this call passes')
+})
+
+test('evidence that is itself denied does not close an after rule', () => {
+  const gate: Rule = { id: 'bash-needs-guide', before: { tools: ['Bash'] }, skill: 'bash-guide', source: 'user' }
+  const c = cfg({ rules: [afterRule, gate] })
+  const edit = () => tool('Edit', { path: '/work/a/src/x.ts', root: '/work/a' })
+  const { s, out } = run(c, [edit(), tool('Bash', { command: 'npm test' })])
+  assert.match(denial(out[1]!), /bash-needs-guide/)
+  assert.equal(s.openRules.length, 1, 'still open')
+  const again = run(c, [edit(), loadSkill('bash-guide'), tool('Bash', { command: 'npm test' })])
+  assert.deepEqual(again.s.openRules, [])
+})
+
+test('observe mode records every field-rule violation and keeps no retry state', () => {
+  const c = cfg({ mode: 'observe', rules: [fieldRule] })
+  const { s } = run(c, [tool('Agent', { present: [] }), tool('Agent', { present: [] })])
+  assert.equal(s.observed.length, 2)
+  assert.deepEqual(s.fieldDenied, [])
+})
+
+test('where is compared without trailing slashes', () => {
+  const r = parseRules([{ ...fieldRule, where: '/work/a/' }])
+  assert.equal(r.config.rules[0]!.where, '/work/a')
+  const c = cfg({ rules: [{ ...fieldRule, where: '/work/a' }] })
+  assert.match(denial(last(c, [tool('Agent', { present: [], root: '/work/a/' })])), /agent-names-model/)
+})
+
+test('globs match against the working tree root and where against the main root', () => {
+  const rule: Rule = { ...afterRule, where: '/work/main' }
+  const c = cfg({ rules: [rule] })
+  const edit = () => tool('Edit', { path: '/work/main/.claude/worktrees/w/src/x.ts', root: '/work/main', tree: '/work/main/.claude/worktrees/w' })
+  const { s } = run(c, [edit()])
+  assert.equal(s.openRules.length, 1, 'src/** is relative to the worktree, and where names the main root')
+  const other = run(c, [tool('Edit', { path: '/work/main/.claude/worktrees/w/src/x.ts', root: '/work/main' })])
+  assert.equal(other.s.openRules.length, 0, 'against the main root the path is not under src/')
+})
+
+test('rule strings are one line with limits', () => {
+  const bad = (r: Partial<Rule> & Record<string, unknown>) => parseRules([{ id: 'x', source: 'user', ...r }]).config.rules.length
+  const ok = { before: { tools: ['Agent'] }, field: 'model' }
+  assert.equal(bad(ok), 1)
+  assert.equal(bad({ before: { tools: ['A'.repeat(101)] }, field: 'model' }), 0)
+  assert.equal(bad({ before: { tools: Array.from({ length: 21 }, (_, i) => `T${i}`) }, field: 'model' }), 0)
+  assert.equal(bad({ before: { tools: ['Edit'], paths: ['a'.repeat(201)] }, field: 'model' }), 0)
+  assert.equal(bad({ before: { tools: ['Edit'], paths: ['a\nb'] }, field: 'model' }), 0)
+  assert.equal(bad({ after: { tools: ['Edit'] }, evidence: { tool: 'Bash', command: 'x'.repeat(201) } }), 0)
+  assert.equal(bad({ after: { tools: ['Edit'] }, evidence: { tool: 'B'.repeat(101) } }), 0)
+})
+
+test('control and bidi characters are refused in notes and rules', () => {
+  for (const ch of ['\u0007', '\u0085', '‮', '⁦', '‏', '\u007f']) {
+    const n = parseConfig(JSON.stringify({ notes: [{ id: 'n', text: `Reply${ch}in German`, source: 'user' }] }), undefined)
+    assert.equal(n.config.notes.length, 0, `note with U+${ch.charCodeAt(0).toString(16)}`)
+    const r = parseRules([{ id: 'r', before: { tools: ['Edit'], paths: [`src${ch}/**`] }, field: 'model', source: 'user' }])
+    assert.equal(r.config.rules.length, 0, `rule with U+${ch.charCodeAt(0).toString(16)}`)
+  }
+})
+
+test('proposals are checked against the needs of the user file only', () => {
+  const r = parseConfig(JSON.stringify({ needs: { ui: 'Screens.' } }), JSON.stringify({ needs: { extra: 'Project only.' } }))
+  assert.deepEqual(r.config.userNeeds, ['ui'])
+  assert.ok('extra' in r.config.needs)
+})
+
+test('an open after rule is told once per opening', () => {
+  const c = cfg({ rules: [afterRule] })
+  const edit = () => tool('Edit', { path: '/work/a/src/x.ts', root: '/work/a' })
+  const { out } = run(c, [edit(), prompt(), prompt(), tool('Bash', { command: 'npm test' }), edit(), prompt()])
+  assert.match(ctx(out[1]!), /Open rule: test-after-edit/)
+  assert.equal(ctx(out[2]!), '')
+  assert.match(ctx(out[5]!), /Open rule: test-after-edit/, 'a new opening is told again')
+})
+
+test('the need-note block is capped and the rest is listed in the status', async () => {
+  const { renderTable } = await import('../src/core/status.ts')
+  const long = 'y'.repeat(450)
+  const notes: Note[] = ['a', 'b', 'c', 'd', 'e', 'f'].map((id) => ({ id, text: long, need: 'ui', source: 'user' }))
+  const c = cfg({ notes })
+  const { out, s } = run(c, [prompt(['ui'])])
+  const sent = ctx(out[0]!)
+  assert.ok(sent.length < 2400)
+  assert.deepEqual(s.notesSent, ['a', 'b', 'c', 'd'])
+  assert.match(renderTable(c, s, 0, '/work/a'), /Notes waiting for a later prompt[^\n]*: e, f/)
+  const next = run(c, [prompt()], s)
+  assert.match(ctx(next.out[0]!), /y{50}/, 'the rest follows on the next prompt')
+})

@@ -96,7 +96,7 @@ A skill with `"always": true` is needed from the first turn. A skill with `"need
 - `/souffleur migrate` goes through your old reload hooks and offers to turn them off. See [Coming from your own hooks](#coming-from-your-own-hooks).
 - `/souffleur rule <text>` turns your words into a rule or a note and asks before it keeps anything. See [Rules and notes](#rules-and-notes).
 - `/souffleur review` asks about every waiting proposal, one dialog each. Without a dialog it lists them.
-- `/souffleur accept <id> [here]` keeps a waiting proposal in text mode, everywhere or with `here` for this project only.
+- `/souffleur accept <id> [here|project]` keeps a waiting proposal in text mode, everywhere or for this project only. `/souffleur decline <id>` declines one. `rule`, `review`, `accept` and `decline` act only when you type them; a plugin or the model cannot run them.
 
 ## Modes
 
@@ -108,7 +108,7 @@ A skill with `"always": true` is needed from the first turn. A skill with `"need
 
 Some instructions have a trace Souffleur can see, and others are standing wishes. Souffleur keeps both in the user file, next to the skills, and asks you before it keeps anything.
 
-A rule has one of three shapes. `before` with `skill` means a matching call waits until that skill is loaded. `before` with `field` means a matching call must carry that argument, for example a `model` on every `Agent` call. `after` with `evidence` means a matching call opens the rule, and a later call that matches the evidence closes it. In `observe` a broken rule is listed under "Would have denied". In `enforce` the call is denied once with the rule named, and the retry passes, so a wrong rule cannot trap a session. `/souffleur pause` switches rules off with everything else. A note is never checked. Notes without a `need` go into the system prompt section (2,000 characters at most), notes with a `need` go into the prompt context when that need first matches and again after each compaction.
+A rule has one of three shapes. `before` with `skill` means a matching call waits until that skill is loaded. `before` with `field` means a matching call must carry that argument, for example a `model` on every `Agent` call. `after` with `evidence` means a matching call opens the rule, and a later call that matches the evidence closes it. In `observe` a broken rule is listed under "Would have denied". In `enforce` a skill rule denies every matching call until the skill is loaded (the call that loads the skill is never denied), while a field rule and an after rule deny once and let the retry pass, so a wrong rule cannot trap a session. `/souffleur pause` switches rules off with everything else. A note is never checked. Notes without a `need` go into the system prompt section (2,000 characters at most), notes with a `need` go into the prompt context when that need first matches and again after each compaction.
 
 ```json
 {
@@ -124,9 +124,9 @@ A rule has one of three shapes. `before` with `skill` means a matching call wait
 
 Only the user file may hold `rules` and `notes`. A project file that has them gets an error for those keys, because a cloned repository must not deny calls or write into your system prompt. `where` limits an entry to one project and names the main repository root, so a rule made in one worktree holds in the others.
 
-Proposals come from the model and from you. When something goes wrong that a rule would have caught, or when you write "remember as a rule: ...", the model calls the tool `souffleur_propose`. `/souffleur rule <text>` does the same for your own words. A proposal waits in a queue of at most 20. At the end of a turn in a session with a person at the prompt, Souffleur asks about the first one, with `Yes, everywhere`, `Yes, this project only` and `No`. Text typed under "Other" goes to the model with your next prompt as a request to revise the proposal. A declined proposal is remembered and not proposed again. Under `claude -p`, nothing is asked: proposals stay queued for `/souffleur review` and `/souffleur accept <id>`. Souffleur writes an entry to `~/.claude/souffleur.json` only after your yes, reads the file fresh first, stops when it cannot read it, and keeps every other key.
+Proposals come from the model and from you. When something goes wrong that a rule would have caught, or when you write "remember as a rule: ...", the model calls the tool `souffleur_propose`. `/souffleur rule <text>` does the same for your own words. A proposal waits in a queue of at most 20. At the end of a turn in a session with a person at the prompt, Souffleur asks about the first one, with `Yes, everywhere`, `Yes, this project only` and `No`. Text typed under "Other" goes to the model with your next prompt as a request to revise the proposal. A declined proposal is remembered and not proposed again. The queue belongs to the session. Under `claude -p`, nothing is asked: proposals stay queued for `/souffleur review` and `/souffleur accept <id>`. The model may make five proposals per session, and a subagent may make none. Rule strings are one line without control characters, with at most 20 list items. Souffleur writes an entry to `~/.claude/souffleur.json` only after your yes, reads the file fresh first, stops when it cannot read it, and keeps every other key.
 
-`/souffleur migrate` also queues the standing instructions it finds in your `CLAUDE.md` files and memory index as note proposals. Learning rules from the text of your skills is not part of this release.
+`/souffleur migrate` also queues the standing instructions it finds in your `CLAUDE.md` files and memory index as note proposals, with or without a dialog. The question names the file and line, and offers `Yes, this project only` first for a passage from the project's own files. The report says how many passages were skipped and why. Learning rules from the text of your skills is not part of this release.
 
 ## Setting up your skills
 

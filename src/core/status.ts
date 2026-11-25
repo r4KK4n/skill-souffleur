@@ -1,5 +1,5 @@
 import type { Session } from './decide.ts'
-import { sectionNotes } from './rules.ts'
+import { contextNotes, sectionNotes } from './rules.ts'
 import type { Config, Mode } from './types.ts'
 
 const cell = (text: string) => text.replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\r\n|\r|\n/g, ' ')
@@ -24,6 +24,9 @@ export function renderTable(config: Config, s: Session, now: number, root?: stri
   if (s.proposals.length) lines.push('', `Open proposals (${s.proposals.length}), /souffleur review asks about them:`, ...s.proposals.map((p) => `- ${p.entry.id}`))
   const leftOut = sectionNotes(config, root).leftOut
   if (leftOut.length) lines.push('', `Notes left out of the system prompt (2,000 character limit): ${leftOut.map((n) => n.id).join(', ')}`)
+  const due = contextNotes(config, s, root)
+  const waiting = [...due.kept, ...due.leftOut]
+  if (waiting.length) lines.push('', `Notes waiting for a later prompt (a context block holds 2,000 characters): ${waiting.map((n) => n.id).join(', ')}`)
   if (config.rules.length || config.notes.length) lines.push('', `Rules: ${config.rules.length}, notes: ${config.notes.length}`)
   if (s.errors.length) lines.push('', 'Errors:', ...s.errors.map((err) => `- ${err}`))
   if (s.version !== undefined) lines.push('', `Claude Code ${s.version}`)
