@@ -12,3 +12,7 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
+    ignore:
+      # Types must match the lowest supported Node (engines: >=22.6).
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
