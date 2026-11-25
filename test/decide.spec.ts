@@ -396,3 +396,130 @@ test('a config event drops needs the config no longer has and duties of removed 
   assert.deepEqual(Object.keys(s.needs), ['ui'])
   assert.deepEqual(s.duties.map((d) => d.skill), ['ui-checklist'])
 })
+
+// --- Review before 0.1.0 ---
+
+const projectCfg = (extra: Partial<Config> = {}): Config =>
+  cfg({
+    mode: 'enforce',
+    needs: { pn: 'A project need.' },
+    projectNeeds: ['pn'],
+    skills: { 'proj-skill': { need: 'pn', from: 'project' }, 'proj-always': { always: true, from: 'project' } },
+    ...extra,
+  })
+const withRoot = (e: CoreEvent, root = '/work/p'): CoreEvent => ({ ...e, root }) as CoreEvent
+
+test('untrusted project file: no restore text for its skills, with or without a root', () => {
+  const c = projectCfg()
+  assert.doesNotMatch(ctx(one(c, [withRoot(prompt('x', ['pn']))])), /proj-/)
+  assert.doesNotMatch(ctx(one(c, [prompt('x', ['pn'])])), /proj-/)
+  const trusted = projectCfg({ trustProjects: ['/work/p/'] })
+  assert.match(ctx(one(trusted, [withRoot(prompt('x', ['pn']))])), /proj-skill/)
+  assert.match(ctx(one(trusted, [withRoot(prompt('x', ['pn']))])), /proj-always/)
+})
+
+test('untrusted project file: a restore after compaction on a tool result does not name its skills', () => {
+  const c = projectCfg()
+  const { out } = run(c, [loadSkill('proj-always'), compact(), withRoot(tool('Read'))])
+  assert.deepEqual(out.at(-1)!.filter((a) => a.kind === 'toolContext'), [])
+})
+
+test('untrusted project file: a project need does not deny an Agent brief, a trusted one does', () => {
+  const c = projectCfg()
+  const events = [withRoot(prompt('x', ['pn'])), withRoot(tool('Agent', { brief: 'do it' }))]
+  const r = run(c, events)
+  assert.deepEqual(denies(r.out.at(-1)!), [])
+  const t = run(projectCfg({ trustProjects: ['/work/p'] }), events)
+  assert.equal(denies(t.out.at(-1)!).length, 1)
+  assert.match((denies(t.out.at(-1)!)[0] as { reason: string }).reason, /pn/)
+})
+
+test('a user need still denies an Agent brief when the root is not trusted', () => {
+  const r = run(base, [withRoot(prompt('x', ['prose'])), withRoot(tool('Agent', { brief: 'do it' }))])
+  assert.equal(denies(r.out.at(-1)!).length, 1)
+})
+
+test('the restore block never passes 10,000 characters with notes, and the rest stays absent', () => {
+  const skills = Object.fromEntries(Array.from({ length: 300 }, (_, i) => [`plugin:${'s'.repeat(50)}-${String(i).padStart(3, '0')}`, { always: true, from: 'user' as const }]))
+  const notes = Array.from({ length: 4 }, (_, i) => ({ id: `n${i}`, text: 'x'.repeat(490), source: 'user' }))
+  const c = cfg({ skills, notes, needs: {} })
+  const start = { ...initSession(c, 's', 0, 'clear'), freshNotes: notes.map((n) => n.id) }
+  const { s, out } = run(c, [prompt()], start)
+  const text = ctx(out.at(-1)!)
+  assert.ok(text.length <= 10_000, `${text.length} characters`)
+  assert.match(text, /x{490}/, 'the notes are still in the block')
+  const asked = Object.values(s.ledger).filter((e) => e.state === 'restoring').length
+  assert.ok(asked > 0 && asked < 300)
+  assert.equal(Object.values(s.ledger).filter((e) => e.state === 'absent').length, 300 - asked, 'skills left out stay absent and are listed by /souffleur')
+  const again = run(c, [prompt()], s)
+  assert.ok(ctx(again.out.at(-1)!).length <= 10_000)
+})
+
+test('three failed classifier runs in a row record an error, a good run resets the count and the error', () => {
+  const failed = (): CoreEvent => ({ ...prompt('x'), classifierFailed: true }) as CoreEvent
+  const two = run(base, [failed(), failed()]).s
+  assert.deepEqual(two.errors, [])
+  const three = run(base, [failed()], two).s
+  assert.ok(three.errors.some((m) => /^classifier: /.test(m)), three.errors.join('\n'))
+  assert.equal(run(base, [failed()], three).s.errors.filter((m) => /^classifier: /.test(m)).length, 1, 'recorded once')
+  const good = run(base, [{ ...prompt('x'), classifierFailed: false } as CoreEvent], three).s
+  assert.deepEqual(good.errors, [])
+  assert.equal(run(base, [failed(), failed()], good).s.errors.length, 0, 'the count starts again')
+})
+
+test('three failed learn calls in a row record an error, a good one resets', () => {
+  const learned = (ok: boolean): CoreEvent => ({ type: 'learned', now: at(), ok })
+  const three = run(base, [learned(false), learned(false), learned(false)]).s
+  assert.ok(three.errors.some((m) => /^learn: /.test(m)), three.errors.join('\n'))
+  assert.deepEqual(run(base, [learned(true)], three).s.errors, [])
+  assert.deepEqual(run(base, [learned(false), learned(false), learned(true), learned(false), learned(false)]).s.errors, [])
+})
+
+test('pause stops restore requests; resume brings them back', () => {
+  const r = run(withAlways, [command('pause')])
+  assert.equal(r.s.paused, true)
+  assert.doesNotMatch(ctx(one(withAlways, [prompt()], r.s)), /terse-mode/)
+  assert.deepEqual(one(withAlways, [prompt('x', ['prose'])], r.s), [])
+  const after = run(withAlways, [command('resume')], r.s)
+  assert.equal(after.s.paused, false)
+  assert.match((after.out[0]![0] as { text: string }).text, /on again/i)
+  assert.match(ctx(one(withAlways, [prompt()], after.s)), /terse-mode/)
+})
+
+test('pause stops the restore after a compaction on a tool result, and need matches are not recorded', () => {
+  const s0 = run(withAlways, [loadSkill('terse:terse-mode'), compact(), command('pause')]).s
+  assert.deepEqual(one(withAlways, [tool('Read')], s0).filter((a) => a.kind === 'toolContext'), [])
+  assert.deepEqual(Object.keys(run(withAlways, [prompt('x', ['prose'])], s0).s.needs), [])
+})
+
+test('resume without a pause says so; a resumed session is not paused', () => {
+  assert.match((one(base, [command('resume')])[0] as { text: string }).text, /not paused/i)
+  const paused = run(base, [command('pause')]).s
+  const resumed = decide(base, paused, { type: 'start', now: at(), start: 'resume' }).session
+  assert.equal(resumed.paused, false)
+  assert.match((one(base, [command('nonsense')])[0] as { text: string }).text, /resume/)
+})
+
+test('an open duty is mentioned once per opening', () => {
+  const openDuty = [prompt('screen', ['ui']), loadSkill('ui-checklist'), tool('Write', { path: '/p/a.html' })]
+  const s1 = run(base, openDuty).s
+  assert.equal(s1.duties.length, 1)
+  const first = run(base, [prompt()], s1)
+  assert.match(ctx(first.out[0]!), /Open duty: ui-checklist/)
+  const second = run(base, [prompt()], first.s)
+  assert.doesNotMatch(ctx(second.out[0]!), /Open duty/)
+  const closed = run(base, [tool('Bash', { command: 'node ui-checklist detect' }), tool('Write', { path: '/p/b.html' })], second.s)
+  assert.equal(closed.s.duties.length, 1)
+  assert.match(ctx(run(base, [prompt()], closed.s).out[0]!), /Open duty: ui-checklist/, 'a new opening is mentioned again')
+})
+
+test('the Skill call that loads a gated skill is not denied', () => {
+  const c = cfg({ skills: { g: { always: true, from: 'user', gate: { tools: ['Skill'] } } } })
+  assert.deepEqual(denies(one(c, [prompt(), tool('Skill', { skill: 'g' })])), [])
+  assert.equal(denies(one(c, [prompt(), tool('Skill', { skill: 'other' })])).length, 1, 'other Skill calls still wait')
+})
+
+test('trustProjects with a trailing slash still trusts the root in a tool call', () => {
+  const c = cfg({ trustProjects: ['/work/p/'], skills: { 'p-gate': { always: true, from: 'project', gate: { tools: ['Write'] } } } })
+  assert.equal(denies(one(c, [withRoot(prompt()), withRoot(tool('Write', { path: '/work/p/a' }))])).length, 1)
+})

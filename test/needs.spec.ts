@@ -74,3 +74,14 @@ test('neededSkills keeps config order and includes always skills', () => {
   assert.deepEqual(neededSkills(config, { prose: 1, ui: 1 }), ['a', 'b', 'c'])
   assert.deepEqual(neededSkills(config, {}), ['b'])
 })
+
+test('classifyPromptChecked reports a failed, empty or unfinished call', async () => {
+  const { classifyPromptChecked } = await import('../src/core/needs.ts')
+  const never = () => new Promise<void>(() => {})
+  assert.equal((await classifyPromptChecked('x', needs, async () => 'match', never)).failed, false)
+  assert.equal((await classifyPromptChecked('x', needs, async () => 'no-match', never)).failed, false)
+  assert.equal((await classifyPromptChecked('x', needs, async () => { throw new Error('boom') }, never)).failed, true)
+  assert.equal((await classifyPromptChecked('x', needs, async () => '', never)).failed, true, 'no answer')
+  const late = await classifyPromptChecked('x', needs, () => new Promise<string>(() => {}), () => Promise.resolve(), 1)
+  assert.equal(late.failed, true, 'a call still running at the end of the budget')
+})

@@ -1,13 +1,14 @@
 import type { Register } from 'claude-code'
-import { parseConfig } from '../core/config.ts'
+import { isTrustedRoot, parseConfig } from '../core/config.ts'
 import { decide, initSession, normalizeSession } from '../core/decide.ts'
 import { MIGRATE_INTRO, describeHook, findHookOverlaps, findPassages, hookQuestion, hookSteps, isGuess, migrateSteps, passageLines, removeHook } from '../core/migrate.ts'
 import type { HookOverlap, Passage } from '../core/migrate.ts'
 import { CHOICE_LABEL, INJECTED_HELP, NOT_SET_UP, SETUP_INTRO, applyChoice, candidates, choiceOf, cleanNeedText, configProblem, currentChoice, describePlan, explicitOnly, injectedWarning, needKeyFor, options, parsePicks, parseSkips, picksPrompt, setupSteps } from '../core/setup.ts'
 import type { LoadChoice, NeedText, Plan, StartHooks, Suggestion } from '../core/setup.ts'
 import type { Action, CoreEvent, Session } from '../core/decide.ts'
-import { classifyPrompt } from '../core/needs.ts'
+import { classifyPromptChecked } from '../core/needs.ts'
 import { EXTRACT_SYSTEM, MAX_SKILL_TEXT, extractPrompt, hashKey, parseAnswer, shouldRead, skillHash, trusted } from '../core/learn.ts'
+import type { Proposal } from '../core/proposals.ts'
 import { NO, YES_EVERYWHERE, YES_PROJECT, addEntry, answer, describeProposal, enqueue, findProposal, makeProposal, nextQuestion, parseShaped, proposalLines, shapePrompt } from '../core/proposals.ts'
 import { ruleSkillNames, sectionNotes } from '../core/rules.ts'
 import { statusLine } from '../core/status.ts'
@@ -122,12 +123,36 @@ function heal(l: Loaded, held: Session): Session {
 }
 
 async function persist($: Dollar, l: Loaded, s0: Session): Promise<void> {
-  const s: Session = { ...s0, rev: (s0.rev ?? 0) + 1 }
+  const s: Session = { ...s0, rev: (s0.rev ?? 0) + 1, touched: now() }
   latest = s
   // A broken file shows as degraded; only a clean start without a user file says "not set up".
   $.ui.status(!l.setUp && !s.errors.length ? NOT_SET_UP : statusLine(s, l.config.mode, sectionNotes(l.config, l.root).leftOut.length))
   await $.state.set(REF, s)
   await $.store.set(`session:${s.id}`, s)
+}
+
+/** Stored copies of sessions not touched for this long are removed at session start. */
+const SESSION_TTL_MS = 30 * 86_400_000
+
+/**
+ * Housekeeping at session start: removes `session:*` entries of the plugin store whose copy was stored more than 30 days
+ * ago. A copy without a timestamp (stored before this existed) gets one now and goes after 30 days. Never touches the
+ * session in use or other keys. A failure here is not an error of the session: the next start tries again.
+ */
+async function pruneStore($: Dollar, currentId: string): Promise<void> {
+  try {
+    const keys: string[] = await $.store.keys()
+    for (const key of keys) {
+      if (!key.startsWith('session:') || key === `session:${currentId}`) continue
+      const copy: unknown = await $.store.get(key)
+      const touched = typeof copy === 'object' && copy !== null ? (copy as { touched?: unknown }).touched : undefined
+      if (typeof touched === 'number') {
+        if (now() - touched > SESSION_TTL_MS) await $.store.delete(key)
+      } else if (typeof copy === 'object' && copy !== null) await $.store.set(key, { ...copy, touched: now() })
+    }
+  } catch {
+    // housekeeping only
+  }
 }
 
 /** Session reads and writes wait for each other: two hooks at the same moment must not both read the old state. */
@@ -751,6 +776,7 @@ async function commitAnswerNow($: Dollar, hash: string, label: string): Promise<
     loaded = undefined // the file changed: read it again
     const l2 = await getLoaded($)
     await persist($, l2, decide(l2.config, r.session, { type: 'config', now: now(), errors: l2.errors }).session)
+    await markVersionDone($, session, r.session, hash)
     // The file is what counts: confirm that the reader kept the entry before saying it is there.
     const kept = [...l2.config.rules, ...l2.config.notes].some((x) => x.id === r.write!.entry.id)
     if (w.wrote && !kept) {
@@ -760,6 +786,7 @@ async function commitAnswerNow($: Dollar, hash: string, label: string): Promise<
     return `Souffleur: ${w.text}.`
   }
   await persist($, l, r.session)
+  await markVersionDone($, session, r.session, hash)
   if (label === NO) {
     try {
       await $.store.set(DECLINED_KEY, r.session.declined.slice(-200))
@@ -827,6 +854,7 @@ async function learnFrom($: Dollar, a: LearnAction): Promise<void> {
   if (!interactive) return
   let hash: string | undefined
   let fails = 0
+  let offers = 0
   let claimed = false
   try {
     const first = await current($)
@@ -850,8 +878,11 @@ async function learnFrom($: Dollar, a: LearnAction): Promise<void> {
     const l = await serial(async () => {
       const { l, session } = await current($)
       const stored = await $.store.get(key)
-      if (!l.setUp || !interactive || !shouldRead(session, l.config, stored)) return undefined
-      fails = typeof stored === 'object' && stored !== null && typeof (stored as { fails?: unknown }).fails === 'number' ? (stored as { fails: number }).fails : 0
+      // A version whose proposals still wait in this session is not read again.
+      if (!l.setUp || !interactive || session.proposals.some((p) => p.skillHash === hash) || !shouldRead(session, l.config, stored)) return undefined
+      const count = (name: 'fails' | 'offers') => (typeof stored === 'object' && stored !== null && typeof (stored as Record<string, unknown>)[name] === 'number' ? (stored as Record<string, number>)[name]! : 0)
+      fails = count('fails')
+      offers = count('offers')
       await persist($, l, { ...session, skillReads: (session.skillReads ?? 0) + 1 })
       return l
     })
@@ -863,16 +894,28 @@ async function learnFrom($: Dollar, a: LearnAction): Promise<void> {
     const found = r.isAnswered ? parseAnswer(r.text, origin, l.config, text) : undefined
     if (found === undefined) throw new Error('no usable answer')
     claimed = false
+    await apply($, () => ({ type: 'learned', now: now(), ok: true }))
     let full = false
-    if (found.length > 0) await update($, (l2, s) => found.reduce((acc, p) => {
-      const q = enqueue(l2.config, acc, p)
-      if (q.status === 'full') full = true
-      return q.session
-    }, s))
-    if (!full) await $.store.set(key, { done: true })
+    const queued: string[] = []
+    if (found.length > 0) {
+      const version = hash
+      await update($, (l2, s) => {
+        const next = found.reduce((acc, p) => {
+          const q = enqueue(l2.config, acc, { ...p, skillHash: version })
+          if (q.status === 'full') full = true
+          else if (q.status === 'queued') queued.push(p.hash)
+          return q.session
+        }, s)
+        // A queue that was full cannot answer for the whole version: its proposals do not mark it done.
+        return full ? { ...next, proposals: next.proposals.map((p) => (queued.includes(p.hash) ? withoutSkillHash(p) : p)) } : next
+      })
+    }
+    // Done when nothing is left to ask; otherwise the version counts as offered, and done only once its proposals are answered.
+    if (!full) await $.store.set(key, queued.length === 0 ? { done: true } : { offers: offers + 1 })
   } catch {
     if (claimed && hash !== undefined) {
       try {
+        await apply($, () => ({ type: 'learned', now: now(), ok: false }))
         await serial(async () => {
           const { l, session } = await current($)
           await persist($, l, { ...session, skillReads: Math.max(0, (session.skillReads ?? 0) - 1) })
@@ -884,6 +927,19 @@ async function learnFrom($: Dollar, a: LearnAction): Promise<void> {
     }
   } finally {
     if (hash !== undefined) reading.delete(hash)
+  }
+}
+
+const withoutSkillHash = ({ skillHash: _gone, ...rest }: Proposal): Proposal => rest
+
+/** After an answer: the skill version the answered proposal came from is done once none of its proposals waits any more. */
+async function markVersionDone($: Dollar, before: Session, after: Session, hash: string): Promise<void> {
+  const version = before.proposals.find((q) => q.hash === hash)?.skillHash
+  if (version === undefined || after.proposals.some((q) => q.skillHash === version)) return
+  try {
+    await $.store.set(hashKey(version), { done: true })
+  } catch {
+    // the version stays offered and is read again next time, within the cap
   }
 }
 
@@ -1022,9 +1078,10 @@ export const register: Register = (on) => {
       } else s = await freshSession($, l, id, 'startup')
       await persist($, l, s)
     })
+    await pruneStore($, await $.session.id())
     await safe($, 'installed', undefined, () => refreshInstalled($))
     await safe($, 'command.register', undefined, async () => {
-      await $.command.register({ name: 'souffleur', description: 'Show which skills Souffleur keeps loaded', argumentHint: '[status | need <name> | drop <name> | pause | init | migrate | rule <text> | review | accept <id> | decline <id>]' })
+      await $.command.register({ name: 'souffleur', description: 'Show which skills Souffleur keeps loaded', argumentHint: '[status | need <name> | drop <name> | pause | resume | init | migrate | rule <text> | review | accept <id> | decline <id>]' })
     })
     interactive = e.isInteractive === true
     askStopped = false
@@ -1063,20 +1120,24 @@ export const register: Register = (on) => {
   on('prompt.submit', async ($, e, next) => {
     const fromUser = isFromUser(e)
     const texts = await safe($, 'prompt.submit', [] as string[], async () => {
-      const { config } = await getLoaded($)
+      const { l, session } = await current($)
+      const { config } = l
+      // A need only the project file defines counts for a trusted root alone; nothing is classified while paused.
+      const trusted = isTrustedRoot(config, l.root)
+      const needs = Object.fromEntries(Object.entries(config.needs).filter(([name]) => trusted || !(config.projectNeeds ?? []).includes(name)))
+      const classify = fromUser && !session.paused && Object.keys(needs).length > 0
       // The skill listing runs beside the classification and gives up after its own short budget.
       const listing = fromUser ? safe($, 'installed', undefined, () => refreshInstalled($)) : undefined
-      const matched =
-        fromUser && Object.keys(config.needs).length > 0
-          ? await classifyPrompt(
-              e.text,
-              config.needs,
-              async (text, labels) => (await $.model.classify(text, labels)) ?? '',
-              (ms) => $.clock.sleep(ms),
-            )
-          : []
+      const verdict = classify
+        ? await classifyPromptChecked(
+            e.text,
+            needs,
+            async (text, labels) => (await $.model.classify(text, labels)) ?? '',
+            (ms) => $.clock.sleep(ms),
+          )
+        : undefined
       await listing
-      const { actions } = await apply($, (l) => ({ type: 'prompt', now: now(), text: e.text, fromUser, matched, root: l.root }))
+      const { actions } = await apply($, (l2) => ({ type: 'prompt', now: now(), text: e.text, fromUser, matched: verdict?.matched ?? [], root: l2.root, ...(verdict === undefined ? {} : { classifierFailed: verdict.failed }) }))
       return actions.flatMap((a) => (a.kind === 'context' ? [a.text] : []))
     })
     return texts.length ? next({ ...e, context: [...(e.context ?? []), ...texts] }) : next(e)
@@ -1087,7 +1148,7 @@ export const register: Register = (on) => {
     const text = await safe($, 'prompt.compose', undefined as string | undefined, async () => {
       const { l, session } = await current($)
       const always = Object.entries(l.config.skills)
-        .filter(([name, rule]) => rule.always === true && session.ledger[name]?.state !== 'not installed here')
+        .filter(([name, rule]) => rule.always === true && session.ledger[name]?.state !== 'not installed here' && (rule.from === 'user' || isTrustedRoot(l.config, l.root)))
         .map(([name]) => name)
       const notes = sectionNotes(l.config, l.root).text
       return `${RULE}${always.length ? ` Always-on skills: ${always.join(', ')}.` : ''}${proposeReady && l.setUp ? PROPOSE_SENTENCE : ''}${notes ? `\n\n${notes}` : ''}`
@@ -1137,6 +1198,7 @@ export const register: Register = (on) => {
     const r = await next(e)
     if (e.agentId === undefined && e.reason === 'answer' && interactive && !askStopped) {
       await safe($, 'turn.complete', undefined, async () => {
+        if ((await current($)).session.paused) return
         const line = await askFirst($, true)
         if (line !== undefined) {
           try {
@@ -1173,6 +1235,9 @@ export const register: Register = (on) => {
         return next(e)
       }
       const reply = await safe($, 'command.run', undefined as string | undefined, async () => {
+        // Read the files again, so a hand edit applies at once.
+        loaded = undefined
+        await apply($, (l0) => ({ type: 'config', now: now(), errors: l0.errors }))
         const { actions, l } = await apply($, (l0) => ({ type: 'command', now: now(), args: e.args ?? '', root: l0.root }))
         const text = actions.flatMap((a) => (a.kind === 'reply' ? [a.text] : []))[0]
         const verb = (e.args ?? '').trim().split(/\s+/)[0] ?? ''

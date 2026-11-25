@@ -14,6 +14,8 @@ export type Proposal = {
   origin?: string
   /** The passage sits in a file of the project: the dialog offers this project first. */
   project?: boolean
+  /** The skill version (its hash) this proposal was read from. The version counts as done when every proposal of it is answered. */
+  skillHash?: string
 }
 
 export const QUEUE_CAP = 20

@@ -88,6 +88,7 @@ A second recorder mod checked what the rules-and-notes design relies on, again i
 | Does an automatic compaction fire `session.compact`? | Yes, with trigger `auto`, when the context passed the threshold during a run. |
 | Does a `context` entry on a tool result reach the model? | It reaches the model, but the model may treat it as untrusted. In one run it followed a test note on a tool result; in another it said it ignored "a plugin note in the output". A restore request sent this way is a hint, not a guarantee. |
 | Does invoking a loaded skill again add its text again? | No. While the skill is still in the context, a second invocation reports it as already loaded. |
+| Which API call gives the main repository root from a worktree session? | `$.session.repo().root` is the main working tree. `$.vcs.detect({ path: cwd })` answers `root` (the worktree) and `mainRoot`. Rule globs are relative to the first, `where` names the second. |
 
 Not measured yet: the `$.ui.ask` dialog in a Remote Control session in the desktop and mobile apps.
 

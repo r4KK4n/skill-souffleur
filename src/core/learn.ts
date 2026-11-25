@@ -1,6 +1,7 @@
 import type { Session } from './decide.ts'
 import { fnv, makeProposal } from './proposals.ts'
 import type { Proposal } from './proposals.ts'
+import { isTrustedRoot } from './config.ts'
 import type { Config } from './types.ts'
 
 /** At most this many proposals come out of one skill text. */
@@ -9,6 +10,8 @@ export const MAX_PROPOSALS = 3
 export const MAX_READS = 5
 /** A skill version whose read failed this many times is given up. */
 export const MAX_FAILS = 3
+/** A skill version whose proposals were offered this many times without an answer is given up. */
+export const MAX_OFFERS = 3
 /** The part of a skill text the small model sees. */
 export const MAX_SKILL_TEXT = 60_000
 /** A model answer longer than this is not read. */
@@ -43,15 +46,15 @@ export function originOf(o: SkillOrigin): { origin: string; project?: true } {
 
 /** A project's or an MCP server's skill is read only for a root the user trusts. */
 export function trusted(source: string | undefined, root: string, config: Pick<Config, 'trustProjects'>): boolean {
-  return source === 'projectSettings' || source === 'mcp' ? config.trustProjects.includes(root) : true
+  return source === 'projectSettings' || source === 'mcp' ? isTrustedRoot(config, root) : true
 }
 
-/** What the plugin store holds under a version's key: `{ done: true }` or `{ fails: n }`. */
+/** What the plugin store holds under a version's key: `{ done: true }`, `{ fails: n }` or `{ offers: n }` (proposals queued n times, none answered yet). */
 export function shouldRead(s: Pick<Session, 'skillReads'>, config: Pick<Config, 'learn'>, stored: unknown): boolean {
   if (!config.learn.skills || (s.skillReads ?? 0) >= MAX_READS) return false
   if (typeof stored !== 'object' || stored === null) return true
-  const { done, fails } = stored as { done?: unknown; fails?: unknown }
-  return done !== true && !(typeof fails === 'number' && fails >= MAX_FAILS)
+  const { done, fails, offers } = stored as { done?: unknown; fails?: unknown; offers?: unknown }
+  return done !== true && !(typeof fails === 'number' && fails >= MAX_FAILS) && !(typeof offers === 'number' && offers >= MAX_OFFERS)
 }
 
 export const EXTRACT_SYSTEM = [

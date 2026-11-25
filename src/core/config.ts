@@ -51,6 +51,13 @@ export function hasControl(s: string): boolean {
 const MAX_LIST = 20
 const MAX_TOOL = 100
 const MAX_GLOB = 200
+/** A project file is untrusted input: it may define this many skills and needs. */
+export const MAX_PROJECT_SKILLS = 20
+export const MAX_PROJECT_NEEDS = 10
+
+/** True when `root` is one of the trusted project roots, compared without trailing slashes like `where`. */
+export const isTrustedRoot = (config: Pick<Config, 'trustProjects'>, root: string | undefined): boolean =>
+  root !== undefined && config.trustProjects.some((p) => normRoot(p) === normRoot(root))
 
 /** A list of at most 20 one-line strings, each at most `max` characters. */
 function stringList(v: unknown, where: string, max = MAX_GLOB): string[] {
@@ -185,7 +192,10 @@ function parseRule(v: unknown, where: string): Omit<SkillRule, 'from'> {
   }
   check(!(rule.always === true && rule.need !== undefined), where, '"always" and "need" cannot be combined')
   check(rule.always === true || rule.need !== undefined || rule.startup !== undefined, where, 'needs one of "always", "need" or "startup"')
-  if (obj.gate !== undefined) rule.gate = parseMatch(obj.gate, `${where}.gate`)
+  if (obj.gate !== undefined) {
+    rule.gate = parseMatch(obj.gate, `${where}.gate`)
+    check(!rule.gate.tools.includes('Skill'), `${where}.gate`, 'a gate cannot name the Skill tool: it would block loading its own skill')
+  }
   if (obj.duty !== undefined) {
     check(isObject(obj.duty), `${where}.duty`, 'must be an object')
     const duty = obj.duty as Record<string, unknown>
@@ -194,10 +204,10 @@ function parseRule(v: unknown, where: string): Omit<SkillRule, 'from'> {
     check(isObject(duty.evidence), `${where}.duty.evidence`, 'must be an object')
     const ev = duty.evidence as Record<string, unknown>
     onlyKeys(ev, ['tool', 'command'], `${where}.duty.evidence`)
-    check(typeof ev.tool === 'string', `${where}.duty.evidence.tool`, 'must be a string')
+    check(typeof ev.tool === 'string' && ev.tool.length > 0 && ev.tool.length <= MAX_TOOL && !hasControl(ev.tool), `${where}.duty.evidence.tool`, `must be a one-line string of at most ${MAX_TOOL} characters`)
     const evidence: { tool: string; command?: string } = { tool: ev.tool as string }
     if (ev.command !== undefined) {
-      check(typeof ev.command === 'string', `${where}.duty.evidence.command`, 'must be a string')
+      check(typeof ev.command === 'string' && ev.command.length <= MAX_GLOB && !hasControl(ev.command), `${where}.duty.evidence.command`, `must be a one-line string of at most ${MAX_GLOB} characters`)
       checkGlob(ev.command as string, `${where}.duty.evidence.command`)
       evidence.command = ev.command as string
     }
@@ -236,7 +246,7 @@ function parseFile(text: string, source: Origin, errors: string[]): FileConfig {
   if (source === 'user' && obj.trustProjects !== undefined) {
     const list = obj.trustProjects
     if (Array.isArray(list) && list.every((p) => typeof p === 'string' && /^(\/|[A-Za-z]:[\\/])/.test(p))) {
-      file.trustProjects = [...(list as string[])]
+      file.trustProjects = (list as string[]).map(normRoot)
     } else {
       fail('trustProjects: must be a list of absolute paths; ignored')
     }
@@ -255,7 +265,10 @@ function parseFile(text: string, source: Origin, errors: string[]): FileConfig {
       fail(`${key}: must be an object; ignored`)
       continue
     }
-    for (const [name, value] of Object.entries(section)) {
+    const cap = source === 'project' ? (kind === 'skill' ? MAX_PROJECT_SKILLS : MAX_PROJECT_NEEDS) : Infinity
+    const entries = Object.entries(section)
+    if (entries.length > cap) fail(`${key}: at most ${cap} ${key} are read from a project file; the rest are ignored`)
+    for (const [name, value] of entries.slice(0, cap)) {
       ;(kind === 'skill' ? file.skillKeys : file.needKeys).push(name)
       try {
         parseName(name, kind)
@@ -366,6 +379,8 @@ export function parseConfig(
     dropUnknownNeed(project, 'project', new Set([...Object.keys(config.needs), ...Object.keys(project.needs)]))
     Object.assign(config.skills, project.skills)
     Object.assign(config.needs, project.needs)
+    const projectNeeds = Object.keys(project.needs)
+    if (projectNeeds.length) config.projectNeeds = projectNeeds
   }
   return { config, errors }
 }

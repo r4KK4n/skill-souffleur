@@ -27,10 +27,12 @@ type World = {
   /** After `n` more reads of `path` its text changes under the reader. */
   driftAfter: (path: string, n: number) => void
   stored: Record<string, unknown>
+  /** How many classifier calls the mod made. */
+  classifyCalls: () => number
 }
 
 type Opts = {
-  classify?: string
+  classify?: string | (() => string)
   stored?: Record<string, unknown>
   skipCompact?: boolean
   /** Installed skill names `$.session.usage` lists. */
@@ -120,7 +122,12 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
     if (e.path === drift.path && drift.left-- < 0) return { value: `${text} ` }
     return { value: text }
   })
-  on('model.classify', () => ({ value: opts.classify ?? 'no-match' }))
+  let classifyCalls = 0
+  on('model.classify', () => {
+    classifyCalls += 1
+    return { value: typeof opts.classify === 'function' ? opts.classify() : (opts.classify ?? 'no-match') }
+  })
+  on('store.keys', () => ({ value: Object.keys(storeData) }) as never)
   on('ui.status', (_, e) => {
     statuses.push(e.text)
     return { value: undefined }
@@ -177,7 +184,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   on('turn.complete', (_, e) => ({ text: e.answer }))
   on('session.compact', () => (opts.skipCompact ? { skip: 'vetoed' } : { messages: [{ role: 'user', text: 'summary', toolUses: [] }] }))
   on('command.run', () => ({}))
-  return { statuses, setId: (next) => { id = next }, seen, writes, asked, options, clock, hide: (path) => void hidden.add(path), files, tools, toasts, failRead, answers, driftAfter: (path, n) => { drift.path = path; drift.left = n }, stored: opts.stored ?? {} }
+  return { statuses, setId: (next) => { id = next }, seen, writes, asked, options, clock, hide: (path) => void hidden.add(path), files, tools, toasts, failRead, answers, driftAfter: (path, n) => { drift.path = path; drift.left = n }, stored: storeData, classifyCalls: () => classifyCalls }
 }
 
 const COMPOSE = { model: 'm', promptModel: 'm', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] } as never
@@ -478,7 +485,7 @@ test('the /souffleur command shows its arguments in the typeahead', async ($, on
   registeredCommands.length = 0
   world(on, { [USER_FILE]: ALWAYS })
   await start($)
-  expect(JSON.stringify(registeredCommands)).toContain('"argumentHint":"[status | need <name> | drop <name> | pause | init | migrate | rule <text> | review | accept <id> | decline <id>]"')
+  expect(JSON.stringify(registeredCommands)).toContain('"argumentHint":"[status | need <name> | drop <name> | pause | resume | init | migrate | rule <text> | review | accept <id> | decline <id>]"')
 })
 
 // ---- review fixes ----
@@ -1311,7 +1318,7 @@ test('a skill text is read in the background and its proposals land in the queue
   expect(w.writes.length).toBe(0)
 })
 
-test('the same skill text is read once, across sessions', async ($, on) => {
+test('a skill text is read once per session while its proposals wait; a new session offers an unanswered one again', async ($, on) => {
   const calls: string[] = []
   const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', skillCalls: calls, skillAnswer: answerWith(TEST_RULE) })
   await start($)
@@ -1321,9 +1328,9 @@ test('the same skill text is read once, across sessions', async ($, on) => {
   w.setId('s2')
   await start($)
   await mainLoad($, 'writing-guide')
-  expect(calls.length).toBe(1)
+  expect(calls.length, 'its proposals were never answered, so the new session offers it again').toBe(2)
   await mainLoad($, 'writing-guide', `${OBLIGATION} Also lint.`)
-  expect(calls.length).toBe(2)
+  expect(calls.length).toBe(3)
 })
 
 test('at most five skills are read per session', async ($, on) => {
@@ -1438,7 +1445,7 @@ test('nothing is read while paused', async ($, on) => {
   expect(calls.length).toBe(0)
 })
 
-test('the hash is stored per version after the proposals were queued, and not at all when the queue is full', async ($, on) => {
+test('the version is marked offered after the proposals were queued, and not at all when the queue is full', async ($, on) => {
   const stored: Record<string, unknown> = {}
   const calls: string[] = []
   const texts = [0, 1, 2].map((i) => `Always run cmd-${i}-a, cmd-${i}-b and cmd-${i}-c.`)
@@ -1454,7 +1461,7 @@ test('the hash is stored per version after the proposals were queued, and not at
   })
   await start($)
   await mainLoad($, 'skill-0', texts[0]!)
-  expect(stored[hashKey(hashOf('skill-0', texts[0]!))]).toEqual({ done: true })
+  expect(stored[hashKey(hashOf('skill-0', texts[0]!))]).toEqual({ offers: 1 })
   await mainLoad($, 'skill-1', texts[1]!)
   await mainLoad($, 'skill-2', texts[2]!)
   expect(calls.length).toBe(3)
@@ -1573,4 +1580,181 @@ test('a main Skill call for an unlisted skill is read even while a subagent runs
   expect(calls.length).toBe(1)
   release()
   await agent
+})
+
+// ---- review before 0.1.0 ----
+
+const PROJECT_ALWAYS = JSON.stringify({ skills: { 'proj-skill': { always: true } } })
+const systemSection = async ($: any) => (await $.prompt.compose(COMPOSE)).sections.find((x: { id: string }) => x.id === 'souffleur')?.text as string
+
+test('untrusted project file: no restore text and no system prompt mention for its skills', async ($, on) => {
+  world(on, { [USER_FILE]: ENFORCE, [PROJECT_FILE]: PROJECT_ALWAYS })
+  on('prompt.compose', () => ({ sections: [] }))
+  await start($)
+  const r = await $.prompt.submit({ text: 'hello' })
+  expect(r.context).toBe(undefined)
+  expect(await systemSection($)).not.toMatch(/proj-skill/)
+  expect(await table($)).toMatch(/not trusted/)
+})
+
+test('trusted project file (with a trailing slash in trustProjects): restore text and system prompt name its skills', async ($, on) => {
+  world(on, { [USER_FILE]: JSON.stringify({ mode: 'enforce', trustProjects: ['/work/proj/'] }), [PROJECT_FILE]: PROJECT_ALWAYS }, { repoRoot: '/work/proj' })
+  on('prompt.compose', () => ({ sections: [] }))
+  await start($)
+  const r = await $.prompt.submit({ text: 'hello' })
+  expect(r.context?.join('\n')).toMatch(/proj-skill/)
+  expect(await systemSection($)).toMatch(/proj-skill/)
+})
+
+test('untrusted project file: a project need is not classified and its brief check does not deny', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE, [PROJECT_FILE]: JSON.stringify({ skills: { 'proj-skill': { need: 'pn' } }, needs: { pn: 'A project need.' } }) }, { classify: 'match' })
+  await start($)
+  await $.prompt.submit({ text: 'hello' })
+  expect(w.classifyCalls()).toBe(0)
+  await run($, 'need pn')
+  const r = await $.tool.call({ tool: 'Agent', prompt: 'do it' } as never)
+  expect(r.deny).toBe(undefined)
+})
+
+test('three classifier failures in a row make the status degraded, a good run clears it', async ($, on) => {
+  let answer = 'unsure'
+  const w = world(on, { [USER_FILE]: JSON.stringify({ skills: { g: { need: 'n' } }, needs: { n: 'Something.' } }) }, { classify: () => answer })
+  await start($)
+  await $.prompt.submit({ text: 'one' })
+  await $.prompt.submit({ text: 'two' })
+  expect(w.statuses.at(-1)).not.toMatch(/degraded/)
+  await $.prompt.submit({ text: 'three' })
+  expect(w.statuses.at(-1)).toBe('degraded, see /souffleur')
+  expect(await table($)).toMatch(/classifier: /)
+  answer = 'no-match'
+  await $.prompt.submit({ text: 'four' })
+  expect(w.statuses.at(-1)).not.toMatch(/degraded/)
+})
+
+test('three failed learn calls in a row make the status degraded', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', skillAnswer: () => null })
+  await start($)
+  for (let i = 0; i < 3; i++) await mainLoad($, `skill-${i}`, `Always do ${i}.`)
+  expect(w.statuses.at(-1)).toBe('degraded, see /souffleur')
+  expect(await table($)).toMatch(/learn: /)
+})
+
+test('pause stops classifier calls and turn-end questions; resume brings them back', async ($, on) => {
+  const w = world(on, { [USER_FILE]: JSON.stringify({ skills: { g: { need: 'n' } }, needs: { n: 'Something.' } }) }, { answers: ['No'] })
+  await start($)
+  await propose($, { kind: 'note', text: 'Always say hi.' })
+  const before = w.classifyCalls()
+  const asked = w.asked.length
+  await run($, 'pause')
+  await $.prompt.submit({ text: 'while paused' })
+  expect(w.classifyCalls()).toBe(before)
+  await turnEnd($)
+  expect(w.asked.length).toBe(asked)
+  expect(await run($, 'resume')).toMatch(/on again/)
+  await $.prompt.submit({ text: 'after resume' })
+  expect(w.classifyCalls()).toBe(before + 1)
+  await turnEnd($)
+  expect(w.asked.length).toBe(asked + 1)
+})
+
+test('pause is not carried over when the session is resumed', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  await run($, 'pause')
+  expect(await table($)).toMatch(/\(paused\)/)
+  await start($)
+  expect(await table($)).not.toMatch(/\(paused\)/)
+  expect(w.statuses.length).toBeGreaterThan(0)
+})
+
+test('a hand edit of the user file shows in /souffleur at once and at the next session start', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  expect(await table($)).not.toMatch(/ui-checklist/)
+  w.files[USER_FILE] = JSON.stringify({ skills: { 'writing-guide': { always: true }, 'ui-checklist': { always: true } } })
+  expect(await table($)).toMatch(/ui-checklist/)
+  w.files[USER_FILE] = JSON.stringify({ skills: { 'writing-guide': { always: true }, extra: { always: true } } })
+  await start($)
+  expect(await table($)).toMatch(/extra/)
+  w.files[USER_FILE] = '{ broken'
+  expect(await table($)).toMatch(/invalid JSON/)
+})
+
+test('a session stores its timestamp, and session entries older than 30 days are removed at session start', async ($, on) => {
+  const day = 86_400_000
+  const old = { id: 'old', ledger: {}, touched: Date.now() - 31 * day }
+  const recent = { id: 'recent', ledger: {}, touched: Date.now() - 29 * day }
+  const unstamped = { id: 'unstamped', ledger: {} }
+  const w = world(on, { [USER_FILE]: ALWAYS }, { stored: { 'session:old': old, 'session:recent': recent, 'session:unstamped': unstamped, 'souffleur:declined': ['h'], 'souffleur:skill-hash:abc': { done: true } } })
+  await start($)
+  expect(w.stored['session:old']).toBe(undefined)
+  expect(w.stored['session:recent']).toBeDefined()
+  expect(w.stored['souffleur:declined']).toEqual(['h'])
+  expect(w.stored['souffleur:skill-hash:abc']).toEqual({ done: true })
+  expect(typeof (w.stored['session:s1'] as { touched: number }).touched).toBe('number')
+  expect(typeof (w.stored['session:unstamped'] as { touched?: number }).touched, 'a legacy copy gets a stamp and goes after 30 days').toBe('number')
+})
+
+test('a skill version is done only when its proposals were answered; a dropped queue offers it again, three times at most', async ($, on) => {
+  const stored: Record<string, unknown> = {}
+  const calls: string[] = []
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: ['No'], stored, skillCalls: calls, skillAnswer: answerWith(TEST_RULE) })
+  const key = hashKey(hashOf('writing-guide'))
+  await start($)
+  await mainLoad($, 'writing-guide')
+  expect(stored[key]).toEqual({ offers: 1 })
+  await mainLoad($, 'writing-guide')
+  expect(calls.length, 'its proposals still wait in this session').toBe(1)
+  for (const id of ['s2', 's3']) {
+    w.setId(id)
+    await start($)
+    await mainLoad($, 'writing-guide')
+  }
+  expect(calls.length).toBe(3)
+  expect(stored[key]).toEqual({ offers: 3 })
+  w.setId('s4')
+  await start($)
+  await mainLoad($, 'writing-guide')
+  expect(calls.length, 'three offers are the end').toBe(3)
+})
+
+test('answering the proposals of a skill version marks it done', async ($, on) => {
+  const stored: Record<string, unknown> = {}
+  const calls: string[] = []
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: ['No'], stored, skillCalls: calls, skillAnswer: answerWith(TEST_RULE, { kind: 'note', text: 'Reply in German.' }) })
+  const key = hashKey(hashOf('writing-guide'))
+  await start($)
+  await mainLoad($, 'writing-guide')
+  await turnEnd($)
+  expect(w.asked.length).toBe(1)
+  expect(stored[key], 'one of two answered').toEqual({ offers: 1 })
+  w.answers.push('Yes, everywhere')
+  await turnEnd($)
+  expect(stored[key]).toEqual({ done: true })
+  w.setId('s2')
+  await start($)
+  await mainLoad($, 'writing-guide')
+  expect(calls.length, 'an answered version is not read again').toBe(1)
+})
+
+test('a dismissed dialog leaves the version offered, a declined proposal counts as answered', async ($, on) => {
+  const stored: Record<string, unknown> = {}
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: ['__undefined__'], stored, skillAnswer: answerWith(TEST_RULE) })
+  const key = hashKey(hashOf('writing-guide'))
+  await start($)
+  await mainLoad($, 'writing-guide')
+  await turnEnd($)
+  expect(stored[key]).toEqual({ offers: 1 })
+  const id = (await table($)).match(/- (rule-[0-9a-f]{8})/)![1]
+  expect(await run($, `decline ${id}`)).toMatch(/not added/)
+  expect(stored[key]).toEqual({ done: true })
+  expect(w.asked.length).toBe(1)
+})
+
+test('proposals that are all known already mark the version done at once', async ($, on) => {
+  const stored: Record<string, unknown> = {}
+  world(on, { [USER_FILE]: JSON.stringify({ mode: 'enforce', rules: [{ id: 'have', after: TEST_RULE.after, evidence: TEST_RULE.evidence, source: 'user' }] }) }, { answers: 'reject', stored, skillAnswer: answerWith(TEST_RULE) })
+  await start($)
+  await mainLoad($, 'writing-guide')
+  expect(stored[hashKey(hashOf('writing-guide'))]).toEqual({ done: true })
 })

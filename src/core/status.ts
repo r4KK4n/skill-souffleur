@@ -1,5 +1,6 @@
 import type { Session } from './decide.ts'
 import { contextNotes, sectionNotes } from './rules.ts'
+import { isTrustedRoot } from './config.ts'
 import type { Config, Mode } from './types.ts'
 import { versionNotice } from './version.ts'
 
@@ -18,6 +19,9 @@ export function renderTable(config: Config, s: Session, now: number, root?: stri
   lines.push('| Skill | State | Since | Reason |', '| --- | --- | --- | --- |')
   for (const [name, e] of Object.entries(s.ledger)) {
     lines.push(`| ${cell(name)} | ${e.state} | ${clock(e.since)} | ${cell(e.reason)} |`)
+  }
+  if (!isTrustedRoot(config, root) && Object.values(config.skills).some((r) => r.from === 'project')) {
+    lines.push('', 'The project file defines skills, but this project is not trusted (trustProjects in the user file): they are listed here and neither requested nor allowed to deny a call.')
   }
   const duties = s.duties.filter((d) => s.ledger[d.skill]?.state !== 'not installed here').map((d) => `- ${d.skill} (${d.by})`)
   if (duties.length) lines.push('', 'Open duties:', ...duties)
