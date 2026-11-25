@@ -2,6 +2,7 @@ import { matches, matchesCommand } from './config.ts'
 import { compacted, initLedger, requested, skillLoaded } from './ledger.ts'
 import type { Ledger } from './ledger.ts'
 import { neededSkills } from './needs.ts'
+import { renderTable } from './status.ts'
 import type { Config, NeedName, SkillName } from './types.ts'
 
 /** An open duty. `denied` is set once the duty has denied a call, so the retry passes. */
@@ -66,11 +67,8 @@ export function initSession(config: Config, id: string, now: number, start: 'sta
   return s
 }
 
-/** Placeholder; a later change swaps in the real table. */
 export function statusText(config: Config, session: Session, now: number): string {
-  const states = Object.entries(session.ledger).map(([name, e]) => `${name}: ${e.state}`)
-  void now
-  return `souffleur (${config.mode}${session.paused ? ', paused' : ''}): ${states.join(', ') || 'no skills'}`
+  return renderTable(config, session, now)
 }
 
 const lastN = <T>(list: T[], item: T): T[] => [...list, item].slice(-KEEP)
