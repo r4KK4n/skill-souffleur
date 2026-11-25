@@ -260,7 +260,7 @@ export const register: Register = (on) => {
       await persist($, l, s)
     })
     await safe($, 'command.register', undefined, async () => {
-      await $.command.register({ name: 'souffleur', description: 'Show which skills Souffleur keeps loaded' })
+      await $.command.register({ name: 'souffleur', description: 'Show which skills Souffleur keeps loaded', })
     })
     return next(e)
   })
