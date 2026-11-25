@@ -1,5 +1,5 @@
 import { matches, matchesCommand } from './config.ts'
-import { compacted, initLedger, requested, skillLoaded } from './ledger.ts'
+import { compacted, initLedger, markInstalled, requested, skillLoaded, syncLedger } from './ledger.ts'
 import type { Ledger } from './ledger.ts'
 import { neededSkills } from './needs.ts'
 import { renderTable } from './status.ts'
@@ -33,6 +33,10 @@ export type CoreEvent =
   | { type: 'command'; now: number; args: string }
   | { type: 'typed'; now: number; name: string }
   | { type: 'agentDone'; now: number }
+  /** The config was read again (after `/souffleur init`): the ledger follows it, and `errors` replace the old config errors. */
+  | { type: 'config'; now: number; errors: string[] }
+  /** The skill names this session lists. An empty list means unknown. */
+  | { type: 'installed'; now: number; names: string[] }
   | { type: 'error'; now: number; where: string; message: string }
 
 export type Action =
@@ -91,6 +95,10 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
       return onCommand(config, s, e)
     case 'typed':
       return { session: e.name in s.ledger ? { ...s, mainSkillCalls: [...s.mainSkillCalls, e.name] } : s, actions: [] }
+    case 'config':
+      return { session: { ...s, ledger: syncLedger(s.ledger, config, e.now), errors: [...s.errors.filter((m) => !m.startsWith('config: ')), ...e.errors.map((m) => `config: ${m}`)].slice(-KEEP) }, actions: [] }
+    case 'installed':
+      return { session: { ...s, ledger: markInstalled(s.ledger, e.names, e.now) }, actions: [] }
     case 'agentDone':
       return { session: { ...s, subagentsRunning: Math.max(0, s.subagentsRunning - 1) }, actions: [] }
     case 'error':
@@ -191,7 +199,7 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
       if (!rule.gate || !matches(rule.gate, e.tool, e.path, e.root)) continue
       const trusted = rule.from === 'user' || trustedRoot
       const state = next.ledger[name]?.state
-      if (needed.includes(name) && state !== undefined && state !== 'loaded' && state !== 'unavailable') {
+      if (needed.includes(name) && state !== undefined && state !== 'loaded' && state !== 'unavailable' && state !== 'not installed here') {
         found.push({ text: `Souffleur: load ${name} with the Skill tool first, then retry. ${PAUSE_HINT}`, trusted })
       }
       const duty = next.duties.find((d) => d.skill === name)

@@ -1,6 +1,7 @@
 import type { Config, SkillName } from './types.ts'
 
-export type SkillState = 'absent' | 'loaded' | 'stale' | 'restoring' | 'unavailable'
+/** `not installed here`: the config names the skill but this session's skill list does not, so it is neither requested nor gated. */
+export type SkillState = 'absent' | 'loaded' | 'stale' | 'restoring' | 'unavailable' | 'not installed here'
 export type Entry = { state: SkillState; since: number; reason: string; lastCompactAt?: number; requests: number }
 export type Ledger = Record<SkillName, Entry>
 
@@ -51,4 +52,33 @@ export function requested(l: Ledger, skills: SkillName[], now: number): Ledger {
     }
   }
   return next
+}
+
+/** The ledger after a config change: new skills start absent, removed ones disappear, the rest keep their entry. */
+export function syncLedger(l: Ledger, config: Config, now: number): Ledger {
+  const next: Ledger = {}
+  for (const name of Object.keys(config.skills)) next[name] = l[name] ?? { state: 'absent', since: now, reason: '', requests: 0 }
+  return next
+}
+
+/**
+ * Compares the configured skills with the session's skill list. An absent skill missing from the list becomes
+ * `not installed here`; one that is on the list again becomes absent. Loaded, stale and requested skills stay as they are.
+ * An empty list means the list could not be read, so nothing changes.
+ */
+export function markInstalled(l: Ledger, names: string[], now: number): Ledger {
+  if (names.length === 0) return l
+  const here = new Set(names)
+  let changed = false
+  const next: Ledger = {}
+  for (const [name, e] of Object.entries(l)) {
+    if (e.state === 'absent' && !here.has(name)) {
+      next[name] = { ...e, state: 'not installed here', since: now, reason: 'not in this session\'s skill list' }
+      changed = true
+    } else if (e.state === 'not installed here' && here.has(name)) {
+      next[name] = { ...e, state: 'absent', since: now, reason: '' }
+      changed = true
+    } else next[name] = e
+  }
+  return changed ? next : l
 }

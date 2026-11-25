@@ -1,9 +1,9 @@
 import type { Register } from 'claude-code'
 import { parseConfig } from '../core/config.ts'
 import { decide, initSession } from '../core/decide.ts'
-import { MIGRATE_INTRO, describeHook, findHookOverlaps, findPassages, hookSteps, isGuess, migrateSteps, passageLines, removeHook } from '../core/migrate.ts'
+import { MIGRATE_INTRO, describeHook, findHookOverlaps, findPassages, hookQuestion, hookSteps, isGuess, migrateSteps, passageLines, removeHook } from '../core/migrate.ts'
 import type { HookOverlap, Passage } from '../core/migrate.ts'
-import { CHOICE_LABEL, NOT_SET_UP, SETUP_INTRO, applyChoice, candidates, choiceOf, cleanNeedText, configProblem, currentChoice, describePlan, needKeyFor, options, parsePicks, picksPrompt, setupSteps } from '../core/setup.ts'
+import { CHOICE_LABEL, INJECTED_HELP, NOT_SET_UP, SETUP_INTRO, applyChoice, candidates, choiceOf, cleanNeedText, configProblem, currentChoice, describePlan, explicitOnly, injectedWarning, needKeyFor, options, parsePicks, parseSkips, picksPrompt, setupSteps } from '../core/setup.ts'
 import type { LoadChoice, NeedText, Plan, Suggestion } from '../core/setup.ts'
 import type { Action, CoreEvent, Session } from '../core/decide.ts'
 import { classifyPrompt } from '../core/needs.ts'
@@ -133,6 +133,28 @@ async function installedSkills($: Dollar): Promise<string[]> {
   }
 }
 
+/** Tells the ledger which skills this session lists, so configured skills it lacks are neither requested nor gated. */
+async function refreshInstalled($: Dollar): Promise<void> {
+  const names = await installedSkills($)
+  if (names.length) await apply($, () => ({ type: 'installed', now: now(), names }))
+}
+
+/** Whether the plugin behind `skill` (`plugin:name`) declares a SessionStart hook; undefined when its files cannot be read. */
+async function pluginHasStartHook($: Dollar, home: string, skill: string): Promise<boolean | undefined> {
+  try {
+    const plugin = skill.split(':')[0]!
+    const listed: unknown = parseJson(await $.fs.read(`${home}/.claude/plugins/installed_plugins.json`))
+    const plugins = (listed as { plugins?: Record<string, { installPath?: unknown }[]> }).plugins ?? {}
+    const entry = Object.entries(plugins).find(([key]) => key.split('@')[0] === plugin)?.[1]?.[0]
+    if (typeof entry?.installPath !== 'string') return undefined
+    const manifest: unknown = parseJson(await $.fs.read(`${entry.installPath}/hooks/hooks.json`))
+    const hooks = (manifest as { hooks?: Record<string, unknown> }).hooks
+    return typeof hooks === 'object' && hooks !== null && Array.isArray(hooks.SessionStart) && hooks.SessionStart.length > 0
+  } catch {
+    return undefined
+  }
+}
+
 const stamp = (ms: number) => {
   const iso = new Date(ms).toISOString()
   return `${iso.slice(0, 10).replace(/-/g, '')}-${iso.slice(11, 19).replace(/:/g, '')}`
@@ -253,15 +275,21 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
   const passages = findPassages(await readStanding($, l0, home, notes), configured, Infinity)
 
   // One small-model call over the installed skills that have no need yet: unconfigured, hook-reloaded, or in the user file without one.
+  // Skills whose description says they run only on an explicit request are not sent; they are advised against watching.
+  const explicit = new Set(described.filter((x) => explicitOnly(x.description)).map((x) => x.name))
   const pool = described.filter((x) => {
     const rule = config.skills[x.name]
-    return rule === undefined || (rule.from === 'user' && rule.need === undefined)
+    return !explicit.has(x.name) && (rule === undefined || (rule.from === 'user' && rule.need === undefined))
   })
+  const skips = new Set(explicit)
   let picks: Suggestion[] = []
   if (pool.length) {
     try {
       const r = await $.model.complete({ model: 'haiku', prompt: picksPrompt(pool, config.needs) })
-      if (r.isAnswered) picks = parsePicks(r.text, pool.map((x) => x.name), config.needs)
+      if (r.isAnswered) {
+        picks = parsePicks(r.text, pool.map((x) => x.name), config.needs)
+        for (const name of parseSkips(r.text, pool.map((x) => x.name))) skips.add(name)
+      }
       else notes.push('The small model gave no answer, so no descriptions are proposed.')
     } catch (err) {
       notes.push(`The small model failed (${scrub(home, message(err))}), so no descriptions are proposed.`)
@@ -272,9 +300,9 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
     const current = currentChoice(config.skills[skill])
     const pick = picks.find((x) => x.skill === skill)
     const need = pick ? { need: pick.need } : {}
-    if (source === 'hook') return { skill, source, recommended: startHooked.has(skill) ? 'start' : 'need', ...need }
+    if (source === 'hook') return { skill, source, recommended: startHooked.has(skill) ? 'start' : skips.has(skill) ? 'none' : 'need', ...need }
     if (source === 'model') return { skill, source, recommended: 'need', ...need }
-    return { skill, source, ...(current === undefined ? {} : { current }), recommended: current ?? 'need', ...need }
+    return { skill, source, ...(current === undefined ? {} : { current }), recommended: current ?? (skips.has(skill) ? 'none' : 'need'), ...need }
   })
   const watched = new Set(plans.map((p) => p.skill))
   const unwatched = installed.filter((name) => !watched.has(name))
@@ -301,7 +329,7 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
         prop.fallback
           ? `No description was proposed, so "When the task needs it" would read: "${prop.need.text}" Text typed under Other replaces it.`
           : `Description for "When the task needs it": ${prop.need.text} Text typed under Other replaces it.`,
-        ...(p.skill.includes(':') ? ['Injected by its plugin fits plugins that put their own text in at session start.'] : []),
+        ...(p.skill.includes(':') ? [INJECTED_HELP] : []),
         'How should Souffleur keep it?',
       ]
       const question = `${asked ? '' : `${SETUP_INTRO}\n\n`}${lines.join(' ')}`
@@ -362,6 +390,10 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
       wrote = true
       loaded = undefined // the session reads the new file on its next event
       done.push(`${p.skill}: ${label}.`)
+      if (choice === 'injected') {
+        const warning = injectedWarning(p.skill, await pluginHasStartHook($, home, p.skill))
+        if (warning) done.push(warning)
+      }
       if (r.pruned?.length) done.push(`Removed the unused ${r.pruned.length === 1 ? 'need' : 'needs'} ${r.pruned.join(', ')}.`)
     }
   } catch (err) {
@@ -369,6 +401,19 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
     done.push(`Stopped early: ${scrub(home, message(err))}. Answers given so far are kept.`)
   }
   if (!asked && toAsk.length && !done.length) return noDialog()
+
+  if (wrote) {
+    // Apply at once: read the file again, let the running session's ledger follow it, and refresh the status line.
+    try {
+      loaded = undefined
+      const { l, session } = await current($)
+      await persist($, l, decide(l.config, session, { type: 'config', now: now(), errors: l.errors }).session)
+      await refreshInstalled($)
+    } catch (err) {
+      notes.push(`The new entries could not be applied to this session (${scrub(home, message(err))}). They apply from the next session start.`)
+      wrote = false
+    }
+  }
 
   const out = ['Souffleur init', '', ...(toAsk.length || done.length ? done.map((d) => `- ${d}`) : ['- Nothing to ask: no skill is configured yet and none looks worth watching.'])]
   const project = plans.filter((p) => p.source === 'project')
@@ -381,7 +426,7 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
     out.push('', `Found ${found} that look like old setup${guessed ? `, and ${guessed} more guessed from script names` : ''}. /souffleur migrate goes through them with you.`)
   }
   if (notes.length) out.push('', 'Notes:', ...notes.map((n) => `- ${n}`))
-  if (wrote) out.push('', 'New entries apply from the next session start. The default mode is observe: nothing is blocked until you set "mode": "enforce" in the user file.')
+  if (wrote) out.push('', 'New entries apply to this session now. The default mode is observe: nothing is blocked until you set "mode": "enforce" in the user file.')
   return out.join('\n')
 }
 
@@ -406,7 +451,7 @@ async function runMigrate($: Dollar, l: Loaded): Promise<string> {
   const passages: Passage[] = findPassages(files, configured, Infinity)
   const known = { configured, installedOnly: installed.filter((n) => !configured.includes(n)) }
 
-  const noDialog = () => withNotes(migrateSteps({ hooks, passages, settingsPath: shown(settingsPath) }), notes)
+  const noDialog = () => withNotes(migrateSteps({ hooks, passages, settingsPath: shown(settingsPath), watched: configured }), notes)
   const done: string[] = []
   const manual: string[] = []
   const label = (o: HookOverlap) => `${o.event} hook ${o.command}`
@@ -415,8 +460,9 @@ async function runMigrate($: Dollar, l: Loaded): Promise<string> {
   let expected = settings.text // what settings.json should hold; anything else means it changed under us
   try {
     for (const [i, o] of hooks.entries()) {
-      const question = `${asked ? '' : `${MIGRATE_INTRO}\n\n`}Turn off the ${describeHook(o)} hook? Souffleur now does this job.`
-      const answer: unknown = await $.ui.ask(question, { options: ['Turn off', 'Keep', 'Show me what to do', 'Stop'], header: 'Souffleur' })
+      const q = hookQuestion(o, configured)
+      const question = `${asked ? '' : `${MIGRATE_INTRO}\n\n`}${q.text}`
+      const answer: unknown = await $.ui.ask(question, { options: q.options, header: 'Souffleur' })
       asked = true
       if (typeof answer !== 'string' || answer === '' || answer === 'Stop') {
         done.push(`Stopped at the ${label(o)}; ${plural(hooks.length - i, 'hook')} not asked.`)
@@ -491,6 +537,7 @@ export const register: Register = (on) => {
         for (const msg of l.errors) s = decide(l.config, s, { type: 'error', now: now(), where: 'config', message: msg }).session
       } else s = await freshSession($, l, id, 'startup')
       await persist($, l, s)
+      await refreshInstalled($)
     })
     await safe($, 'command.register', undefined, async () => {
       await $.command.register({ name: 'souffleur', description: 'Show which skills Souffleur keeps loaded', argumentHint: '[status | need <name> | drop <name> | pause | init | migrate]' })
@@ -532,6 +579,7 @@ export const register: Register = (on) => {
               (ms) => $.clock.sleep(ms),
             )
           : []
+      if (fromUser) await refreshInstalled($)
       const { actions } = await apply($, () => ({ type: 'prompt', now: now(), text: e.text, fromUser, matched }))
       return actions.flatMap((a) => (a.kind === 'context' ? [a.text] : []))
     })

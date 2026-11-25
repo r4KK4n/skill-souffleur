@@ -140,14 +140,38 @@ export function passageLines(passages: Passage[], max = MAX_PASSAGES): string[] 
 
 export const describeHook = (o: HookOverlap): string => `${o.event}${o.matcher === undefined ? '' : ` [${o.matcher}]`}: ${o.command} (${o.why})`
 
+/**
+ * A warning when turning the hook off could leave something without reminders: the skill it points at is not in `watched`
+ * (the skills Souffleur keeps loaded), or the hook names no skill at all, so it may serve a skill of another project or a rules file.
+ */
+export function watchWarning(o: HookOverlap, watched: string[]): string | undefined {
+  if (o.skill !== undefined) {
+    return watched.includes(o.skill) ? undefined : `Souffleur does not watch ${o.skill} yet; turning this off leaves it without reminders.`
+  }
+  if (!isGuess(o)) return undefined
+  return 'Souffleur cannot tell which skill this reloads. If it serves a skill of another project or a rules file, Souffleur does not watch it, and turning this off leaves it without reminders.'
+}
+
+/** The dialog for one hook. With a warning, `Keep` comes first and the question gives the warning instead of the claim that Souffleur does the job. */
+export function hookQuestion(o: HookOverlap, watched: string[]): { text: string; options: string[] } {
+  const warning = watchWarning(o, watched)
+  const rest = ['Show me what to do', 'Stop']
+  return warning === undefined
+    ? { text: `Turn off the ${describeHook(o)} hook? Souffleur now does this job.`, options: ['Turn off', 'Keep', ...rest] }
+    : { text: `${warning} Turn off the ${describeHook(o)} hook?`, options: ['Keep', 'Turn off', ...rest] }
+}
+
 /** Manual steps for one hook, for the `Show me what to do` answer and the no-dialog text. */
 export const hookSteps = (o: HookOverlap, settingsPath: string): string =>
   `Remove the ${o.event} hook "${o.command}" from ${settingsPath} (copy the file first). If the script is only used for this, delete it too.`
 
 /** The text `/souffleur migrate` returns when it cannot ask: the explanation, hooks and steps; nothing is changed. */
-export function migrateSteps(a: { hooks: HookOverlap[]; passages: Passage[]; settingsPath: string }): string {
+export function migrateSteps(a: { hooks: HookOverlap[]; passages: Passage[]; settingsPath: string; watched?: string[] }): string {
   const out = [MIGRATE_INTRO, '', 'No dialog is available here, so nothing was changed.', '']
-  if (a.hooks.length) out.push('Hooks that do what Souffleur now does:', ...a.hooks.map((o) => `- ${describeHook(o)}`), '')
+  if (a.hooks.length) out.push('Hooks that do what Souffleur now does:', ...a.hooks.map((o) => {
+      const warning = a.watched === undefined ? undefined : watchWarning(o, a.watched)
+      return `- ${describeHook(o)}${warning === undefined ? '' : ` Warning: ${warning}`}`
+    }), '')
   else out.push('No overlapping hooks found.', '')
   if (a.passages.length) out.push('Standing instructions that name a configured skill (Souffleur never edits these):', ...passageLines(a.passages), '')
   out.push('Steps:')

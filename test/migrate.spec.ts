@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { MIGRATE_INTRO, findHookOverlaps, findPassages, migrateSteps, passageLines, removeHook } from '../src/core/migrate.ts'
+import { MIGRATE_INTRO, findHookOverlaps, findPassages, hookQuestion, migrateSteps, passageLines, removeHook, watchWarning } from '../src/core/migrate.ts'
 
 const SKILLS = ['writing-guide', 'ui-checklist', 'terse:terse-mode']
 
@@ -188,4 +188,25 @@ test('passageLines cuts at 20 and says how many more', () => {
   assert.equal(lines.length, 21)
   assert.match(lines.at(-1)!, /and 5 more/)
   assert.equal(passageLines(many.slice(0, 3)).length, 3)
+})
+
+test('watchWarning names a skill Souffleur does not watch, and a hook whose skill is unknown', () => {
+  const o = (command: string, why: string, skill?: string) => ({ event: 'UserPromptSubmit', command, index: [0, 0] as [number, number], why, ...(skill === undefined ? {} : { skill }) })
+  assert.equal(watchWarning(o('x writing-guide', 'names the skill writing-guide', 'writing-guide'), ['writing-guide']), undefined)
+  assert.match(watchWarning(o('~/h/review-preload.sh', 'guess: the script name contains review', 'review'), ['writing-guide'])!, /does not watch review yet; turning this off leaves it without reminders/)
+  assert.match(watchWarning(o('~/h/rules-preload.sh', 'guess: the script name contains preload'), ['writing-guide'])!, /rules file/)
+})
+
+test('hookQuestion puts Keep first when there is a warning and Turn off first otherwise', () => {
+  const o = { event: 'UserPromptSubmit', command: '~/h/rules-preload.sh', index: [0, 0] as [number, number], why: 'guess: the script name contains preload' }
+  const warned = hookQuestion(o, ['writing-guide'])
+  assert.deepEqual(warned.options, ['Keep', 'Turn off', 'Show me what to do', 'Stop'])
+  assert.match(warned.text, /without reminders/)
+  const named = { ...o, why: 'names the skill writing-guide', skill: 'writing-guide' }
+  assert.deepEqual(hookQuestion(named, ['writing-guide']).options, ['Turn off', 'Keep', 'Show me what to do', 'Stop'])
+})
+
+test('migrateSteps shows the warning next to the hook', () => {
+  const o = { event: 'UserPromptSubmit', command: '~/h/rules-preload.sh', index: [0, 0] as [number, number], why: 'guess: the script name contains preload' }
+  assert.match(migrateSteps({ hooks: [o], passages: [], settingsPath: '~/s.json', watched: ['writing-guide'] }), /Warning: .*without reminders/)
 })

@@ -17,17 +17,35 @@ const NEED_KEY = /^[A-Za-z0-9:_-]{1,64}$/
 
 export const CHOICE_LABEL: Record<LoadChoice, string> = {
   start: 'From the start',
-  injected: 'Injected by its plugin',
+  injected: 'Loaded by its own plugin at start (rare)',
   need: 'When the task needs it',
   none: "Don't watch",
 }
 export const STOP = 'Stop'
 
 export const SETUP_INTRO = [
-  'Souffleur init decides how each skill is kept in your sessions. It asks one question per skill: From the start, Injected by its plugin (plugin skills only), When the task needs it, or Don\'t watch. Stop ends the run.',
+  'Souffleur init decides how each skill is kept in your sessions. It asks one question per skill: From the start, When the task needs it, Don\'t watch, or, for plugin skills only and rarely right, Loaded by its own plugin at start (rare). Stop ends the run.',
   'Every answer is written to ~/.claude/souffleur.json right away, so closing a dialog keeps the answers you already gave. A skill with a gate or duty is never removed.',
   'init does not touch your hooks, CLAUDE.md or memory files. /souffleur migrate retires old hooks.',
 ].join('\n\n')
+
+/** The explanation a dialog adds for plugin skills, with an example of what injected means and what it does not. */
+export const INJECTED_HELP = `Choose ${CHOICE_LABEL.injected} only when the plugin puts the skill's text into every session by itself, for example with a hook that runs at session start. A plugin that only lists its skills, or a skill you invoke with the Skill tool, is not injected: choose From the start or When the task needs it, or Souffleur will report the skill as loaded when it is not.`
+
+/** The warning for `Loaded by its own plugin at start (rare)` on a plugin skill; `hasStartHook` is undefined when the plugin's hooks could not be read. */
+export function injectedWarning(skill: string, hasStartHook: boolean | undefined): string | undefined {
+  const plugin = skill.split(':')[0]!
+  if (!skill.includes(':') || hasStartHook === true) return undefined
+  return hasStartHook === false
+    ? `Warning: the plugin ${plugin} has no SessionStart hook, so it probably does not put ${skill} in at start. Souffleur will report the skill as loaded when it is not. Choose From the start if you want it loaded.`
+    : `Warning: Souffleur could not check whether the plugin ${plugin} has a SessionStart hook. If it has none, it does not put ${skill} in at start, and Souffleur will report the skill as loaded when it is not.`
+}
+
+/** True when a skill description says the skill runs only on an explicit request. */
+export function explicitOnly(description: string | undefined): boolean {
+  if (!description) return false
+  return /\bonly\b[^.]{0,40}\b(when|if|on|for)\b[^.]{0,60}\b(ask|asks|asked|request|requests|requested|invoke|invokes|invoked|by name)\b|\bexplicit(ly)?\b[^.]{0,30}\b(ask|asks|request|requests|invocation|invoke)/i.test(description)
+}
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
 const bare = (skill: string) => skill.split(':').pop() ?? skill
@@ -63,13 +81,14 @@ export function candidates(config: Config, installed: string[], reloadHooked: st
 
 /**
  * Answer labels for one skill, at most four. The current choice comes first, else the recommended one.
- * `Injected by its plugin` is offered for plugin skills (`a:b`); the others get `Stop` as the fourth answer.
+ * `Loaded by its own plugin at start (rare)` is offered for plugin skills (`a:b`), last, and first only when it is the
+ * current setting; the others get `Stop` as the fourth answer.
  */
 export function options(skill: string, current: LoadChoice | undefined, recommended: LoadChoice): string[] {
   const plugin = skill.includes(':')
   // A skill that is injected although it has no plugin name: keep the choice, and give up Stop (closing the dialog stops anyway).
-  const all: LoadChoice[] = plugin || current === 'injected' ? ['start', 'injected', 'need', 'none'] : ['start', 'need', 'none']
-  const first = current ?? recommended
+  const all: LoadChoice[] = plugin || current === 'injected' ? ['start', 'need', 'none', 'injected'] : ['start', 'need', 'none']
+  const first = current ?? (recommended === 'injected' ? 'start' : recommended)
   const order = all.includes(first) ? [first, ...all.filter((c) => c !== first)] : all
   const labels = order.map((c) => CHOICE_LABEL[c])
   return all.length === 4 ? labels : [...labels, STOP]
@@ -181,7 +200,9 @@ export function picksPrompt(skills: { name: string; description?: string }[], ex
   return [
     'You help set up a tool that keeps skills loaded in a coding session.',
     `Pick at most ${MAX_PICKS} of the installed skills that a developer would want loaded for a certain kind of task, such as writing text or building a screen.`,
-    'For each, give "need": a short label, and "needText": one sentence that says when a task is of that kind. When an existing need fits, reuse its label. When unsure, leave a skill out.',
+    'For each, give "need": a short label, and "needText": one sentence that says when a task is of that kind.',
+    'Reuse an existing need only when the description clearly says the skill serves that kind of task; a loose resemblance is not enough. Otherwise give a new short label with its own "needText", or "need": null when the skill should not be watched.',
+    'Give "need": null to every skill whose description says it runs only on an explicit request, and to any skill you are unsure about.',
     `Existing needs:\n${needs}`,
     `Installed skills:\n${list}`,
     'Answer with JSON only: {"skills":[{"name":"...","need":"label","needText":"..."}]}',
@@ -196,12 +217,24 @@ export function parsePicks(raw: string, installed: string[], existingNeeds: Reco
   for (const item of list) {
     if (out.length >= MAX_PICKS) break
     if (!isObject(item) || typeof item.name !== 'string' || !installed.includes(item.name) || out.some((p) => p.skill === item.name)) continue
-    if (typeof item.need !== 'string' || !NEED_KEY.test(item.need)) continue
+    if (typeof item.need !== 'string' || item.need === 'none' || !NEED_KEY.test(item.need)) continue
     const known = existingNeeds[item.need]
     const given = typeof item.needText === 'string' ? cleanNeedText(item.needText.slice(0, 200)) : undefined
     const text = known ?? given
     if (text === undefined) continue
     out.push({ skill: item.name, need: { key: item.need, text } })
+  }
+  return out
+}
+
+/** Installed skills the model gave no need (`"need": null` or `"none"`): the ones it advises not to watch. */
+export function parseSkips(raw: string, installed: string[]): string[] {
+  const data = extractJson(raw)
+  const list = Array.isArray(data) ? data : isObject(data) && Array.isArray(data.skills) ? data.skills : []
+  const out: string[] = []
+  for (const item of list) {
+    if (!isObject(item) || typeof item.name !== 'string' || !installed.includes(item.name) || out.includes(item.name)) continue
+    if (item.need === null || item.need === 'none') out.push(item.name)
   }
   return out
 }
