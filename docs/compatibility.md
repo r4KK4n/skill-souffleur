@@ -19,3 +19,7 @@ Souffleur depends on Claude Code's mod API, which is early access and changes be
 | `$.command.register` makes `/souffleur` reach a `command.run` hook with `command: "souffleur"` | 2.1.332 |
 | `$.fs.exists` and `$.fs.read` read `~/.claude/souffleur.json` and `<project>/.claude/souffleur.json`; `$.env.get("HOME")` gives the home folder | 2.1.332 |
 | `claude plugin test` cannot set `origin`, `command` or `isMeta` on a `prompt.submit` call, and a `session.compact` call carries no `messages`, so the adapter tests treat a prompt without `origin` as typed | 2.1.332 |
+| `$.tool.register` adds `mcp__<plugin>__<name>`, served by a `tool.run` hook, and the main model calls it (no fixture) | 2.1.332 |
+| `$.model.complete` with `haiku` reads a 43 KB text in about 2 s (no fixture) | 2.1.332 |
+| Automatic compaction fires `session.compact` with trigger `auto` (no fixture) | 2.1.332 |
+| A `context` entry on a tool result reaches the model, which may still disregard it as untrusted (no fixture) | 2.1.332 |
