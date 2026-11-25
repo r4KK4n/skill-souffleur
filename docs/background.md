@@ -77,6 +77,20 @@ Before the implementation we repeated the tests on 2.1.332 with a mod that recor
 
 Not measured: how the status line looks in the desktop and mobile apps, and whether `$.state` survives a hot reload of the mod (the API documents that it does).
 
+### Tests for rules and notes, Claude Code 2.1.332
+
+A second recorder mod checked what the rules-and-notes design relies on, again in headless runs with a 43 KB test skill.
+
+| Question | Result |
+|---|---|
+| Does a tool registered with `$.tool.register` reach the main model? | Yes. It appears as `mcp__<plugin>__<name>`, is served by a `tool.run` hook, and the model called it when the user wrote "Remember as a rule: always answer in German." after a system prompt section asked it to. |
+| How fast is one small-model call over a skill text? | `$.model.complete` with `haiku` over the 43 KB skill took about 2 seconds and returned the requested JSON (an empty list, since the test skill holds no rules). |
+| Does an automatic compaction fire `session.compact`? | Yes, with trigger `auto`, when the context passed the threshold during a run. |
+| Does a `context` entry on a tool result reach the model? | It reaches the model, but the model may treat it as untrusted. In one run it followed a test note on a tool result; in another it said it ignored "a plugin note in the output". A restore request sent this way is a hint, not a guarantee. |
+| Does invoking a loaded skill again add its text again? | No. While the skill is still in the context, a second invocation reports it as already loaded. |
+
+Not measured yet: the `$.ui.ask` dialog in a Remote Control session in the desktop and mobile apps.
+
 ## Decision
 
 Souffleur is built as a Claude Code mod. Hooks only see the transcript after the fact; a mod sees skill loads and compactions as they happen, can keep a short ledger in the system prompt where compaction does not touch it, can classify a prompt with the built-in small model, and can show its state in the client. The mod API is early access and changes between releases, so the rules and the ledger live in plain code with no dependency on it, and only a thin layer talks to the API.
