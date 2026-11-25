@@ -221,13 +221,32 @@ Instead Souffleur makes the main session decide, at the moment it hands work off
 
 Install is one line at the prompt, `/plugin install skill-souffleur --marketplace r4KK4n/skill-souffleur`, which needs `.claude-plugin/marketplace.json` in the repository. The README describes install, a minimal config, the commands, `observe` and `enforce`, and how to switch Souffleur off again.
 
-Many users already keep skills alive with their own hooks (a `SessionStart` hook that re-injects a skill, a `UserPromptSubmit` hook that reminds the model) and with standing instructions in `CLAUDE.md` or memory files. Running both doubles every reminder and leaves rules in two places. Souffleur does not change a user's files on install. Instead:
+Setting up has two separate jobs, so there are two commands. `/souffleur init` decides how each skill should be kept. `/souffleur migrate` retires the user's own hooks that did that job before. Each command starts with a short paragraph saying what it is about, what it will ask, and what each answer does, so the user knows before the first question that `migrate` can remove hook entries.
 
-- On a session start without a user config, the status line says `not set up, run /souffleur init` and `/souffleur` explains it. Nothing is added to the conversation.
-- `/souffleur init`, started by the user, reads `~/.claude/settings.json` (hooks), the user and project `CLAUDE.md` and the current project's memory index, and lists the installed skills. A small model proposes skill entries for the config (`always` or a `need` with its description) and names hooks and passages that do what Souffleur now does.
-- It then asks, one dialog per item, inside the command (the user started it, so several questions in a row are fine, with `Stop` on each): add the proposed skill entry; and for each overlapping hook `Turn off`, `Keep` or `Show me what to do`. `Turn off` copies `settings.json` to `settings.json.bak-souffleur-<date>` first and removes only that hook entry; settings hooks reload live. Hook scripts and `CLAUDE.md` or memory text are never edited: Souffleur lists them with file and line.
-- Without a dialog (`claude -p`), `/souffleur init` prints the proposals, the config entries as JSON and the steps, and changes nothing.
-- Once rules and notes exist, `init` also offers standing instructions it found as notes and checkable ones as rules.
+On a session start without a user config, the status line says `not set up, run /souffleur init` and `/souffleur` explains it. Nothing is added to the conversation.
+
+#### `/souffleur init`: how each skill is kept
+
+`init` can run any time, not only after install: when a skill was added, removed or behaves differently. It asks about the skills in the user file, then the skills a user hook reloads, then up to ten more that one small-model call over all installed skill descriptions picks as worth watching. The other installed skills are named in the closing summary as not watched; a re-run asks about them only when picked. A skill configured only in a project file is listed with a note that `init` writes the user file and leaves it alone. One dialog per skill; for each it offers how Souffleur should keep it:
+
+- `From the start`: needed from the first turn (`always`). Souffleur asks the model to load it at session start and after every compaction.
+- `Injected by its plugin`: a plugin puts the text in at session start itself (`always` with `startup: "injected"`). Souffleur counts it as loaded at startup and asks for it only after a compaction or a clear.
+- `When the task needs it`: needed once a prompt matches a description (`need`). The dialog shows the proposed description; text typed under "Other" replaces it.
+- `Don't watch`: no entry; an existing entry is removed. An entry that carries a hand-written `gate` or `duty` is not removed: `init` says so and leaves it for the user to edit.
+
+`$.ui.ask` shows at most four answers plus "Other". `Injected by its plugin` is offered only for plugin skills (`<plugin>:<skill>`); for the others the fourth answer is `Stop`. Closing a dialog also stops `init`, keeping the answers given so far; when the very first dialog cannot open, `init` falls back to the text output described below.
+
+The recommended answer comes first. A user hook that reloads the skill on every start points to `From the start`; otherwise the small model's pick proposes `When the task needs it` with a need, or `Don't watch`. The mod API cannot show which plugin hook prints which skill text, so `Injected by its plugin` is never recommended automatically: the user picks it, and the dialog explains that it fits plugins that load their own text at session start. The current setting of a configured skill is shown first and kept when the user picks it again; changing the kind keeps any `gate` or `duty`.
+
+For `When the task needs it`, the small model reuses an existing need when one fits (`writing-guide` and `writing-check` share `prose`) or proposes a new one. Text typed under "Other" for a skill on a shared need creates a new need for that skill, so the other skills keep their trigger. A need that no skill in the user file references after `init` is removed. Answers are written to `~/.claude/souffleur.json` as they come, keeping every other key.
+
+At the end `init` says whether it found hooks or notes that overlap with the new entries and points to `/souffleur migrate`.
+
+#### `/souffleur migrate`: retiring old reload hooks
+
+`migrate` reads `~/.claude/settings.json` (hooks), the user and project `CLAUDE.md` and the current project's memory index. It flags a hook when its command or matcher names a configured skill. For an installed skill that is not configured, only the full `plugin:skill` name or the name inside a script file name counts, and the dialog marks it as a guess. A hook that runs a script (`.sh`, `.js`, `.mjs`, `.ts`, `.py`, or a file under `hooks/`) with `preload`, `reload` or `inject` in its name is flagged as a guess too. For each flagged hook it asks `Turn off`, `Keep` or `Show me what to do`. `Turn off` copies `settings.json` to `settings.json.bak-souffleur-<date>-<time>` first (a name that is already taken gets a counter, so an older copy is never overwritten; one copy per run) and removes only that hook entry, and only when the file still holds what the edit was based on; settings hooks reload live. `Show me what to do` changes nothing and adds the manual steps to the closing report. Hook scripts and `CLAUDE.md` or memory text are never edited. It lists only passages that name a configured skill and read like a loading or reminding instruction (load, invoke, preload, reload, remind, hook), with file and line.
+
+Without a dialog (`claude -p`), both commands print what they would ask, the config entries as JSON and the steps, and change nothing. Once rules and notes exist, `migrate` also offers standing instructions it found as notes and checkable ones as rules.
 
 ### Status
 

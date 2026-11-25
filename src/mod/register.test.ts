@@ -13,6 +13,8 @@ type World = {
   seen: { prompts: { text: string; context?: readonly string[] }[] }
   writes: { path: string; text: string }[]
   asked: string[]
+  hide: (path: string) => void
+  files: Record<string, string>
 }
 
 type Opts = {
@@ -25,6 +27,14 @@ type Opts = {
   proposals?: string
   /** The labels the user picks, in order; 'reject' makes every dialog reject, as in a `-p` run. */
   answers?: string[] | 'reject'
+  /** Paths that exist but whose read throws, as a permission error would. */
+  failRead?: string[]
+  /** Writes to a path that matches throw. */
+  failWrite?: RegExp
+  /** Runs after each successful write, with its path. */
+  onWrite?: (path: string) => void
+  /** Runs when a dialog opens. */
+  onAsk?: () => void
 }
 
 /** Answers every call the mod makes on `$`; files maps an absolute path to its text, a missing path throws. */
@@ -36,6 +46,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   const seen: World['seen'] = { prompts: [] }
   const writes: World['writes'] = []
   const asked: string[] = []
+  const hidden = new Set<string>()
   const answers = opts.answers === 'reject' ? [] : [...(opts.answers ?? [])]
   mock.store(on, opts.stored)
   mock.clock(on)
@@ -45,8 +56,9 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   on('session.repo', () => ({ value: null }))
   on('session.version', () => ({ value: { version: '2.1.332' } }))
   on('env.get', () => ({ value: HOME }))
-  on('fs.exists', (_, e) => ({ value: files[e.path] !== undefined }))
+  on('fs.exists', (_, e) => ({ value: files[e.path] !== undefined && !hidden.has(e.path) }))
   on('fs.read', (_, e) => {
+    if (opts.failRead?.includes(e.path)) throw new Error('EACCES: permission denied')
     const text = files[e.path]
     if (text === undefined) throw new Error('ENOENT')
     return { value: text }
@@ -63,8 +75,10 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
     return { text: e.text, ...(e.context ? { context: e.context } : {}) }
   })
   on('fs.write', (_, e) => {
+    if (opts.failWrite?.test(e.path)) throw new Error('ENOSPC: no space left')
     writes.push({ path: e.path, text: e.text })
     files[e.path] = e.text
+    opts.onWrite?.(e.path)
     return { value: undefined }
   })
   on('session.usage', () => ({
@@ -80,14 +94,16 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
     if (e.tool !== 'AskUserQuestion') return { result: {} }
     const question = (e as unknown as { questions: { question: string }[] }).questions[0]!.question
     asked.push(question)
+    opts.onAsk?.()
     const label = answers.shift()
     if (opts.answers === 'reject' || label === undefined) throw new Error('nobody to ask')
+    if (label === '__undefined__') return { result: { questions: [], answers: { [question]: undefined } } } as never
     return { result: { questions: [], answers: { [question]: label } } } as never
   })
   on('skill.prompt', (_, e) => ({ text: e.text }))
   on('session.compact', () => (opts.skipCompact ? { skip: 'vetoed' } : { messages: [{ role: 'user', text: 'summary', toolUses: [] }] }))
   on('command.run', () => ({}))
-  return { statuses, setId: (next) => { id = next }, seen, writes, asked }
+  return { statuses, setId: (next) => { id = next }, seen, writes, asked, hide: (path) => void hidden.add(path), files }
 }
 
 const COMPOSE = { model: 'm', promptModel: 'm', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] } as never
@@ -248,37 +264,99 @@ test('the system prompt section names the always-on skills and depends on config
 
 
 const SETTINGS_PATH = `${HOME}/.claude/settings.json`
+const CLAUDE_MD = `${HOME}/.claude/CLAUDE.md`
 const SETTINGS = JSON.stringify(
   {
     theme: 'dark',
     hooks: {
-      SessionStart: [{ matcher: 'compact|resume', hooks: [{ type: 'command', command: 'bash reload-writing-guide.sh' }] }],
+      SessionStart: [{ matcher: 'compact|resume|clear', hooks: [{ type: 'command', command: 'bash ~/.claude/hooks/writing-guide-reload.sh' }] }],
+      UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'bash ~/.claude/hooks/gone-skill-preload.sh' }] }],
       PostToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'prettier --write .' }] }],
     },
   },
   null,
   2,
 )
-const PROPOSALS = JSON.stringify({ skills: [{ name: 'writing-guide', need: 'prose', needText: 'Writing text people read.' }] })
-const init = async ($: any) => (await $.command.run({ command: 'souffleur', args: 'init' })).text as string
+const PICKS = JSON.stringify({ skills: [{ name: 'ui-checklist', need: 'ui', needText: 'Building a screen.' }] })
+const run = async ($: any, args: string) => (await $.command.run({ command: 'souffleur', args })).text as string
+const SKILLS = ['writing-guide', 'ui-checklist', 'pdf']
 
-test('init without dialog prints steps and writes nothing', async ($, on) => {
-  const w = world(on, { [SETTINGS_PATH]: SETTINGS }, { skills: ['writing-guide', 'ui-checklist'], proposals: PROPOSALS, answers: 'reject' })
+test('init asks per skill and writes the user file', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS, [SETTINGS_PATH]: SETTINGS }, { skills: SKILLS, proposals: PICKS, answers: ['When the task needs it', 'When the task needs it'] })
   await start($)
-  const text = await init($)
+  const text = await run($, 'init')
+  // writing-guide is configured (asked first), then the hook skill is none (already configured), then the model pick.
+  expect(w.asked.length).toBe(2)
+  expect(w.asked[0]).toMatch(/writing-guide/)
+  expect(w.asked[0]).toMatch(/From the start|always/i)
+  expect(w.asked[1]).toMatch(/ui-checklist/)
+  const written = JSON.parse(w.writes.filter((x) => x.path === USER_FILE).at(-1)!.text)
+  expect(written.skills['writing-guide'].need).toBeTruthy()
+  expect(written.skills['ui-checklist']).toEqual({ need: 'ui' })
+  expect(written.needs.ui).toBe('Building a screen.')
+  expect(w.writes.some((x) => x.path === SETTINGS_PATH)).toBe(false)
+  expect(text).toMatch(/pdf/)
+  expect(text).toMatch(/\/souffleur migrate/)
+})
+
+test('init starts its first dialog with the explanation', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS }, { skills: ['writing-guide'], answers: ['Stop'] })
+  await start($)
+  await run($, 'init')
+  expect(w.asked[0]).toMatch(/Souffleur init/)
+  expect(w.asked[0]).toMatch(/Don't watch/)
+})
+
+test('closing the dialog stops init and keeps earlier answers', async ($, on) => {
+  const both = JSON.stringify({ skills: { 'writing-guide': { always: true }, 'ui-checklist': { always: true } } })
+  const w = world(on, { [USER_FILE]: both }, { skills: SKILLS, answers: ["Don't watch"] })
+  await start($)
+  const text = await run($, 'init')
+  const written = JSON.parse(w.writes.filter((x) => x.path === USER_FILE).at(-1)!.text)
+  expect(written.skills['writing-guide']).toBe(undefined)
+  expect(written.skills['ui-checklist']).toEqual({ always: true })
+  expect(text).toMatch(/Stopped/)
+})
+
+test('first dialog failing prints text and writes nothing', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS, [SETTINGS_PATH]: SETTINGS }, { skills: SKILLS, proposals: PICKS, answers: 'reject' })
+  await start($)
+  const text = await run($, 'init')
   expect(text).toMatch(/nothing was changed/i)
-  expect(text).toMatch(/"writing-guide"/)
-  expect(text).toMatch(/reload-writing-guide\.sh/)
+  expect(text).toMatch(/writing-guide/)
+  expect(text).toMatch(/"ui-checklist"/)
   expect(w.writes.length).toBe(0)
 })
 
-test('init writes backup before editing settings', async ($, on) => {
-  const w = world(on, { [SETTINGS_PATH]: SETTINGS }, { skills: ['writing-guide'], proposals: PROPOSALS, answers: ['Add', 'Turn off'] })
+test('init lists a project-only skill and does not ask about it', async ($, on) => {
+  const w = world(on, { [USER_FILE]: '{"skills":{}}', [PROJECT_FILE]: JSON.stringify({ skills: { 'ui-checklist': { always: true } } }) }, { skills: ['ui-checklist'], answers: [] })
   await start($)
-  const text = await init($)
-  const config = w.writes.find((x) => x.path === USER_FILE)
-  expect(JSON.parse(config!.text).skills['writing-guide']).toEqual({ need: 'prose' })
-  const backup = w.writes.findIndex((x) => /settings\.json\.bak-souffleur-\d{8}-\d{4}$/.test(x.path))
+  const text = await run($, 'init')
+  expect(w.asked.length).toBe(0)
+  expect(text).toMatch(/ui-checklist/)
+  expect(text).toMatch(/project/i)
+})
+
+test('migrate starts with its explanation and asks per hook', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS, [SETTINGS_PATH]: SETTINGS, [CLAUDE_MD]: 'Always load writing-guide first.\nUse pdf for forms.' }, { skills: SKILLS, answers: ['Turn off', 'Keep'] })
+  await start($)
+  const text = await run($, 'migrate')
+  expect(w.asked.length).toBe(2)
+  expect(w.asked[0]).toMatch(/^Souffleur migrate/)
+  expect(w.asked[0]).toMatch(/Turn off/)
+  expect(w.asked[0]).toMatch(/writing-guide-reload\.sh/)
+  expect(w.asked[1]).toMatch(/gone-skill-preload\.sh/)
+  expect(w.asked[1]).toMatch(/guess/)
+  expect(text.startsWith('Souffleur migrate')).toBe(true)
+  expect(text).toMatch(/CLAUDE\.md:1/)
+  expect(text).not.toMatch(/pdf for forms/)
+})
+
+test('migrate writes a backup before editing settings', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS, [SETTINGS_PATH]: SETTINGS }, { skills: SKILLS, answers: ['Turn off', 'Keep'] })
+  await start($)
+  const text = await run($, 'migrate')
+  const backup = w.writes.findIndex((x) => /settings\.json\.bak-souffleur-\d{8}-\d{6}$/.test(x.path))
   const edit = w.writes.findIndex((x) => x.path === SETTINGS_PATH)
   expect(backup).toBeGreaterThan(-1)
   expect(edit).toBeGreaterThan(backup)
@@ -286,14 +364,26 @@ test('init writes backup before editing settings', async ($, on) => {
   const after = JSON.parse(w.writes[edit]!.text)
   expect(after.theme).toBe('dark')
   expect(after.hooks.SessionStart).toBe(undefined)
+  expect(after.hooks.UserPromptSubmit.length).toBe(1)
   expect(after.hooks.PostToolUse.length).toBe(1)
+  expect(w.writes.some((x) => x.path === USER_FILE)).toBe(false)
   expect(text).toMatch(/Turned off/)
 })
 
-test('init keeps a hook the user wants to keep and edits nothing', async ($, on) => {
-  const w = world(on, { [SETTINGS_PATH]: SETTINGS }, { skills: ['writing-guide'], proposals: '{"skills":[]}', answers: ['Keep'] })
+test('migrate keeps a hook the user wants to keep and edits nothing', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS, [SETTINGS_PATH]: SETTINGS }, { skills: SKILLS, answers: ['Keep', 'Keep'] })
   await start($)
-  await init($)
+  await run($, 'migrate')
+  expect(w.writes.length).toBe(0)
+})
+
+test('migrate without dialog prints the explanation and steps and writes nothing', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS, [SETTINGS_PATH]: SETTINGS }, { skills: SKILLS, answers: 'reject' })
+  await start($)
+  const text = await run($, 'migrate')
+  expect(text.startsWith('Souffleur migrate')).toBe(true)
+  expect(text).toMatch(/nothing was changed/i)
+  expect(text).toMatch(/writing-guide-reload\.sh/)
   expect(w.writes.length).toBe(0)
 })
 
@@ -314,5 +404,203 @@ test('the /souffleur command shows its arguments in the typeahead', async ($, on
   registeredCommands.length = 0
   world(on, { [USER_FILE]: ALWAYS })
   await start($)
-  expect(JSON.stringify(registeredCommands)).toContain('"argumentHint":"[status | need <name> | drop <name> | pause | init]"')
+  expect(JSON.stringify(registeredCommands)).toContain('"argumentHint":"[status | need <name> | drop <name> | pause | init | migrate]"')
+})
+
+// ---- review fixes ----
+
+const written = (w: World, path: string) => w.writes.filter((x) => x.path === path)
+const backups = (w: World) => w.writes.filter((x) => /settings\.json\.bak-souffleur-/.test(x.path))
+const TWO = JSON.stringify({ skills: { 'writing-guide': { always: true }, 'ui-checklist': { always: true } } })
+
+test('a read error on the user file stops init and writes nothing', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS }, { skills: ['writing-guide'], answers: ['Stop'], failRead: [USER_FILE] })
+  await start($)
+  const text = await run($, 'init')
+  expect(w.writes.length).toBe(0)
+  expect(text).toMatch(/could not read ~\/\.claude\/souffleur\.json/)
+  expect(text).not.toContain(HOME)
+})
+
+test('a file the scan saw is never replaced by a fresh one when it seems to vanish', async ($, on) => {
+  let vanish = () => {}
+  const w = world(on, { [USER_FILE]: ALWAYS }, { skills: ['writing-guide'], answers: ['When the task needs it'], onAsk: () => vanish() })
+  vanish = () => w.hide(USER_FILE) // while the dialog is open, exists() starts to say false
+  await start($)
+  const text = await run($, 'init')
+  expect(w.writes.length).toBe(0)
+  expect(text).toMatch(/Stopped: .* was there at the start/)
+})
+
+for (const bad of ['[]', '{"skills":"nope"}', '{"needs":[1]}', '"text"']) {
+  test(`a user file ${bad} stops init and writes nothing`, async ($, on) => {
+    const w = world(on, { [USER_FILE]: bad }, { skills: ['writing-guide'], answers: ['From the start'] })
+    await start($)
+    const text = await run($, 'init')
+    expect(w.writes.length).toBe(0)
+    expect(text).toMatch(/nothing was changed/i)
+  })
+}
+
+// An answer that is undefined cannot reach the mod through the test kit (the engine rejects), so only '' is driven here.
+for (const blank of ['']) {
+  test(`init treats the answer ${JSON.stringify(blank)} as Stop`, async ($, on) => {
+    const w = world(on, { [USER_FILE]: TWO, [SETTINGS_PATH]: SETTINGS }, { skills: SKILLS, answers: [blank, 'Keep'] })
+    await start($)
+    const text = await run($, 'init')
+    expect(w.writes.length).toBe(0)
+    expect(w.asked.length).toBe(1)
+    expect(text).toMatch(/Stopped at writing-guide/)
+  })
+  test(`migrate treats the answer ${JSON.stringify(blank)} as Stop`, async ($, on) => {
+    const m = world(on, { [USER_FILE]: ALWAYS, [SETTINGS_PATH]: SETTINGS }, { skills: SKILLS, answers: [blank, 'Turn off'] })
+    await start($)
+    const mt = await run($, 'migrate')
+    expect(m.writes.length).toBe(0)
+    expect(m.asked.length).toBe(1)
+    expect(mt).toMatch(/Stopped/)
+  })
+}
+
+test('Other text is collapsed to one line and the written file passes parseConfig', async ($, on) => {
+  const w = world(on, { [USER_FILE]: TWO }, { skills: ['writing-guide', 'ui-checklist'], answers: ['Writing\n  text   people read.'] })
+  await start($)
+  await run($, 'init')
+  const out = written(w, USER_FILE).at(-1)!.text
+  expect(parseConfig(out, undefined).errors).toEqual([])
+  expect(JSON.parse(out).needs).toEqual({ 'writing-guide': 'Writing text people read.' })
+})
+
+for (const [name, bad] of [['blank', '   '], ['too long', 'x'.repeat(201)]] as const) {
+  test(`Other text that is ${name} is skipped with a note and writes nothing`, async ($, on) => {
+    const v = world(on, { [USER_FILE]: ALWAYS }, { skills: ['writing-guide'], answers: [bad] })
+    await start($)
+    const text = await run($, 'init')
+    expect(v.writes.length).toBe(0)
+    expect(text).toMatch(/writing-guide: skipped/i)
+  })
+}
+
+test('init twice in one session shows the new current setting', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS }, { skills: ['writing-guide'], answers: ['When the task needs it', 'Stop'] })
+  await start($)
+  await run($, 'init')
+  await run($, 'init')
+  expect(w.asked[0]).toMatch(/writing-guide: From the start/)
+  expect(w.asked[1]).toMatch(/writing-guide: When the task needs it/)
+})
+
+test('an unchanged choice writes nothing and is reported as kept', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS }, { skills: ['writing-guide'], answers: ['From the start'] })
+  await start($)
+  const text = await run($, 'init')
+  expect(w.writes.length).toBe(0)
+  expect(text).toMatch(/Kept/)
+  expect(text).not.toMatch(/Nothing to ask/)
+})
+
+const hooksOn = (event: string) => JSON.stringify({ hooks: { [event]: [{ hooks: [{ type: 'command', command: 'bash ~/.claude/hooks/ui-checklist-reload.sh' }] }] } })
+
+test('a SessionStart hook makes From the start the recommendation', async ($, on) => {
+  const a = world(on, { [USER_FILE]: '{"skills":{}}', [SETTINGS_PATH]: hooksOn('SessionStart') }, { skills: ['ui-checklist'], answers: ['Stop'] })
+  await start($)
+  await run($, 'init')
+  expect(a.asked[0]).toMatch(/recommended: From the start/)
+})
+
+test('a hook on another event does not', async ($, on) => {
+  const b = world(on, { [USER_FILE]: '{"skills":{}}', [SETTINGS_PATH]: hooksOn('UserPromptSubmit') }, { skills: ['ui-checklist'], answers: ['Stop'] })
+  await start($)
+  await run($, 'init')
+  expect(b.asked[0]).toMatch(/recommended: When the task needs it/)
+})
+
+test('a configured skill without a need shows the proposed description before the user picks', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS }, { skills: ['writing-guide'], answers: ['Stop'], proposals: JSON.stringify({ skills: [{ name: 'writing-guide', need: 'prose', needText: 'Writing text people read.' }] }) })
+  await start($)
+  await run($, 'init')
+  expect(w.asked[0]).toMatch(/Writing text people read\./)
+})
+
+test('without a proposal the dialog shows the fallback description', async ($, on) => {
+  const v = world(on, { [USER_FILE]: ALWAYS }, { skills: ['writing-guide'], answers: ['Stop'] })
+  await start($)
+  await run($, 'init')
+  expect(v.asked[0]).toMatch(/The task calls for writing-guide\./)
+})
+
+test('init reports overlapping hooks and passages by count, not guesses', async ($, on) => {
+  const files = { [USER_FILE]: ALWAYS, [SETTINGS_PATH]: SETTINGS, [CLAUDE_MD]: 'Always load writing-guide first.' }
+  world(on, files, { skills: ['writing-guide'], answers: ['From the start'] })
+  await start($)
+  const text = await run($, 'init')
+  expect(text).toMatch(/1 hook and 1 passage/)
+  expect(text).toMatch(/1 more guessed/)
+})
+
+test('two migrate runs leave two backups and the first holds the original', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS, [SETTINGS_PATH]: SETTINGS }, { skills: SKILLS, answers: ['Turn off', 'Keep', 'Turn off'] })
+  await start($)
+  await run($, 'migrate')
+  const afterFirst = w.files[SETTINGS_PATH]!
+  await run($, 'migrate')
+  const b = backups(w)
+  expect(b.length).toBe(2)
+  expect(b[0]!.path).not.toBe(b[1]!.path)
+  expect(b[0]!.text).toBe(SETTINGS)
+  expect(b[1]!.text).toBe(afterFirst)
+})
+
+test('a failing backup write stops migrate before settings are touched', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS, [SETTINGS_PATH]: SETTINGS }, { skills: SKILLS, answers: ['Turn off', 'Turn off'], failWrite: /\.bak-souffleur-/ })
+  await start($)
+  const text = await run($, 'migrate')
+  expect(w.writes.length).toBe(0)
+  expect(w.files[SETTINGS_PATH]).toBe(SETTINGS)
+  expect(text).toMatch(/backup/i)
+  expect(w.asked.length).toBe(1)
+})
+
+test('migrate stops when settings changed after the edit was prepared', async ($, on) => {
+  const files: Record<string, string> = { [USER_FILE]: ALWAYS, [SETTINGS_PATH]: SETTINGS }
+  const w = world(on, files, { skills: SKILLS, answers: ['Turn off', 'Turn off'], onWrite: (path) => { if (/\.bak-souffleur-/.test(path)) files[SETTINGS_PATH] = SETTINGS.replace('dark', 'light') } })
+  await start($)
+  const text = await run($, 'migrate')
+  expect(written(w, SETTINGS_PATH).length).toBe(0)
+  expect(files[SETTINGS_PATH]).toContain('light')
+  expect(text).toMatch(/changed since/i)
+})
+
+test('migrate summarises Keep and Stop', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS, [SETTINGS_PATH]: SETTINGS }, { skills: SKILLS, answers: ['Keep', 'Stop'] })
+  await start($)
+  const text = await run($, 'migrate')
+  expect(text).toMatch(/Kept/)
+  expect(text).toMatch(/Stopped/)
+  expect(text).not.toMatch(/Nothing to migrate/)
+  expect(w.writes.length).toBe(0)
+})
+
+test('migrate says nothing to migrate only for an empty list', async ($, on) => {
+  world(on, { [USER_FILE]: ALWAYS, [SETTINGS_PATH]: '{}' }, { skills: SKILLS })
+  await start($)
+  expect(await run($, 'migrate')).toMatch(/Nothing to migrate/)
+})
+
+test('a BOM in settings.json does not hide its hooks', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS, [SETTINGS_PATH]: `\uFEFF${SETTINGS}` }, { skills: SKILLS, answers: ['Turn off', 'Keep'] })
+  await start($)
+  await run($, 'migrate')
+  expect(JSON.parse(written(w, SETTINGS_PATH).at(-1)!.text).theme).toBe('dark')
+})
+
+test('notes print paths in the ~ form and imports in CLAUDE.md are followed one level', async ($, on) => {
+  const files = { [USER_FILE]: ALWAYS, [SETTINGS_PATH]: '{}', [`${HOME}/.claude/CLAUDE.md`]: 'x', '/work/proj/CLAUDE.md': '@AGENTS.md', '/work/proj/AGENTS.md': 'Always load writing-guide first.\n@deeper.md', '/work/proj/deeper.md': 'Also load writing-guide.' }
+  world(on, files, { skills: SKILLS, failRead: [`${HOME}/.claude/CLAUDE.md`] })
+  await start($)
+  const text = await run($, 'migrate')
+  expect(text).toMatch(/AGENTS\.md:1/)
+  expect(text).not.toMatch(/deeper\.md/)
+  expect(text).toMatch(/~\/\.claude\/CLAUDE\.md/)
+  expect(text).not.toContain(HOME)
 })
