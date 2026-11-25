@@ -54,6 +54,29 @@ A second test used Claude Code's mod API (in-process plugins, early access):
 | Does a system prompt section added by a mod survive `/compact`? | Yes. The model quoted it after compaction. |
 | How fast is `$.model.classify` with the default small model? | About 800 ms per prompt. It labelled "build me a login screen mockup" as `user-interface`. |
 
+### Tests on Claude Code 2.1.332
+
+Before the implementation we repeated the tests on 2.1.332 with a mod that records every event Souffleur will use. Runs were headless (`claude -p` with stream-json input, one process per scenario). Scrubbed recordings are in [test/fixtures](../test/fixtures).
+
+| Question | Result |
+|---|---|
+| Do the 2.1.322 results still hold? | Yes. After `/compact` in the same process the 43 KB skill came back cut, with the note `[... skill content truncated for compaction ...]`. After a resume and `/compact` the model saw only the one-line skill listing. |
+| Does `skill.prompt` fire for the re-attachment after compaction? | No. Between `session.compact` before and after, and on the next prompt, no `skill.prompt` fired. |
+| Does the model load the skills a prompt's `context` block names, before other work? | Yes, in 10 of 10 fresh sessions (5 on Haiku, 5 on Opus). Each called the Skill tool for both named skills before answering. |
+| What key does `skill.prompt` use for a plugin skill? | The full name, `<plugin>:<skill>`. |
+| What does a typed `/name` fire? | `command.run`, then `prompt.submit` with `command` set, then `skill.prompt`. |
+| Which compaction triggers change the context? | `/compact` reports `manual`. The API documents `precompute` as a dispatch that installs nothing, so it must not count as a compaction. |
+| Does the session id survive a resume? | Yes. `session.start` fires again with the same id. |
+| Does `$.state` survive a resume? | No. A resumed process starts with empty `$.state`. `$.store` is shared across sessions, so the ledger has to be stored under the session id. |
+| What does `/clear` do? | It fires `command.run` with `clear`. The next prompt carries a new session id, and no `session.start` fires for it. |
+| Can a subagent's skill load be told apart from the main session's? | `skill.prompt` carries no agent id. The `tool.call` for the Skill tool just before it does carry `agentId`, so the two can be paired. |
+| Which prompts did the user not type? | A subagent's hand-back arrives as `prompt.submit` with `isMeta: true` and origin `peer`. |
+| Where do tool arguments sit in `tool.call`? | Flat on the event: `file_path`, `command`, `prompt`, `skill`. |
+| Can a mod's module live outside `hooks/`? | Yes. `hooks/hooks.json` can name `../src/mod/register.ts`, and that module can import `../core/*.ts`. `claude plugin validate` warns about the `.ts` import suffix (TS5097) but passes, and the mod loads. |
+| Can a project load a local plugin folder through `env` in `.claude/settings.local.json`? | No. `CLAUDE_CODE_PLUGIN_DIRS` works only in the environment of the `claude` process, also when it starts in a git worktree. |
+
+Not measured: how the status line looks in the desktop and mobile apps, and whether `$.state` survives a hot reload of the mod (the API documents that it does).
+
 ## Decision
 
 Souffleur is built as a Claude Code mod. Hooks only see the transcript after the fact; a mod sees skill loads and compactions as they happen, can keep a short ledger in the system prompt where compaction does not touch it, can classify a prompt with the built-in small model, and can show its state in the client. The mod API is early access and changes between releases, so the rules and the ledger live in plain code with no dependency on it, and only a thin layer talks to the API.
