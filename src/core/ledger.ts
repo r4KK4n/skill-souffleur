@@ -55,9 +55,9 @@ export function requested(l: Ledger, skills: SkillName[], now: number): Ledger {
 }
 
 /** The ledger after a config change: new skills start absent, removed ones disappear, the rest keep their entry. */
-export function syncLedger(l: Ledger, config: Config, now: number): Ledger {
+export function syncLedger(l: Ledger, config: Config, now: number, extra: SkillName[] = []): Ledger {
   const next: Ledger = {}
-  for (const name of Object.keys(config.skills)) next[name] = l[name] ?? { state: 'absent', since: now, reason: '', requests: 0 }
+  for (const name of [...Object.keys(config.skills), ...extra]) next[name] = l[name] ?? { state: 'absent', since: now, reason: '', requests: 0 }
   return next
 }
 

@@ -26,9 +26,10 @@ export async function classifyPrompt(
   return Object.keys(needs).filter((name) => matched.has(name))
 }
 
-/** Skills with `always`, plus skills whose `need` is active, in config order. */
-export function neededSkills(config: Config, active: Record<NeedName, unknown>): SkillName[] {
-  return Object.entries(config.skills)
+/** Skills with `always`, plus skills whose `need` is active, in config order, then `extra` (skills a rule fired or saw loaded). */
+export function neededSkills(config: Config, active: Record<NeedName, unknown>, extra: readonly SkillName[] = []): SkillName[] {
+  const named = Object.entries(config.skills)
     .filter(([, rule]) => rule.always === true || (rule.need !== undefined && rule.need in active))
     .map(([name]) => name)
+  return [...named, ...extra.filter((name) => !named.includes(name))]
 }

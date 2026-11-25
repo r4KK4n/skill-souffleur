@@ -1,26 +1,40 @@
 import type { Register } from 'claude-code'
 import { parseConfig } from '../core/config.ts'
-import { decide, initSession } from '../core/decide.ts'
+import { decide, initSession, normalizeSession } from '../core/decide.ts'
 import { MIGRATE_INTRO, describeHook, findHookOverlaps, findPassages, hookQuestion, hookSteps, isGuess, migrateSteps, passageLines, removeHook } from '../core/migrate.ts'
 import type { HookOverlap, Passage } from '../core/migrate.ts'
 import { CHOICE_LABEL, INJECTED_HELP, NOT_SET_UP, SETUP_INTRO, applyChoice, candidates, choiceOf, cleanNeedText, configProblem, currentChoice, describePlan, explicitOnly, injectedWarning, needKeyFor, options, parsePicks, parseSkips, picksPrompt, setupSteps } from '../core/setup.ts'
 import type { LoadChoice, NeedText, Plan, StartHooks, Suggestion } from '../core/setup.ts'
 import type { Action, CoreEvent, Session } from '../core/decide.ts'
 import { classifyPrompt } from '../core/needs.ts'
+import { NO, YES_EVERYWHERE, YES_PROJECT, addEntry, answer, describeProposal, enqueue, findProposal, makeProposal, nextQuestion, parseShaped, proposalLines, shapePrompt } from '../core/proposals.ts'
+import { ruleSkillNames, sectionNotes } from '../core/rules.ts'
 import { statusLine } from '../core/status.ts'
-import type { Config } from '../core/types.ts'
-import { isFromUser, toolFields } from './map.ts'
+import type { Config, Note, Rule } from '../core/types.ts'
+import { isFromUser, isUserOrigin, toolFields } from './map.ts'
 
 // The hooks' `$` is the engine interface; the adapter calls only documented members.
 type Dollar = any
-type Loaded = { config: Config; errors: string[]; root: string; cwd: string; setUp: boolean }
+/** `root` is the main repository root (what `where` names), `tree` the session's own working tree (what globs are relative to). */
+type Loaded = { config: Config; errors: string[]; root: string; tree: string; cwd: string; setUp: boolean }
 
 const REF = { plugin: 'skill-souffleur', key: 'session' } as const
 const RULE =
   'Souffleur keeps track of skills in this session. If a message from Souffleur asks you to load skills, invoke each one with the Skill tool before you continue.'
+const PROPOSE_SENTENCE =
+  ' When something went wrong that a rule would have caught, or the user asks you to remember a rule, call the souffleur_propose tool. Souffleur then asks the user; do not write the rule anywhere yourself.'
+const PROPOSE_TOOL = 'mcp__skill-souffleur__souffleur_propose'
+const DECLINED_KEY = 'souffleur:declined'
 
 // Module variables start over on a reload; the config is read again by `session.start`, which a reload runs.
 let loaded: Loaded | undefined
+/** The session this process stored last, with its revision. */
+let latest: Session | undefined
+/** Set by `session.start`: a person is at the prompt, and the propose tool is registered. */
+let interactive = false
+let proposeReady = false
+/** A dialog was dismissed or could not open: no more questions at turn end in this session. */
+let askStopped = false
 
 const now = () => Date.now()
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err))
@@ -61,7 +75,14 @@ async function getLoaded($: Dollar): Promise<Loaded> {
   const userText = home ? await readOptional($, `${home}/.claude/souffleur.json`, errors, home) : undefined
   const projectText = await readOptional($, `${root}/.claude/souffleur.json`, errors, home)
   const parsed = parseConfig(userText === undefined ? undefined : stripBom(userText), projectText === undefined ? undefined : stripBom(projectText))
-  loaded = { config: parsed.config, errors: [...errors, ...parsed.errors], root, cwd, setUp: userText !== undefined }
+  let tree = cwd
+  try {
+    const copy = await $.vcs.detect({ path: cwd })
+    if (copy && typeof copy.root === 'string') tree = copy.root
+  } catch {
+    // outside a repository, or no detection: the working directory is the tree
+  }
+  loaded = { config: parsed.config, errors: [...errors, ...parsed.errors], root, tree, cwd, setUp: userText !== undefined }
   return loaded
 }
 
@@ -79,7 +100,9 @@ async function freshSession($: Dollar, l: Loaded, id: string, start: 'startup' |
 async function current($: Dollar): Promise<{ l: Loaded; session: Session }> {
   const l = await getLoaded($)
   const id: string = await $.session.id()
-  const held: Session | undefined = (await $.state.get(REF)).value
+  let held: Session | undefined = (await $.state.get(REF)).value
+  // What this process wrote last wins over a state read that has not caught up (hooks that run at the same moment).
+  if (latest && latest.id === id && (held === undefined || (isSession(held, id) && (held.rev ?? 0) < (latest.rev ?? 0)))) held = latest
   if (held && held.id === id) return { l, session: heal(l, held) }
   // A different id with no session.start in between is /clear (D6).
   if (held) return { l, session: await freshSession($, l, id, 'clear') }
@@ -89,26 +112,39 @@ async function current($: Dollar): Promise<{ l: Loaded; session: Session }> {
 }
 
 /** A session whose ledger lists other skills than the config (a session that missed a config change) follows the config. */
-function heal(l: Loaded, s: Session): Session {
-  const want = Object.keys(l.config.skills)
+function heal(l: Loaded, held: Session): Session {
+  const s = normalizeSession(held)
+  const want = [...new Set([...Object.keys(l.config.skills), ...ruleSkillNames(l.config)])]
   const have = Object.keys(s.ledger)
   if (want.length === have.length && want.every((name) => name in s.ledger)) return s
   return decide(l.config, s, { type: 'config', now: now(), errors: l.errors }).session
 }
 
-async function persist($: Dollar, l: Loaded, s: Session): Promise<void> {
+async function persist($: Dollar, l: Loaded, s0: Session): Promise<void> {
+  const s: Session = { ...s0, rev: (s0.rev ?? 0) + 1 }
+  latest = s
   // A broken file shows as degraded; only a clean start without a user file says "not set up".
-  $.ui.status(!l.setUp && !s.errors.length ? NOT_SET_UP : statusLine(s, l.config.mode))
+  $.ui.status(!l.setUp && !s.errors.length ? NOT_SET_UP : statusLine(s, l.config.mode, sectionNotes(l.config, l.root).leftOut.length))
   await $.state.set(REF, s)
   await $.store.set(`session:${s.id}`, s)
 }
 
+/** Session reads and writes wait for each other: two hooks at the same moment must not both read the old state. */
+let chain: Promise<unknown> = Promise.resolve()
+function serial<T>(work: () => Promise<T>): Promise<T> {
+  const run = chain.then(work, work)
+  chain = run.catch(() => undefined)
+  return run
+}
+
 /** Feeds one event to the core and stores the result. */
-async function apply($: Dollar, make: (l: Loaded) => CoreEvent): Promise<{ actions: Action[]; l: Loaded }> {
-  const { l, session } = await current($)
-  const r = decide(l.config, session, make(l))
-  await persist($, l, r.session)
-  return { actions: r.actions, l }
+function apply($: Dollar, make: (l: Loaded) => CoreEvent): Promise<{ actions: Action[]; l: Loaded }> {
+  return serial(async () => {
+    const { l, session } = await current($)
+    const r = decide(l.config, session, make(l))
+    await persist($, l, r.session)
+    return { actions: r.actions, l }
+  })
 }
 
 /** Runs the adapter's own work. A throw becomes an `error` event and `fallback`; it never reaches the event. */
@@ -266,16 +302,17 @@ const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
  * The standing instructions to scan: user and project CLAUDE.md, the files a CLAUDE.md imports with `@path` (one level),
  * and the memory index of the project (named after the main repository root).
  */
-async function readStanding($: Dollar, l: Loaded, home: string, notes: string[]): Promise<{ file: string; text: string }[]> {
+async function readStanding($: Dollar, l: Loaded, home: string, notes: string[]): Promise<{ file: string; text: string; project: boolean }[]> {
   const slug = l.root.replace(/[^A-Za-z0-9]/g, '-')
   const claudeMds = [...new Set([`${home}/.claude/CLAUDE.md`, `${l.root}/CLAUDE.md`, `${l.cwd}/CLAUDE.md`])]
-  const files: { file: string; text: string }[] = []
+  const files: { file: string; text: string; project: boolean }[] = []
   const seen = new Set<string>()
   for (const path of claudeMds) {
     const text = await readOptional($, path, notes, home)
     if (text === undefined) continue
     seen.add(path)
-    files.push({ file: shownPath(home, path), text })
+    const project = path !== `${home}/.claude/CLAUDE.md`
+    files.push({ file: shownPath(home, path), text, project })
     const dir = path.slice(0, path.lastIndexOf('/'))
     for (const m of text.matchAll(/(?:^|\s)@([^\s@]+\.[A-Za-z0-9]+)/g)) {
       const ref = m[1]!
@@ -283,12 +320,12 @@ async function readStanding($: Dollar, l: Loaded, home: string, notes: string[])
       if (seen.has(target)) continue
       seen.add(target)
       const imported = await readOptional($, target, notes, home)
-      if (imported !== undefined) files.push({ file: shownPath(home, target), text: imported })
+      if (imported !== undefined) files.push({ file: shownPath(home, target), text: imported, project })
     }
   }
   const memory = `${home}/.claude/projects/${slug}/memory/MEMORY.md`
   const text = await readOptional($, memory, notes, home)
-  if (text !== undefined) files.push({ file: shownPath(home, memory), text })
+  if (text !== undefined) files.push({ file: shownPath(home, memory), text, project: false })
   return files
 }
 
@@ -532,6 +569,9 @@ async function runMigrate($: Dollar, l: Loaded): Promise<string> {
   const passages: Passage[] = findPassages(files, configured, Infinity)
   const known = { configured, installedOnly: installed.filter((n) => !configured.includes(n)) }
 
+  const { queued: queuedNotes, skipped } = await queuePassages($, passages, new Set(files.filter((f) => f.project).map((f) => f.file)))
+  if (queuedNotes.length) notes.push(`${plural(queuedNotes.length, 'passage')} queued as note proposals. /souffleur review asks about them one by one; nothing is written before you say yes.`)
+  if (skipped) notes.push(`${passages.length - queuedNotes.length} skipped (${skipped}).`)
   const { session } = await current($)
   for (const o of hooks) {
     for (const name of o.skills ?? []) {
@@ -608,6 +648,283 @@ async function runMigrate($: Dollar, l: Loaded): Promise<string> {
   return out.join('\n')
 }
 
+// --- Rules, notes and proposals ---
+
+/** The fields `souffleur_propose` takes; anything else on the call is not part of a proposal. */
+const PROPOSE_FIELDS = ['kind', 'text', 'need', 'before', 'skill', 'field', 'after', 'evidence']
+const PROPOSE_SCHEMA = {
+  type: 'object',
+  properties: {
+    kind: { type: 'string', enum: ['rule', 'note'] },
+    source: { type: 'string', enum: ['slip', 'user'], description: '"user" when the user asked for it, "slip" when something went wrong that this would have caught.' },
+    text: { type: 'string', description: 'For a note: the instruction, one line.' },
+    need: { type: 'string', description: 'For a note: a configured need name, when it only matters for that kind of work.' },
+    before: { type: 'object', description: 'For a rule that checks a call: { tools: ["Agent"], paths?: ["src/**"] }. Use with skill or field.' },
+    skill: { type: 'string', description: 'The skill that must be loaded before a matching call.' },
+    field: { type: 'string', description: 'The argument a matching call must carry, for example model.' },
+    after: { type: 'object', description: 'For a rule about what must follow a call: { tools: ["Edit"], paths?: ["src/**"] }. Use with evidence.' },
+    evidence: { type: 'object', description: 'What closes an "after" rule: { tool: "Bash", command?: "npm test" } (command is a glob).' },
+  },
+  required: ['kind'],
+}
+
+const REGISTER_PROPOSE = {
+  name: 'souffleur_propose',
+  description:
+    'Propose a rule or a note for Souffleur to keep. Call it when something went wrong that a rule would have caught (a denial, a correction by the user), or when the user asks you to remember a rule or standing instruction. A rule has a trace Souffleur can check: a skill loaded before a call, a field a call carries, or evidence that follows a call. Anything else is a note. Souffleur asks the user before anything is kept; never write the entry into a file yourself.',
+  inputSchema: PROPOSE_SCHEMA,
+}
+
+/** The session with the declined hashes of earlier sessions added (they live in the plugin store). */
+async function withStoredDeclined($: Dollar, s: Session): Promise<Session> {
+  try {
+    const stored: unknown = await $.store.get(DECLINED_KEY)
+    if (!Array.isArray(stored)) return s
+    const extra = stored.filter((h): h is string => typeof h === 'string' && !s.declined.includes(h))
+    return extra.length ? { ...s, declined: [...s.declined, ...extra] } : s
+  } catch {
+    return s
+  }
+}
+
+/**
+ * Adds one entry to the user file. Same care as `init`: read fresh, stop on a read error or a file that cannot be edited,
+ * write only now (the caller has the user's yes), keep every other key. Returns the user-facing line.
+ */
+async function writeEntry($: Dollar, kind: 'rule' | 'note', entry: Rule | Note): Promise<{ ok: boolean; text: string; wrote?: boolean }> {
+  const home: string | undefined = await $.env.get('HOME')
+  if (!home) return { ok: false, text: 'the home folder is unknown, so nothing was written' }
+  const path = `${home}/.claude/souffleur.json`
+  const st = await readState($, path, home)
+  if (st.kind === 'error') return { ok: false, text: `could not read ${shownPath(home, path)} (${st.why}), so nothing was written` }
+  let doc: unknown
+  if (st.kind === 'ok') {
+    try {
+      doc = parseJson(st.text)
+    } catch (err) {
+      return { ok: false, text: `${shownPath(home, path)} is not valid JSON (${scrub(home, message(err))}), so nothing was written` }
+    }
+    const problem = configProblem(doc)
+    if (problem) return { ok: false, text: `${shownPath(home, path)} cannot be edited because ${problem}, so nothing was written` }
+  }
+  const r = addEntry(doc, kind, entry)
+  if (r.note) return { ok: true, text: r.note }
+  // Read once more right before the write: another session or the user may have saved the file since.
+  const again = await readState($, path, home)
+  if (again.kind === 'error' || again.kind !== st.kind || (again.kind === 'ok' && st.kind === 'ok' && again.text !== st.text)) {
+    return { ok: false, text: `${shownPath(home, path)} changed since it was read, so nothing was written` }
+  }
+  await $.fs.write(path, `${JSON.stringify(r.config, null, 2)}\n`)
+  return { ok: true, wrote: true, text: `added ${kind} ${entry.id} to ${shownPath(home, path)}${entry.where === undefined ? '' : ` for ${entry.where}`}` }
+}
+
+/** The session after a change the core has no event for: read, change, store. */
+function update($: Dollar, change: (l: Loaded, s: Session) => Session): Promise<void> {
+  return serial(async () => {
+    const { l, session } = await current($)
+    await persist($, l, change(l, await withStoredDeclined($, session)))
+  })
+}
+
+/** Applies the user's answer to one waiting proposal: writes after a yes, remembers a no, keeps the proposal when the write fails. */
+function commitAnswer($: Dollar, hash: string, label: string): Promise<string> {
+  return serial(() => commitAnswerNow($, hash, label))
+}
+
+async function commitAnswerNow($: Dollar, hash: string, label: string): Promise<string> {
+  const { l, session: before } = await current($)
+  const session = await withStoredDeclined($, before)
+  const r = answer(l.config, session, hash, label, l.root)
+  if (r.note) return r.note
+  if (r.write) {
+    let w: { ok: boolean; text: string; wrote?: boolean }
+    try {
+      w = await writeEntry($, r.write.kind, r.write.entry)
+    } catch (err) {
+      w = { ok: false, text: `writing failed (${scrub(await $.env.get('HOME'), message(err))}), so nothing was written` }
+    }
+    if (!w.ok) {
+      await persist($, l, session)
+      return `Souffleur: ${w.text}. The proposal stays queued.`
+    }
+    loaded = undefined // the file changed: read it again
+    const l2 = await getLoaded($)
+    await persist($, l2, decide(l2.config, r.session, { type: 'config', now: now(), errors: l2.errors }).session)
+    // The file is what counts: confirm that the reader kept the entry before saying it is there.
+    const kept = [...l2.config.rules, ...l2.config.notes].some((x) => x.id === r.write!.entry.id)
+    if (w.wrote && !kept) {
+      const why = l2.errors.filter((m) => m.startsWith('user config')).slice(-2).join('; ')
+      return `Souffleur: wrote ${r.write.entry.id} to the file, but the reader did not keep it${why ? ` (${why})` : ''}. Check ~/.claude/souffleur.json.`
+    }
+    return `Souffleur: ${w.text}.`
+  }
+  await persist($, l, r.session)
+  if (label === NO) {
+    try {
+      await $.store.set(DECLINED_KEY, r.session.declined.slice(-200))
+    } catch {
+      // the decline holds for this session even when the store fails
+    }
+    return 'Souffleur: not added, and it will not be proposed again.'
+  }
+  return r.revise === undefined ? 'Souffleur: nothing changed.' : 'Souffleur: the model is asked to revise it with your next prompt.'
+}
+
+/** One dialog about the first waiting proposal. Returns the line to show, or undefined when nothing was asked or the dialog gave no answer. */
+async function askFirst($: Dollar, stopOnFail = false): Promise<string | undefined> {
+  if (!interactive) return undefined
+  const { session } = await current($)
+  const q = nextQuestion(await withStoredDeclined($, session))
+  if (!q) return undefined
+  let label: unknown
+  try {
+    label = await $.ui.ask(q.question, { options: q.options, header: 'Souffleur' })
+  } catch {
+    if (stopOnFail) askStopped = true
+    return undefined
+  }
+  if (typeof label !== 'string' || label.trim() === '') {
+    if (stopOnFail) askStopped = true
+    return undefined
+  }
+  return commitAnswer($, q.hash, label)
+}
+
+/** Queues a proposal. `from` is `slip` or `user`. */
+async function propose($: Dollar, raw: unknown, from: string): Promise<{ status: string; id?: string }> {
+  const { l } = await current($)
+  const made = makeProposal(raw, from, l.config)
+  if (!made.proposal) return { status: `error: ${made.error}` }
+  let status = 'queued'
+  await update($, (l2, s) => {
+    if (s.proposed.length >= MODEL_PROPOSALS) {
+      status = 'capped'
+      return s
+    }
+    const r = enqueue(l2.config, s, made.proposal!)
+    status = r.status
+    return r.status === 'queued' ? { ...r.session, proposed: [...r.session.proposed, made.proposal!.hash] } : r.session
+  })
+  return { status, id: made.proposal.entry.id }
+}
+
+/** The model may make this many proposals per session. */
+const MODEL_PROPOSALS = 5
+
+const PROPOSE_REPLY: Record<string, string> = {
+  duplicate: 'Already a rule or note, or already waiting for the user. Nothing to do.',
+  declined: 'The user declined this before. Do not propose it again.',
+  capped: 'You made five proposals this session already. The user reviews them with /souffleur review; make no more.',
+  full: 'Twenty proposals already wait for the user. Do not propose more until /souffleur review cleared some.',
+}
+
+async function runPropose($: Dollar, input: Record<string, unknown>): Promise<string> {
+  if (input.agentId !== undefined) return 'Only the main session proposes rules and notes. Tell the main session what went wrong instead.'
+  const raw: Record<string, unknown> = {}
+  for (const key of PROPOSE_FIELDS) if (input[key] !== undefined) raw[key] = input[key]
+  const r = await propose($, raw, input.source === 'slip' ? 'slip' : 'user')
+  if (r.status.startsWith('error: ')) return `Not queued: ${r.status.slice(7)}. Fix the call and try again.`
+  if (r.status !== 'queued') return PROPOSE_REPLY[r.status] ?? 'Not queued.'
+  return interactive && !askStopped
+    ? `Queued as ${r.id}. Souffleur asks the user at the end of this turn; do not ask again.`
+    : `Queued as ${r.id}. The user reviews it with /souffleur review.`
+}
+
+/** `/souffleur rule <text>`: the small model shapes the words into a rule or note; a failure keeps them as a note. */
+async function runRule($: Dollar, text: string): Promise<string> {
+  if (!text.trim()) return 'Usage: /souffleur rule <what to remember>'
+  const { l } = await current($)
+  let raw = ''
+  try {
+    const r = await $.model.complete({ model: 'haiku', prompt: shapePrompt(text, l.config.needs) })
+    if (r.isAnswered) raw = r.text
+  } catch {
+    // the words become a note
+  }
+  const p = parseShaped(raw, text, l.config)
+  let status = 'queued'
+  await update($, (l2, s) => {
+    const r = enqueue(l2.config, s, p)
+    status = r.status
+    return r.session
+  })
+  if (status !== 'queued') return status === 'duplicate' ? 'Souffleur: that is already a rule or note, or already waiting.' : status === 'declined' ? 'Souffleur: you declined this before.' : 'Souffleur: twenty proposals wait already. Run /souffleur review first.'
+  const asked = await askFirst($)
+  if (asked !== undefined) return asked
+  return `Souffleur: queued ${p.kind} ${p.entry.id}: ${describeProposal(p)}. Run /souffleur review to answer, or /souffleur accept ${p.entry.id}.`
+}
+
+/** `/souffleur review`: one dialog per waiting proposal; without a dialog the list and the text commands. */
+async function runReview($: Dollar): Promise<string> {
+  const { session } = await current($)
+  if (session.proposals.length === 0) return 'Souffleur: no proposals are waiting.'
+  const done: string[] = []
+  for (let i = 0; i < 20; i++) {
+    const line = await askFirst($)
+    if (line === undefined) break
+    done.push(line)
+  }
+  const { session: rest } = await current($)
+  const out = [...done]
+  if (rest.proposals.length) {
+    out.push(done.length ? 'Still waiting:' : 'Waiting for your answer, and no dialog can open here:', ...proposalLines(rest), 'Add one with /souffleur accept <id> (everywhere) or /souffleur accept <id> here (this project only).')
+  }
+  return out.join('\n')
+}
+
+/** `/souffleur accept <id> [here|project]`: the text route for what a dialog would ask. */
+async function runAccept($: Dollar, args: string[]): Promise<string> {
+  const [id, scope] = args
+  const usage = 'Usage: /souffleur accept <id> [here|project]'
+  if (!id || args.length > 2 || (scope !== undefined && scope !== 'here' && scope !== 'project')) return usage
+  const { session } = await current($)
+  const p = findProposal(session, id)
+  if (!p) return `Souffleur: no proposal ${id} is waiting.${session.proposals.length ? ` Waiting: ${session.proposals.map((q) => q.entry.id).join(', ')}.` : ''}`
+  return commitAnswer($, p.hash, scope === undefined ? YES_EVERYWHERE : YES_PROJECT)
+}
+
+/** `/souffleur decline <id>`: the text route for No; the hash is remembered. */
+async function runDecline($: Dollar, args: string[]): Promise<string> {
+  const [id] = args
+  if (!id || args.length > 1) return 'Usage: /souffleur decline <id>'
+  const { session } = await current($)
+  const p = findProposal(session, id)
+  if (!p) return `Souffleur: no proposal ${id} is waiting.`
+  return commitAnswer($, p.hash, NO)
+}
+
+const SKIP_WORDS: Record<string, string> = { short: 'too short', invalid: 'not valid as a note', duplicate: 'already known or waiting', declined: 'declined before', full: 'queue full' }
+
+/** Standing instructions `migrate` found become note proposals with their file and line. Returns the ids queued and why the rest were skipped. */
+async function queuePassages($: Dollar, passages: Passage[], projectFiles: Set<string>): Promise<{ queued: string[]; skipped: string }> {
+  const queued: string[] = []
+  const counts: Record<string, number> = {}
+  const skip = (why: string) => void (counts[why] = (counts[why] ?? 0) + 1)
+  if (!passages.length) return { queued, skipped: '' }
+  await update($, (l, s) => {
+    let next = s
+    for (const p of passages) {
+      const text = p.text.replace(/^[\s>#*\-\d.]+/, '').trim()
+      if (text.length < 8) {
+        skip('short')
+        continue
+      }
+      const made = makeProposal({ kind: 'note', text }, 'user', l.config)
+      if (!made.proposal) {
+        skip('invalid')
+        continue
+      }
+      const r = enqueue(l.config, next, { ...made.proposal, origin: `${p.file}:${p.line}`, project: projectFiles.has(p.file) })
+      if (r.status === 'queued') queued.push(made.proposal.entry.id)
+      else skip(r.status)
+      next = r.session
+    }
+    return next
+  })
+  const skipped = Object.entries(counts).map(([why, n]) => `${n} ${SKIP_WORDS[why] ?? why}`).join(', ')
+  return { queued, skipped }
+}
+
 export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
     await safe($, 'session.start', undefined, async () => {
@@ -628,8 +945,17 @@ export const register: Register = (on) => {
     })
     await safe($, 'installed', undefined, () => refreshInstalled($))
     await safe($, 'command.register', undefined, async () => {
-      await $.command.register({ name: 'souffleur', description: 'Show which skills Souffleur keeps loaded', argumentHint: '[status | need <name> | drop <name> | pause | init | migrate]' })
+      await $.command.register({ name: 'souffleur', description: 'Show which skills Souffleur keeps loaded', argumentHint: '[status | need <name> | drop <name> | pause | init | migrate | rule <text> | review | accept <id> | decline <id>]' })
     })
+    interactive = e.isInteractive === true
+    askStopped = false
+    proposeReady = false
+    try {
+      await $.tool.register(REGISTER_PROPOSE)
+      proposeReady = true
+    } catch {
+      // The tool does not reach the model: the system prompt leaves out the sentence about it, and /souffleur rule stays.
+    }
     return next(e)
   })
 
@@ -670,7 +996,7 @@ export const register: Register = (on) => {
             )
           : []
       await listing
-      const { actions } = await apply($, () => ({ type: 'prompt', now: now(), text: e.text, fromUser, matched }))
+      const { actions } = await apply($, (l) => ({ type: 'prompt', now: now(), text: e.text, fromUser, matched, root: l.root }))
       return actions.flatMap((a) => (a.kind === 'context' ? [a.text] : []))
     })
     return texts.length ? next({ ...e, context: [...(e.context ?? []), ...texts] }) : next(e)
@@ -683,7 +1009,8 @@ export const register: Register = (on) => {
       const always = Object.entries(l.config.skills)
         .filter(([name, rule]) => rule.always === true && session.ledger[name]?.state !== 'not installed here')
         .map(([name]) => name)
-      return `${RULE}${always.length ? ` Always-on skills: ${always.join(', ')}.` : ''}`
+      const notes = sectionNotes(l.config, l.root).text
+      return `${RULE}${always.length ? ` Always-on skills: ${always.join(', ')}.` : ''}${proposeReady && l.setUp ? PROPOSE_SENTENCE : ''}${notes ? `\n\n${notes}` : ''}`
     })
     return text === undefined ? r : { ...r, sections: [...r.sections, { id: 'souffleur', scope: 'session' as const, text }] }
   })
@@ -696,8 +1023,10 @@ export const register: Register = (on) => {
         now: now(),
         tool: e.tool,
         ...fields,
+        present: Object.entries(e).filter(([, v]) => v !== undefined && v !== null && v !== '').map(([k]) => k),
         ...(e.agentId === undefined ? {} : { agentId: e.agentId }),
         root: l.root,
+        tree: l.tree,
       }))
       return r.actions
     })
@@ -718,6 +1047,29 @@ export const register: Register = (on) => {
     return { ...r, context: [...(r.context ?? []), ...extra] }
   }).catch(($, e, next) => next(e))
 
+  on('tool.run', { tool: PROPOSE_TOOL }, async ($, e) => {
+    const text = await safe($, 'souffleur_propose', 'Souffleur could not queue the proposal. Tell the user and carry on.', () => runPropose($, e as unknown as Record<string, unknown>))
+    return { result: text }
+  })
+
+  // At the end of a turn: one question about the first waiting proposal, in a session with a person at the prompt.
+  on('turn.complete', async ($, e, next) => {
+    const r = await next(e)
+    if (e.agentId === undefined && e.reason === 'answer' && interactive && !askStopped) {
+      await safe($, 'turn.complete', undefined, async () => {
+        const line = await askFirst($, true)
+        if (line !== undefined) {
+          try {
+            $.ui.toast(line)
+          } catch {
+            // a toast is a courtesy
+          }
+        }
+      })
+    }
+    return r
+  })
+
   on('command.run', async ($, e, next) => {
     if (e.command === 'souffleur') {
       const verb0 = (e.args ?? '').trim().split(/\s+/)[0]
@@ -730,8 +1082,18 @@ export const register: Register = (on) => {
         if (text !== undefined) return { text }
         return next(e)
       }
+      if (verb0 === 'rule' || verb0 === 'review' || verb0 === 'accept' || verb0 === 'decline') {
+        if (!isUserOrigin(e)) return { text: `Souffleur: only the user can run /souffleur ${verb0}; a plugin or the model cannot.` }
+        const rest = (e.args ?? '').trim().slice(verb0.length).trim()
+        const text = await safe($, 'command.run', undefined as string | undefined, async () => {
+          loaded = undefined
+          return verb0 === 'rule' ? runRule($, rest) : verb0 === 'review' ? runReview($) : verb0 === 'accept' ? runAccept($, rest.split(/\s+/).filter(Boolean)) : runDecline($, rest.split(/\s+/).filter(Boolean))
+        })
+        if (text !== undefined) return { text }
+        return next(e)
+      }
       const reply = await safe($, 'command.run', undefined as string | undefined, async () => {
-        const { actions, l } = await apply($, () => ({ type: 'command', now: now(), args: e.args ?? '' }))
+        const { actions, l } = await apply($, (l0) => ({ type: 'command', now: now(), args: e.args ?? '', root: l0.root }))
         const text = actions.flatMap((a) => (a.kind === 'reply' ? [a.text] : []))[0]
         const verb = (e.args ?? '').trim().split(/\s+/)[0] ?? ''
         const note = '\n\nSouffleur is not set up: there is no ~/.claude/souffleur.json. Run /souffleur init to add one.'

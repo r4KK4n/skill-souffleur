@@ -6,6 +6,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- Rules and notes in the user file: a rule waits for a skill before a call, requires a field on a call, or requires evidence after a call; a note is a standing instruction for the system prompt section or, with a `need`, for the prompt context. Rules follow `mode`, `/souffleur pause` stops them, and a project file that holds them gets an error.
+- The tool `souffleur_propose` lets the model propose a rule or note when something went wrong or you ask it to remember something. Proposals queue (20 at most), and one question per turn is asked at the end of a turn with `Yes, everywhere`, `Yes, this project only` and `No`.
+- `/souffleur rule <text>`, `/souffleur review`, `/souffleur accept <id> [here|project]` and `/souffleur decline <id>`; they act only when the user types them. Without a dialog proposals stay queued and nothing is written. `/souffleur migrate` queues standing instructions from `CLAUDE.md` and the memory index as note proposals.
 - Fix: a skill is marked `not installed here` only from the session's own skill listing, never from the command list, and not when the listing is incomplete. Names match with or without the plugin prefix. Such a skill opens no duty and does not appear in the always-on text, the brief check or the open duties.
 - Fix: the injected answer gets a line in the summary every time it is the result, including when it stays unchanged and in the text without a dialog. A plugin with a `SessionStart` hook gets a note, one without gets a warning, and unreadable files say so.
 - Fix: a session start, a reload and any event on a session that missed a config change bring the ledger in line with the config. The skill listing no longer holds up the prompt.
