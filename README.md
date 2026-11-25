@@ -4,7 +4,7 @@ Keeps Claude Code skills loaded and in use for the whole session, including afte
 
 In a theatre, the souffleur sits out of sight at the edge of the stage and gives an actor the line they forgot, at the moment they need it. Souffleur does the same for skills: when compaction drops a skill the current task needs, it brings the skill back.
 
-> **Status:** early design. Nothing is installable yet. See the [roadmap](#roadmap) for what is done and what comes next.
+> **Status:** work in progress. The mod runs from a checkout and installs from this repository, but there is no release yet. See the [roadmap](#roadmap) for what is done and what comes next.
 
 ## The problem
 
@@ -27,6 +27,68 @@ The skill list itself comes back after compaction since Claude Code 2.1.304. Wha
 You choose the skills and the rules in a configuration file. Souffleur never pastes a full skill text into every prompt.
 
 Souffleur is a Claude Code mod, an in-process plugin. For why, including test results on Claude Code 2.1.322, see [docs/background.md](docs/background.md).
+
+## Install
+
+Souffleur needs Claude Code 2.1.332 or later. Type this at the prompt of a terminal session:
+
+```
+/plugin install skill-souffleur --marketplace r4KK4n/skill-souffleur
+```
+
+Claude Code asks whether to add the marketplace; answer `y`. It then asks for a scope: choose user to cover every project, or project for one repository. Souffleur starts with no configuration. Until you add one, the status line reads `souffleur: not set up, run /souffleur init`, and nothing else changes in your session.
+
+## Quick start
+
+Create `~/.claude/souffleur.json`, or let `/souffleur init` write it for you:
+
+```json
+{
+  "mode": "observe",
+  "skills": {
+    "terse:terse-mode": { "always": true },
+    "writing-guide": { "need": "prose" },
+    "ui-checklist": { "need": "ui" }
+  },
+  "needs": {
+    "prose": "Writing text people read: docs, specs, plans, issues.",
+    "ui": "Designing or building something a user sees."
+  }
+}
+```
+
+A skill with `"always": true` is needed from the first turn. A skill with `"need"` is needed once a prompt matches that need's description. After a compaction or a resume, Souffleur asks the model to load the skills it needs again. A project can add its own `.claude/souffleur.json`, but it cannot change your entries or your mode. The full format, including gates and duties, is in [docs/design.md](docs/design.md#configuration).
+
+## Commands
+
+- `/souffleur` or `/souffleur status` shows the mode, one row per skill with its state, the active needs, open duties, and the calls that `observe` mode would have denied.
+- `/souffleur need <name>` turns a need on for this session, even when no prompt matched it.
+- `/souffleur drop <name>` turns a need off again.
+- `/souffleur pause` switches every check off for this session.
+- `/souffleur init` helps you move over from your own hooks. See [Coming from your own hooks](#coming-from-your-own-hooks).
+
+## Modes
+
+`observe` is the default. Souffleur keeps the ledger, asks the model to reload skills and reports through `/souffleur`, but it never denies a tool call. Calls it would have denied are listed under "Would have denied", so you can see what `enforce` would do before you turn it on.
+
+`enforce` lets gates and duties deny a tool call until the skill it names is loaded. Only your user file `~/.claude/souffleur.json` can set it, with `"mode": "enforce"`. A project file that sets a mode gets an error and is ignored, so a cloned repository can neither switch gates on nor off.
+
+## Coming from your own hooks
+
+If you already keep skills alive with a `SessionStart` or `UserPromptSubmit` hook, or with a standing line in `CLAUDE.md`, running Souffleur next to them doubles every reminder. Souffleur changes none of your files on install. `/souffleur init` goes through them with you, one question at a time:
+
+1. It reads the hooks in `~/.claude/settings.json`, your user and project `CLAUDE.md`, and the memory index of the current project. It also lists the installed skills.
+2. A small model proposes skill entries for the config. You answer `Add`, `Skip` or `Stop` for each.
+3. For each hook that names a known skill or looks like a skill reload script, you answer `Turn off`, `Keep` or `Show me what to do`.
+
+`Turn off` first copies `settings.json` to `settings.json.bak-souffleur-<date>-<time>`, then removes only that one hook entry. Existing keys in `souffleur.json` stay as they are. `init` never edits a hook script, `CLAUDE.md` or a memory file. It lists passages that name a skill with file and line, and you decide what to do with them.
+
+Where no dialog can answer, for example under `claude -p`, `init` prints the proposals, the config entries as JSON and the steps, and changes nothing.
+
+## Switching off
+
+- `/souffleur pause` switches every check off for the current session.
+- `/plugin uninstall skill-souffleur` removes the mod. Your `~/.claude/souffleur.json` stays where it is, and the backup of `settings.json` stays too.
 
 ## Roadmap
 
