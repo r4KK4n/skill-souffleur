@@ -33,7 +33,7 @@ Souffleur is a Claude Code mod, an in-process plugin. For why, including test re
 - [x] Research and tests on Claude Code 2.1.322 and 2.1.332 ([background](docs/background.md))
 - [x] Design document ([docs/design.md](docs/design.md))
 - [x] Implementation plan
-- [ ] Ledger of loaded, truncated and dropped skills
+- [x] Ledger of loaded, truncated and dropped skills
 - [ ] Restore missing skills after compaction and resume
 - [ ] Detect from the prompt which skills a task needs
 - [ ] Block a step until its skills are loaded
