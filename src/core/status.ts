@@ -1,16 +1,20 @@
 import type { Session } from './decide.ts'
 import { contextNotes, sectionNotes } from './rules.ts'
 import type { Config, Mode } from './types.ts'
+import { versionNotice } from './version.ts'
 
 const cell = (text: string) => text.replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\r\n|\r|\n/g, ' ')
 
 /** `HH:MM` in UTC. */
 const clock = (ms: number) => new Date(ms).toISOString().slice(11, 16)
 
-/** The `/souffleur` reply: mode, one row per ledger entry, then non-empty sections, then the Claude Code version. */
+/** The `/souffleur` reply: mode, the version notice when Claude Code is newer than the verified one, one row per ledger entry, then non-empty sections, then the Claude Code version. */
 export function renderTable(config: Config, s: Session, now: number, root?: string): string {
   void now
-  const lines = [`Mode: ${config.mode}${s.paused ? ' (paused)' : ''}`, '']
+  const lines = [`Mode: ${config.mode}${s.paused ? ' (paused)' : ''}`]
+  const notice = versionNotice(s.version)
+  if (notice) lines.push(notice)
+  lines.push('')
   lines.push('| Skill | State | Since | Reason |', '| --- | --- | --- | --- |')
   for (const [name, e] of Object.entries(s.ledger)) {
     lines.push(`| ${cell(name)} | ${e.state} | ${clock(e.since)} | ${cell(e.reason)} |`)
