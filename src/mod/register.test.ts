@@ -28,6 +28,8 @@ type Opts = {
 }
 
 /** Answers every call the mod makes on `$`; files maps an absolute path to its text, a missing path throws. */
+const registeredCommands: unknown[] = []
+
 function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   let id = 's1'
   const statuses: (string | undefined)[] = []
@@ -54,7 +56,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
     statuses.push(e.text)
     return { value: undefined }
   })
-  on('command.register', () => ({ value: { command: 'souffleur' } }))
+  on('command.register', (_$, e) => { registeredCommands.push(e); return { value: { command: 'souffleur' } } })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('prompt.submit', (_, e) => {
     seen.prompts.push({ text: e.text, ...(e.context ? { context: e.context } : {}) })
@@ -306,4 +308,11 @@ test('a user config silences the not-set-up status', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS })
   await start($)
   expect(w.statuses.at(-1)).not.toMatch(/not set up/)
+})
+
+test('the /souffleur command shows its arguments in the typeahead', async ($, on) => {
+  registeredCommands.length = 0
+  world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  expect(JSON.stringify(registeredCommands)).toContain('"argumentHint":"[status | need <name> | drop <name> | pause | init]"')
 })
