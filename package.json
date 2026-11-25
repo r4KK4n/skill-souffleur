@@ -13,7 +13,7 @@
     "typecheck": "tsc -p . && tsc -p tsconfig.core.json"
   },
   "devDependencies": {
-    "@types/node": "^22",
+    "@types/node": "^26",
     "typescript": "^7.0.2"
   }
 }
