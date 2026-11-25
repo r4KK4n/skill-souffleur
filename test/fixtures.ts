@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import type { CoreEvent } from '../src/core/decide.ts'
 
 export const EVENT_NAMES = [
   'session.start',
@@ -70,4 +71,60 @@ export function loadFixtureFile(name: string): FixtureFile {
 
 export function loadFixture(name: string): FixtureEvent[] {
   return loadFixtureFile(name).events
+}
+
+const USER_ORIGINS = ['composer', 'bridge', 'sdk']
+
+/** Maps recorded events to core events. Classification is not recorded, so a prompt matches no need. */
+export function toCoreEvents(f: FixtureEvent[]): CoreEvent[] {
+  const out: CoreEvent[] = []
+  let started = false
+  for (const e of f) {
+    const now = e.at
+    switch (e.event) {
+      case 'session.start':
+        out.push({ type: 'start', now, start: started ? 'resume' : 'startup', version: e.input.version.version })
+        started = true
+        break
+      case 'skill.prompt':
+        out.push({ type: 'skill', now, skill: e.input.skill })
+        break
+      case 'session.compact.before':
+        out.push({ type: 'compact', now, phase: 'before', trigger: e.input.trigger })
+        break
+      case 'session.compact.after':
+        out.push({ type: 'compact', now, phase: 'after', trigger: e.input.trigger })
+        break
+      case 'prompt.submit': {
+        const i = e.input
+        const fromUser = i.command === undefined && !i.isMeta && USER_ORIGINS.includes(i.origin.kind)
+        out.push({ type: 'prompt', now, text: i.text, fromUser, matched: [] })
+        break
+      }
+      case 'tool.call': {
+        const i = e.input
+        const str = (v: unknown) => (typeof v === 'string' ? v : undefined)
+        const ev: Extract<CoreEvent, { type: 'tool' }> = { type: 'tool', now, tool: i.tool }
+        const path = str(i.file_path)
+        const command = str(i.command)
+        const brief = str(i.prompt)
+        const skill = str(i.skill)
+        const model = str(i.model)
+        if (path !== undefined) ev.path = path
+        if (command !== undefined) ev.command = command
+        if (brief !== undefined) ev.brief = brief
+        if (skill !== undefined) ev.skill = skill
+        if (model !== undefined) ev.model = model
+        if (i.agentId !== undefined) ev.agentId = i.agentId
+        out.push(ev)
+        break
+      }
+      case 'command.run':
+        out.push(e.input.command === 'souffleur'
+          ? { type: 'command', now, args: e.input.args }
+          : { type: 'typed', now, name: e.input.command })
+        break
+    }
+  }
+  return out
 }
