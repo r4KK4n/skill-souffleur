@@ -2,7 +2,7 @@ import type { SkillRule } from './types.ts'
 
 /** What `/souffleur init` works with. Pure functions only: the adapter reads, asks and writes. */
 
-export const NOT_SET_UP = 'souffleur: not set up, run /souffleur init'
+export const NOT_SET_UP = 'not set up, run /souffleur init'
 
 export type HookOverlap = { event: string; matcher?: string; command: string; index: [number, number]; why: string }
 export type SkillProposal = { name: string; rule: SkillRule; needText?: string }

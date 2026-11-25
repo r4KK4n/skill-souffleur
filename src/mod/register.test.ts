@@ -149,7 +149,7 @@ test('missing config file: no deny, status degraded only if a file was invalid',
 test('invalid project JSON: status line says degraded', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS, [PROJECT_FILE]: '{ not json' })
   await start($)
-  expect(w.statuses.at(-1)).toBe('souffleur: degraded, see /souffleur')
+  expect(w.statuses.at(-1)).toBe('degraded, see /souffleur')
 })
 
 test('a hook error passes the event through and shows degraded', async ($, on) => {
@@ -171,7 +171,7 @@ test('a hook error passes the event through and shows degraded', async ($, on) =
   fail = true
   const r = await $.prompt.submit({ text: 'hello there' })
   expect(r.text).toBe('hello there')
-  expect(w.statuses.at(-1)).toBe('souffleur: degraded, see /souffleur')
+  expect(w.statuses.at(-1)).toBe('degraded, see /souffleur')
 })
 
 test('/souffleur prints the ledger table', async ($, on) => {
@@ -300,7 +300,7 @@ test('init keeps a hook the user wants to keep and edits nothing', async ($, on)
 test('no user config shows not-set-up status', async ($, on) => {
   const w = world(on, {})
   await start($)
-  expect(w.statuses.at(-1)).toBe('souffleur: not set up, run /souffleur init')
+  expect(w.statuses.at(-1)).toBe('not set up, run /souffleur init')
   expect(await table($)).toMatch(/not set up/)
 })
 

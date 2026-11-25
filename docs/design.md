@@ -223,7 +223,7 @@ Install is one line at the prompt, `/plugin install skill-souffleur --marketplac
 
 Many users already keep skills alive with their own hooks (a `SessionStart` hook that re-injects a skill, a `UserPromptSubmit` hook that reminds the model) and with standing instructions in `CLAUDE.md` or memory files. Running both doubles every reminder and leaves rules in two places. Souffleur does not change a user's files on install. Instead:
 
-- On a session start without a user config, the status line says `souffleur: not set up, run /souffleur init` and `/souffleur` explains it. Nothing is added to the conversation.
+- On a session start without a user config, the status line says `not set up, run /souffleur init` and `/souffleur` explains it. Nothing is added to the conversation.
 - `/souffleur init`, started by the user, reads `~/.claude/settings.json` (hooks), the user and project `CLAUDE.md` and the current project's memory index, and lists the installed skills. A small model proposes skill entries for the config (`always` or a `need` with its description) and names hooks and passages that do what Souffleur now does.
 - It then asks, one dialog per item, inside the command (the user started it, so several questions in a row are fine, with `Stop` on each): add the proposed skill entry; and for each overlapping hook `Turn off`, `Keep` or `Show me what to do`. `Turn off` copies `settings.json` to `settings.json.bak-souffleur-<date>` first and removes only that hook entry; settings hooks reload live. Hook scripts and `CLAUDE.md` or memory text are never edited: Souffleur lists them with file and line.
 - Without a dialog (`claude -p`), `/souffleur init` prints the proposals, the config entries as JSON and the steps, and changes nothing.
@@ -232,8 +232,8 @@ Many users already keep skills alive with their own hooks (a `SessionStart` hook
 ### Status
 
 - `/souffleur` (or `/souffleur status`) prints the ledger: skill, state, since, reason, open duties.
-- The status line shows a short summary, for example `souffleur: 4 loaded, 1 restoring`.
-- When the mod cannot read an event it expects (a renamed field, a missing event), the status line says `souffleur: degraded, see /souffleur` and the command lists what failed.
+- The status line shows a short summary, for example `observe · 4 loaded, 1 restoring`. Claude Code puts the plugin name in front of it.
+- When the mod cannot read an event it expects (a renamed field, a missing event), the status line says `degraded, see /souffleur` and the command lists what failed.
 
 ### Failure handling
 
