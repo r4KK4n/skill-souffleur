@@ -5,6 +5,7 @@ import type { CoreEvent, Session } from '../src/core/decide.ts'
 import { requested, skillLoaded } from '../src/core/ledger.ts'
 import { renderTable, statusLine } from '../src/core/status.ts'
 import type { Config } from '../src/core/types.ts'
+import { parseConfig } from '../src/core/config.ts'
 
 const T0 = Date.UTC(2026, 10, 25, 8, 0)
 const T1 = Date.UTC(2026, 10, 25, 9, 5)
@@ -102,4 +103,11 @@ test('decide status command replies with the table', () => {
   const e: CoreEvent = { type: 'command', now: T1, args: 'status' }
   const r = decide(config, s, e)
   assert.deepEqual(r.actions, [{ kind: 'reply', text: renderTable(config, s, T1) }])
+})
+
+test('table cells escape backslashes, pipes and line breaks', () => {
+  const config = parseConfig(JSON.stringify({ skills: { 'writing-guide': { always: true } } }), undefined).config
+  const s = initSession(config, 'session-1', T0, 'startup')
+  s.ledger['writing-guide'] = { ...s.ledger['writing-guide'], state: 'loaded', reason: 'a\\|b\r\nc' }
+  assert.match(renderTable(config, s, T0), /^\| writing-guide \| loaded \| \d\d:\d\d \| a\\\\\\\|b c \|$/m)
 })

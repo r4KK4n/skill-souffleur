@@ -1,7 +1,7 @@
 import type { Session } from './decide.ts'
 import type { Config, Mode } from './types.ts'
 
-const cell = (text: string) => text.replace(/\|/g, '\\|').replace(/\n/g, ' ')
+const cell = (text: string) => text.replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\r\n|\r|\n/g, ' ')
 
 /** `HH:MM` in UTC. */
 const clock = (ms: number) => new Date(ms).toISOString().slice(11, 16)
