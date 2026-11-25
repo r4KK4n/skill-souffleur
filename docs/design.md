@@ -217,6 +217,18 @@ The ledger, gates and duties cover the main session only (the user's choice on 2
 
 Instead Souffleur makes the main session decide, at the moment it hands work off, which skills the subagent needs. On `tool.call` for `Agent`, if the session has an active need, the brief must name the skills the subagent should load, or say `skills: none` for mechanical work that only carries out what was already written and checked. A brief without that line is denied once with a reason listing the configured skills and the active needs. Souffleur does not pick the skills itself; the main session knows whether the subagent writes new text or applies text that already exists.
 
+### Setup and moving over
+
+Install is one line at the prompt, `/plugin install skill-souffleur --marketplace r4KK4n/skill-souffleur`, which needs `.claude-plugin/marketplace.json` in the repository. The README describes install, a minimal config, the commands, `observe` and `enforce`, and how to switch Souffleur off again.
+
+Many users already keep skills alive with their own hooks (a `SessionStart` hook that re-injects a skill, a `UserPromptSubmit` hook that reminds the model) and with standing instructions in `CLAUDE.md` or memory files. Running both doubles every reminder and leaves rules in two places. Souffleur does not change a user's files on install. Instead:
+
+- On a session start without a user config, the status line says `souffleur: not set up, run /souffleur init` and `/souffleur` explains it. Nothing is added to the conversation.
+- `/souffleur init`, started by the user, reads `~/.claude/settings.json` (hooks), the user and project `CLAUDE.md` and the current project's memory index, and lists the installed skills. A small model proposes skill entries for the config (`always` or a `need` with its description) and names hooks and passages that do what Souffleur now does.
+- It then asks, one dialog per item, inside the command (the user started it, so several questions in a row are fine, with `Stop` on each): add the proposed skill entry; and for each overlapping hook `Turn off`, `Keep` or `Show me what to do`. `Turn off` copies `settings.json` to `settings.json.bak-souffleur-<date>` first and removes only that hook entry; settings hooks reload live. Hook scripts and `CLAUDE.md` or memory text are never edited: Souffleur lists them with file and line.
+- Without a dialog (`claude -p`), `/souffleur init` prints the proposals, the config entries as JSON and the steps, and changes nothing.
+- Once rules and notes exist, `init` also offers standing instructions it found as notes and checkable ones as rules.
+
 ### Status
 
 - `/souffleur` (or `/souffleur status`) prints the ledger: skill, state, since, reason, open duties.
