@@ -55,7 +55,7 @@
       "input": {
         "skill": "bigtest",
         "len": 43425,
-        "head": "Base directory for this skill: /path",
+        "head": "Base directory for this skill: /project/.claude/skills/bigtest",
         "tail": "ps over the lazy dog.\n\nEND-MARKER-OMEGA\n"
       }
     },
@@ -75,7 +75,7 @@
       "at": 6549,
       "session": "session-1",
       "input": {
-        "text": "<agent-message from=\"a12fde0ba7c5ecf37\">\n[Subagent hand-back] The text below is ",
+        "text": "<agent-message from=\"agent-1\">\n[Subagent hand-back] The text below is ",
         "isMeta": true,
         "origin": {
           "kind": "peer"
