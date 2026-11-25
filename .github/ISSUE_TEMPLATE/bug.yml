@@ -1,0 +1,44 @@
+name: Bug report
+description: Souffleur did something wrong or did nothing when it should have.
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you expect, and what did Souffleur do instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Load the skill ...
+        2. Run /compact
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: souffleur-version
+    attributes:
+      label: skill-souffleur version
+    validations:
+      required: true
+  - type: input
+    id: claude-version
+    attributes:
+      label: Claude Code version
+      description: Output of `claude --version`.
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of `/souffleur status`
+      description: Remove anything private before you paste it.
+      render: text
