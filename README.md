@@ -126,7 +126,9 @@ Only the user file may hold `rules` and `notes`. A project file that has them ge
 
 Proposals come from the model and from you. When something goes wrong that a rule would have caught, or when you write "remember as a rule: ...", the model calls the tool `souffleur_propose`. `/souffleur rule <text>` does the same for your own words. A proposal waits in a queue of at most 20. At the end of a turn in a session with a person at the prompt, Souffleur asks about the first one, with `Yes, everywhere`, `Yes, this project only` and `No`. Text typed under "Other" goes to the model with your next prompt as a request to revise the proposal. A declined proposal is remembered and not proposed again. The queue belongs to the session. Under `claude -p`, nothing is asked: proposals stay queued for `/souffleur review` and `/souffleur accept <id>`. The model may make five proposals per session, and a subagent may make none. Rule strings are one line without control characters, with at most 20 list items. Souffleur writes an entry to `~/.claude/souffleur.json` only after your yes, reads the file fresh first, stops when it cannot read it, and keeps every other key.
 
-`/souffleur migrate` also queues the standing instructions it finds in your `CLAUDE.md` files and memory index as note proposals, with or without a dialog. The question names the file and line, and offers `Yes, this project only` first for a passage from the project's own files. The report says how many passages were skipped and why. Learning rules from the text of your skills is not part of this release.
+`/souffleur migrate` also queues the standing instructions it finds in your `CLAUDE.md` files and memory index as note proposals, with or without a dialog. The question names the file and line, and offers `Yes, this project only` first for a passage from the project's own files. The report says how many passages were skipped and why. 
+
+Souffleur also reads your skills. This needs your user file and a session with a person at the prompt, and it stops under `/souffleur pause`. When the main session loads a skill whose file Souffleur has not seen, a small model looks for obligations the skill states about itself, such as "always run `npm test` after editing files under `src/`", and queues up to three as proposals named `skill:<name>`. The question starts with "Read from a skill's text, not verified:" and names the skill, the plugin or the project skill it came from. A skill version is read once and at most five are read per session (`/clear` starts a new session with five more); at most six skill proposals wait at once, and your own proposals come first. Skills from a project or an MCP server are read only when the project is in `trustProjects`. Skills a subagent loads are skipped, but a background subagent that loads a skill while the main session loads nothing can be read as the main session, because the load event does not say who loaded it. Each read sends the skill file, up to 60,000 characters, to the small model with a limit of 30 seconds, so to switch this off set `"learn": { "skills": false }` in `~/.claude/souffleur.json`. Nothing is written without your yes.
 
 ## Setting up your skills
 
@@ -187,7 +189,7 @@ Where no dialog can answer, for example under `claude -p`, both commands print w
 - [x] Block a step until its skills are loaded
 - [x] `/souffleur status` command and status line
 - [x] Rules and notes: from slips and the user's own words, confirmed in a dialog
-- [ ] Learn rules from the text of the user's skills
+- [x] Learn rules from the text of the user's skills
 - [x] `/souffleur init` per skill and `/souffleur migrate` for old hooks
 - [ ] Install guide
 - [ ] First release, installable with `/plugin install`

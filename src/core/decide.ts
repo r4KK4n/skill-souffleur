@@ -31,6 +31,10 @@ export type Session = {
   /** Field rules that denied and wait for the retry. */
   fieldDenied: string[]
   proposals: Proposal[]
+  /** Skill texts read for proposals in this session. */
+  skillReads?: number
+  /** Skills the main session asked for (a `Skill` call or a typed name) and whose load has not arrived yet. */
+  learnCalls?: string[]
   /** Hashes of declined proposals. */
   declined: string[]
   /** Need notes already sent since the last compaction. */
@@ -47,7 +51,7 @@ export type Session = {
 
 export type CoreEvent =
   | { type: 'start'; now: number; start: 'startup' | 'resume' | 'clear'; version?: string }
-  | { type: 'skill'; now: number; skill: string }
+  | { type: 'skill'; now: number; skill: string; text?: string; source?: string; pluginName?: string; path?: string }
   | { type: 'compact'; now: number; phase: 'before' | 'after'; trigger: string; skipped?: boolean; agentId?: string }
   | { type: 'prompt'; now: number; text: string; fromUser: boolean; matched: NeedName[]; root?: string }
   /** `present` names the arguments the call carries, for field rules. */
@@ -63,6 +67,8 @@ export type CoreEvent =
 
 export type Action =
   | { kind: 'context'; text: string }
+  /** A main-session skill load whose text may be read for proposals; the adapter decides whether to. */
+  | { kind: 'learn'; skill: SkillName; text: string; source?: string; pluginName?: string; path?: string }
   | { kind: 'deny'; reason: string }
   | { kind: 'reply'; text: string }
   | { kind: 'toolContext'; text: string }
@@ -117,8 +123,14 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
       // A resume keeps the ledger: what was loaded stays in the transcript until a compaction.
       if (e.start === 'resume') return { session: e.version === undefined ? s : { ...s, version: e.version }, actions: [] }
       return { session: initSession(config, s.id, e.now, e.start, e.version), actions: [] }
-    case 'skill':
-      return { session: onSkill(config, s, e), actions: [] }
+    case 'skill': {
+      const announced = (s.learnCalls ?? []).indexOf(e.skill)
+      const main = announced >= 0 || s.subagentsRunning === 0
+      const learn = main && config.learn.skills && !s.paused && e.text !== undefined && e.text.trim() !== ''
+      const session: Session = { ...onSkill(config, s, e), learnCalls: (s.learnCalls ?? []).filter((_, k) => k !== announced) }
+      const from = { ...(e.source === undefined ? {} : { source: e.source }), ...(e.pluginName === undefined ? {} : { pluginName: e.pluginName }), ...(e.path === undefined ? {} : { path: e.path }) }
+      return { session, actions: learn ? [{ kind: 'learn', skill: e.skill, text: e.text!, ...from }] : [] }
+    }
     case 'compact':
       return { session: onCompact(config, s, e), actions: [] }
     case 'prompt':
@@ -128,7 +140,7 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
     case 'command':
       return onCommand(config, s, e)
     case 'typed':
-      return { session: e.name in s.ledger ? { ...s, mainSkillCalls: [...s.mainSkillCalls, e.name], ruleSkills: withRuleSkill(config, s, e.name) } : s, actions: [] }
+      return { session: { ...(e.name in s.ledger ? { ...s, mainSkillCalls: [...s.mainSkillCalls, e.name], ruleSkills: withRuleSkill(config, s, e.name) } : s), learnCalls: [...(s.learnCalls ?? []), e.name].slice(-KEEP) }, actions: [] }
     case 'config':
       return { session: { ...s, ledger: syncLedger(s.ledger, config, e.now, ruleSkillNames(config)), ruleSkills: s.ruleSkills.filter((n) => ruleSkillNames(config).includes(n)), openRules: s.openRules.filter((o) => config.rules.some((r) => r.id === o.id)), needs: Object.fromEntries(Object.entries(s.needs).filter(([name]) => name in config.needs)), duties: s.duties.filter((d) => d.skill in config.skills), errors: [...s.errors.filter((m) => !m.startsWith('config: ')), ...e.errors.map((m) => `config: ${m}`)].slice(-KEEP) }, actions: [] }
     case 'installed':
@@ -215,6 +227,8 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
   const actions: Action[] = []
 
   if (e.tool === 'Skill' && e.skill !== undefined && e.skill in s.ledger) next.mainSkillCalls = [...s.mainSkillCalls, e.skill]
+  // The learn decision keeps its own list: it also covers skills the config does not list.
+  if (e.tool === 'Skill' && e.skill !== undefined) next.learnCalls = [...(s.learnCalls ?? []), e.skill].slice(-KEEP)
 
   if (s.compactedSincePrompt) {
     next.compactedSincePrompt = false
