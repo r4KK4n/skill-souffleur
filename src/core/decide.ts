@@ -124,7 +124,9 @@ function restore(config: Config, s: Session, now: number): { ledger: Ledger; tex
   const giveUp = missing.filter((name) => s.ledger[name]!.requests >= MAX_REQUESTS)
   const ledger = requested(s.ledger, [...ask, ...giveUp], now)
   if (ask.length === 0) return { ledger }
-  return { ledger, text: `Souffleur: before anything else, invoke these skills with the Skill tool, one after another: ${ask.join(', ')}.` }
+  const again = ask.some((name) => s.ledger[name]!.state !== 'absent')
+  const why = again ? ' Compaction cut or dropped their text. The note that skills invoked earlier must not be run again does not apply to them: invoke them again.' : ''
+  return { ledger, text: `Souffleur: before anything else, invoke these skills with the Skill tool, one after another: ${ask.join(', ')}.${why}` }
 }
 
 function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'prompt' }>): Result {
