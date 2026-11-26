@@ -7,7 +7,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 - `/souffleur review` and `/souffleur rule` no longer hang on a dialog that nobody answers: after two minutes they return `no answer within two minutes; the proposal stays queued`, the dialog stays open and a late tap still counts once (#54).
-
+- A skill that compaction cut, whose need ended while it was being restored, and that is needed again, gets the "invoke them again" sentence in its request; a skill loaded after the compaction does not (#53).
 
 ## [0.1.8] - 2026-11-26
 

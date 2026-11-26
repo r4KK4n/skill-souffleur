@@ -1394,3 +1394,30 @@ test('reply: a chat skill excluded in this root or a project skill of an untrust
   p.skills['terse:terse-mode']!.from = 'project'
   assert.equal(decide(p, loaded(p), reply(LONG, { root: '/work/b' })).session.replyCheck, undefined)
 })
+
+test('a skill cut by compaction whose need ended mid-restore still gets the invoke-again note when it is needed again', () => {
+  const c = cfg()
+  const s0 = initSession(c, 'session-1', 0, 'clear')
+  const row = { state: 'restoring' as const, since: 1, reason: '', requests: 1, lastCompactAt: 5 }
+  const start: Session = { ...s0, needs: { ui: { since: 1, reason: 'r', misses: 19 } }, ledger: { ...s0.ledger, 'ui-checklist': row } }
+  const s = run(c, [classified([])], start).s
+  assert.equal('ui' in s.needs, false)
+  assert.equal(s.ledger['ui-checklist']!.state, 'absent')
+  assert.equal(s.ledger['ui-checklist']!.lastCompactAt, 5)
+  const text = ctx(one(c, [classified(['ui'])], s))
+  assert.match(text, /ui-checklist/)
+  assert.match(text, /invoke them again\./)
+})
+
+test('a skill loaded after the compaction asks for no invoke-again note when its need starts again', () => {
+  const c = cfg()
+  let s = run(c, [compact(), classified(['ui']), loadSkill('ui-checklist')], uiLoaded(c)).s
+  assert.equal(s.ledger['ui-checklist']!.lastCompactAt, undefined)
+  s = run(c, repeat(20, () => classified([])), s).s
+  assert.equal('ui' in s.needs, false)
+  // The row left the loaded state by hand, as when its text was lost without a compaction.
+  s = { ...s, ledger: { ...s.ledger, 'ui-checklist': { ...s.ledger['ui-checklist']!, state: 'absent' } } }
+  const text = ctx(one(c, [classified(['ui'])], s))
+  assert.match(text, /ui-checklist/)
+  assert.doesNotMatch(text, /invoke them again/)
+})
