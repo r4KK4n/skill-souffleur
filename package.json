@@ -1,6 +1,6 @@
 {
   "name": "skill-souffleur",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "description": "Keeps the skills a session needs loaded across compaction and resume.",
   "license": "MIT",

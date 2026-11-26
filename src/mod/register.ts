@@ -934,7 +934,7 @@ async function answerShown($: Dollar, text: string): Promise<string | undefined>
     if (after.proposals.some((x) => x.hash === hash)) return `Souffleur: the user tried to ${verdict} proposal ${id}, but it could not be written; it stays queued. Do not retry it.`
     return `Souffleur: the user ${verdict === 'accept' ? 'accepted' : 'declined'} proposal ${id}; nothing else to do for it.`
   } catch {
-    // The answer was committed; the model must not think nothing happened.
+    // Something failed during or after the write; the model must not assume either outcome.
     return `Souffleur: the answer may not have been written; check ~/.claude/souffleur.json or /souffleur.`
   }
 }
