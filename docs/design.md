@@ -350,7 +350,7 @@ Items 1 to 5 were answered on 2.1.332, except the reload half of item 3; see [ba
 
 Still open:
 
-6. Does `$.ui.ask` show its dialog in a Remote Control session in the desktop and mobile apps, and does it reject cleanly where nobody can answer? The dialogs of `init`, `migrate` and the turn-end question were tested with the test kit and in the desktop app's dialog. On 2026-11-25 the owner saw a `$.ui.ask` dialog in the desktop app over Remote Control; the mobile app is still open. The `init`, `migrate` and proposal dialogs have not yet run end to end in a live session.
+6. Does `$.ui.ask` show its dialog in a Remote Control session in the desktop and mobile apps, and does it reject cleanly where nobody can answer? The dialogs of `init`, `migrate` and the turn-end question were tested with the test kit and in the desktop app's dialog. On 2026-11-25 the owner saw a `$.ui.ask` dialog in the desktop app over Remote Control, and on 2026-11-26 the turn-end proposal dialog in the mobile app. The `init`, `migrate` and proposal dialogs have not yet run end to end in a live session.
 
 ## Left to the builder
 
