@@ -888,8 +888,9 @@ async function answerShown($: Dollar, text: string): Promise<string | undefined>
   } catch {
     say($, l, line)
   }
-  const { session: after } = await current($)
-  if (/did not keep it/.test(line)) return `Souffleur: the user accepted proposal ${id}, but the reader did not keep the entry; it is not active. Tell the user to check ~/.claude/souffleur.json.`
+  const { l: l3, session: after } = await current($)
+  const active = [...l3.config.rules, ...l3.config.notes].some((x) => x.id === id)
+  if (verdict === 'accept' && !after.proposals.some((x) => x.hash === hash) && !active) return `Souffleur: the user accepted proposal ${id}, but the reader did not keep the entry; it is not active. Tell the user to check ~/.claude/souffleur.json.`
   if (after.proposals.some((x) => x.hash === hash)) return `Souffleur: the user tried to ${verdict} proposal ${id}, but it could not be written; it stays queued. Do not retry it.`
   return `Souffleur: the user ${verdict === 'accept' ? 'accepted' : 'declined'} proposal ${id}; nothing else to do for it.`
 }
@@ -1038,7 +1039,7 @@ async function runPropose($: Dollar, input: Record<string, unknown>): Promise<st
   if (r.status !== 'queued') return PROPOSE_REPLY[r.status] ?? 'Not queued.'
   return !askStopped || noDialog
     ? `Queued as ${r.id}. At the end of this turn Souffleur asks the user in a dialog, or shows a notice they answer with a reply; do not ask again.`
-    : `Queued as ${r.id}. It waits for the user's /souffleur review or a reply; do not ask again.`
+    : `Queued as ${r.id}. It waits for the user's /souffleur review; do not ask again.`
 }
 
 /** `/souffleur rule <text>`: the small model shapes the words into a rule or note; a failure keeps them as a note. */
@@ -1329,6 +1330,8 @@ export const register: Register = (on) => {
         askAtTurnEnd = false
         if (noDialog) {
           // A dialog was tried and nobody can answer: no new attempt, only a notice for a proposal not shown yet.
+          // While an offer is armed no person prompt has ended it yet: a new notice would redirect the reply.
+          if (shownHash !== undefined) return
           const { l, session } = await current($)
           noticeFirst($, l, session)
           return

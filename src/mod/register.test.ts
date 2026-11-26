@@ -2268,3 +2268,26 @@ test('a handled reply shows the result and the next waiting proposal gets its no
   expect(hasLine(w, `declined proposal ${b}`)).toBe(true)
   expect(a).not.toBe(b)
 })
+
+test('a turn end without a person prompt does not replace the shown proposal', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  await propose($, note('First note here.'))
+  await turnEnd($)
+  await propose($, note('Second note here.'))
+  await reply($, 'hello', { kind: 'peer' })
+  await turnEnd($)
+  expect(w.logs.filter((l) => l.includes('Second note here')).length).toBe(0)
+  await reply($, 'accept', COMPOSER)
+  expect(userFile(w).notes.map((n: { text: string }) => n.text)).toEqual(['First note here.'])
+})
+
+test('a reply whose entry the reader drops tells the model it is not active', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', onWrite: (path) => { if (path === USER_FILE) w.files[USER_FILE] = '{"mode":"enforce"}' } })
+  await start($)
+  const id = idOf(await propose($, note('Reply in German.')))
+  await turnEnd($)
+  await reply($, 'accept', COMPOSER)
+  expect(hasLine(w, `proposal ${id}, but the reader did not keep the entry; it is not active`)).toBe(true)
+  expect(hasLine(w, 'nothing else to do')).toBe(false)
+})
