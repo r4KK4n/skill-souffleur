@@ -15,6 +15,8 @@ export type Session = {
   ledger: Ledger
   needs: Record<NeedName, { since: number; reason: string; misses?: number }>
   duties: Duty[]
+  /** Files a file-changing call wrote since the skill's last evidence; a publish arms a duty only for these. */
+  written?: { skill: SkillName; path: string }[]
   paused: boolean
   id: string
   mainSkillCalls: SkillName[]
@@ -98,6 +100,8 @@ const CONTEXT_LIMIT = 10_000
 /** The part of that block the restore request may take, so notes and reminders still fit. */
 const RESTORE_LIMIT = 5000
 const FAIL_LIMIT = 3
+/** Tools that change a file: only these arm a duty by themselves. */
+const FILE_TOOLS = ['Write', 'Edit', 'NotebookEdit', 'MultiEdit']
 const PAUSE_HINT = 'To turn checks off for this session: /souffleur pause.'
 
 export function initSession(config: Config, id: string, now: number, start: 'startup' | 'clear', version?: string): Session {
@@ -363,6 +367,11 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
     return !(ev && evidenceMatches(ev, e))
   })
 
+  if (s.written) next.written = s.written.filter((w) => {
+    const ev = config.skills[w.skill]?.duty?.evidence
+    return !(ev && evidenceMatches(ev, e))
+  })
+
   // Violations: `trusted` ones may deny in enforce mode; the rest (untrusted project skills) only record.
   const found: { text: string; trusted: boolean }[] = []
 
@@ -432,6 +441,10 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
     next.openRules = [...next.openRules, ...rr.opened.map((id) => ({ id, by, denied: false, told: false }))]
     for (const [name, rule] of Object.entries(config.skills)) {
       if (!rule.duty || next.ledger[name]?.state === 'not installed here' || excludedIn(rule, e.root) || !matches(rule.duty.after, e.tool, e.path, e.tree ?? e.root)) continue
+      const writes = FILE_TOOLS.includes(e.tool)
+      const wrote = e.path !== undefined && (next.written ?? []).some((w) => w.skill === name && w.path === e.path)
+      if (writes && e.path !== undefined && !wrote) next.written = [...(next.written ?? []), { skill: name, path: e.path }].slice(-KEEP * 5)
+      if (!writes && !wrote) continue
       if (next.duties.some((d) => d.skill === name)) continue
       next.duties = [...next.duties, { skill: name, openedAt: e.now, by: e.path === undefined ? e.tool : `${e.tool} ${e.path}`, denied: false, told: false }]
     }

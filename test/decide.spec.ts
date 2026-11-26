@@ -208,6 +208,32 @@ test('duty opens on Write x.html, denies next gated Write, closes on Bash ui-che
   assert.equal(r.s.duties[0]!.by, 'Write c.html')
 })
 
+const pubCfg = cfg({ skills: { ...base.skills, 'ui-checklist': { ...base.skills['ui-checklist']!, duty: { after: { tools: ['Write', 'Edit', 'Artifact'], paths: ['**/*.html'] }, evidence: { tool: 'Bash', command: '*ui-checklist*detect*' } } } } })
+
+test('a publish after evidence opens no duty, and a second publish neither (#51)', () => {
+  const r = run(pubCfg, [
+    tool('Write', { path: 'x.html' }),
+    tool('Edit', { path: 'x.html' }),
+    tool('Bash', { command: 'run ui-checklist detect --json x.html' }),
+    tool('Artifact', { path: 'x.html' }),
+    tool('Artifact', { path: 'x.html' }),
+  ], uiLoaded())
+  assert.equal(r.s.duties.length, 0)
+  assert.deepEqual(r.out[3], [])
+  assert.deepEqual(r.out[4], [])
+})
+
+test('a publish of a written file without evidence opens a duty (#51)', () => {
+  const r = run(pubCfg, [tool('Write', { path: 'x.html' }), tool('Artifact', { path: 'x.html' })], uiLoaded())
+  assert.equal(r.s.duties.length, 1)
+})
+
+test('a publish of a file never written opens no duty; Edit, no evidence, Edit keeps one duty (#51)', () => {
+  assert.equal(run(pubCfg, [tool('Artifact', { path: 'y.html' })], uiLoaded()).s.duties.length, 0)
+  const r = run(pubCfg, [tool('Edit', { path: 'x.html' }), tool('Edit', { path: 'x.html' }), tool('Edit', { path: 'x.html' })], uiLoaded())
+  assert.equal(r.s.duties.length, 1)
+})
+
 test('duty denies once, retry passes', () => {
   const r = run(base, [tool('Write', { path: 'a.html' }), tool('Write', { path: 'b.html' }), tool('Write', { path: 'b.html' })], uiLoaded())
   assert.equal(r.out[1]![0]!.kind, 'deny')
