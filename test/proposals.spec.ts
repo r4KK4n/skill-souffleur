@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { decide, initSession } from '../src/core/decide.ts'
-import { addEntry, answer, enqueue, makeProposal, nextQuestion, parseShaped } from '../src/core/proposals.ts'
+import { addEntry, answer, enqueue, makeProposal, nextQuestion, parseReply, parseShaped } from '../src/core/proposals.ts'
 import type { Proposal } from '../src/core/proposals.ts'
 import type { Config, Note, Rule } from '../src/core/types.ts'
 
@@ -138,4 +138,13 @@ test('init pruning keeps a need that a note uses', async () => {
   const out = r.config as { needs: Record<string, string> }
   assert.deepEqual(Object.keys(out.needs), ['ui'])
   assert.deepEqual(r.pruned, ['old'])
+})
+
+test('parseReply accepts the listed words', () => {
+  for (const w of ['accept', 'annehmen', 'ja', 'yes', ' Yes ', 'ACCEPT\n']) assert.equal(parseReply(w), 'accept', w)
+  for (const w of ['decline', 'ablehnen', 'nein', 'no', ' No ']) assert.equal(parseReply(w), 'decline', w)
+})
+
+test('parseReply ignores other text', () => {
+  for (const w of ['ja bitte', '', '  ', 'accept it', 'yes!', 'maybe', 'no way']) assert.equal(parseReply(w), undefined, w)
 })

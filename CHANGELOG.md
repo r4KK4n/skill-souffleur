@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- Proposals are asked about at the end of every main-session answer, also in sessions that report no interactive surface (Remote Control starts such sessions). Where no dialog opens, Souffleur shows the proposal as a notice, and a reply of `accept`, `annehmen`, `ja`, `yes`, `decline`, `ablehnen`, `nein` or `no` from the person answers it. A peer, a hand-back or the model cannot answer this way (#44).
+
 ## [0.1.2] - 2026-11-26
 
 - Fixed: field rules no longer see the event metadata of a tool call (`tool`, `tool_use_id`, `agentId`, `requestMeta`) as arguments, so a field rule named like one of them no longer passes without that argument (#40).

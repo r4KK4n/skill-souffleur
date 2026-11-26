@@ -9,7 +9,7 @@ import type { Action, CoreEvent, Session } from '../core/decide.ts'
 import { classifyPromptChecked } from '../core/needs.ts'
 import { EXTRACT_SYSTEM, MAX_SKILL_TEXT, extractPrompt, hashKey, parseAnswer, shouldRead, skillHash, trusted } from '../core/learn.ts'
 import type { Proposal } from '../core/proposals.ts'
-import { NO, YES_EVERYWHERE, YES_PROJECT, addEntry, answer, describeProposal, enqueue, findProposal, makeProposal, nextQuestion, parseShaped, proposalLines, shapePrompt } from '../core/proposals.ts'
+import { NO, YES_EVERYWHERE, YES_PROJECT, addEntry, answer, describeProposal, enqueue, findProposal, makeProposal, nextQuestion, parseReply, parseShaped, proposalLines, shapePrompt } from '../core/proposals.ts'
 import { ruleSkillNames, sectionNotes } from '../core/rules.ts'
 import { statusLine } from '../core/status.ts'
 import type { Config, Note, Rule } from '../core/types.ts'
@@ -39,6 +39,10 @@ let interactive = false
 let proposeReady = false
 /** A dialog was dismissed or could not open: no more questions at turn end in this session. */
 let askStopped = false
+/** The id of the proposal shown as a notice because no dialog opens; the person's next one-word reply answers it. */
+let shownId: string | undefined
+/** A typed `/souffleur review` could not open its dialog: the next turn end asks even after a dismissal. */
+let askAtTurnEnd = false
 
 const now = () => Date.now()
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err))
@@ -827,23 +831,43 @@ async function commitAnswerNow($: Dollar, hash: string, label: string): Promise<
 }
 
 /** One dialog about the first waiting proposal. Returns the line to show, or undefined when nothing was asked or the dialog gave no answer. */
-async function askFirst($: Dollar, stopOnFail = false): Promise<string | undefined> {
-  if (!interactive) return undefined
-  const { session } = await current($)
+async function askFirst($: Dollar, atTurnEnd = false): Promise<string | undefined> {
+  const { l, session } = await current($)
   const q = nextQuestion(await withStoredDeclined($, session))
   if (!q) return undefined
   let label: unknown
   try {
     label = await $.ui.ask(q.question, { options: q.options, header: 'Souffleur' })
   } catch {
-    if (stopOnFail) askStopped = true
+    if (atTurnEnd) {
+      // Nobody can answer a dialog here: show the proposal once and let a one-word reply answer it.
+      askStopped = true
+      const p = session.proposals.find((x) => x.hash === q.hash)
+      if (p !== undefined && shownId !== p.entry.id) {
+        shownId = p.entry.id
+        say($, l, `Souffleur: proposal ${p.entry.id}: ${describeProposal(p)}. Reply "accept" or "decline".`)
+      }
+    } else askAtTurnEnd = true
     return undefined
   }
   if (typeof label !== 'string' || label.trim() === '') {
-    if (stopOnFail) askStopped = true
+    if (atTurnEnd) askStopped = true
     return undefined
   }
   return commitAnswer($, q.hash, label)
+}
+
+/** The person's one-word reply to the proposal last shown as a notice; the context line to add, or undefined when the prompt is not such a reply. */
+async function answerShown($: Dollar, text: string): Promise<string | undefined> {
+  const id = shownId
+  const verdict = parseReply(text)
+  if (id === undefined || verdict === undefined) return undefined
+  shownId = undefined
+  const { session } = await current($)
+  const p = findProposal(session, id)
+  if (!p) return undefined
+  await (verdict === 'accept' ? runAccept($, [id]) : runDecline($, [id]))
+  return `Souffleur: the user ${verdict === 'accept' ? 'accepted' : 'declined'} proposal ${id}; nothing else to do for it.`
 }
 
 /** Queues a proposal. `from` is `slip` or `user`. */
@@ -988,7 +1012,7 @@ async function runPropose($: Dollar, input: Record<string, unknown>): Promise<st
   const r = await propose($, raw, input.source === 'slip' ? 'slip' : 'user')
   if (r.status.startsWith('error: ')) return `Not queued: ${r.status.slice(7)}. Fix the call and try again.`
   if (r.status !== 'queued') return PROPOSE_REPLY[r.status] ?? 'Not queued.'
-  return interactive && !askStopped
+  return !askStopped
     ? `Queued as ${r.id}. Souffleur asks the user at the end of this turn; do not ask again.`
     : `Queued as ${r.id}. The user reviews it with /souffleur review.`
 }
@@ -1153,6 +1177,8 @@ export const register: Register = (on) => {
     })
     interactive = e.isInteractive === true
     askStopped = false
+    shownId = undefined
+    askAtTurnEnd = false
     proposeReady = false
     toolSeen = false
     silentRetried = false
@@ -1190,6 +1216,7 @@ export const register: Register = (on) => {
   on('prompt.submit', async ($, e, next) => {
     const fromUser = isFromUser(e)
     if (fromUser) await safe($, 'tool.reconnect', undefined, () => reconnectTool($))
+    const answered = fromUser && (e.origin?.kind === 'composer' || e.origin?.kind === 'bridge') ? await safe($, 'prompt.reply', undefined as string | undefined, () => answerShown($, e.text)) : undefined
     const texts = await safe($, 'prompt.submit', [] as string[], async () => {
       const { l, session } = await current($)
       const { config } = l
@@ -1211,6 +1238,7 @@ export const register: Register = (on) => {
       const { actions } = await apply($, (l2) => ({ type: 'prompt', now: now(), text: e.text, fromUser, matched: verdict?.matched ?? [], root: l2.root, ...(verdict === undefined ? {} : { classifierFailed: verdict.failed }) }))
       return actions.flatMap((a) => (a.kind === 'context' ? [a.text] : []))
     })
+    if (answered !== undefined) texts.push(answered)
     return texts.length ? next({ ...e, context: [...(e.context ?? []), ...texts] }) : next(e)
   }).catch(($, e, next) => next(e))
 
@@ -1267,9 +1295,10 @@ export const register: Register = (on) => {
   // At the end of a turn: one question about the first waiting proposal, in a session with a person at the prompt.
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
-    if (e.agentId === undefined && e.reason === 'answer' && interactive && !askStopped) {
+    if (e.agentId === undefined && e.reason === 'answer' && (!askStopped || askAtTurnEnd)) {
       await safe($, 'turn.complete', undefined, async () => {
         if ((await current($)).session.paused) return
+        askAtTurnEnd = false
         const line = await askFirst($, true)
         if (line !== undefined) {
           try {

@@ -170,3 +170,12 @@ export function parseShaped(raw: string, text: string, config: Pick<Config, 'use
 export function proposalLines(s: Session): string[] {
   return s.proposals.map((p) => `- ${p.entry.id}: ${p.kind} ${describeProposal(p)} (${p.from})`)
 }
+
+const ACCEPT_WORDS = ['accept', 'annehmen', 'ja', 'yes']
+const DECLINE_WORDS = ['decline', 'ablehnen', 'nein', 'no']
+
+/** The answer a whole prompt gives to a shown proposal: one reply word, trimmed and lower-cased, nothing else. */
+export function parseReply(text: string): 'accept' | 'decline' | undefined {
+  const t = text.trim().toLowerCase()
+  return ACCEPT_WORDS.includes(t) ? 'accept' : DECLINE_WORDS.includes(t) ? 'decline' : undefined
+}
