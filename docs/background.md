@@ -7,7 +7,7 @@ How Souffleur started, what the research found, and why it is built the way it i
 During a two-day Claude Code session that designed a UI prototype, several skills stopped working after the context was compacted, although they had been loaded earlier:
 
 - A token-saving skill came back as a one-line reminder instead of its full rules, and answers got long again.
-- The writing skills (humanizer, stop-slop) were no longer applied to the prototype's text.
+- Two writing-style skills were no longer applied to the prototype's text.
 - The UI design skill's detector stopped running from the seventh prototype version on.
 
 Four small shell hooks were supposed to prevent this. Each reacted to keywords or file names, and each checked "already loaded?" by searching the whole transcript. The transcript still contains the load from before the compaction, so the hooks stayed silent while the skill text was already gone from the context. The user had to ask again and again whether a skill was still active.

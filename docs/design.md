@@ -86,13 +86,13 @@ The project file comes from whatever repository the user opens, so it is untrust
 ```json
 {
   "skills": {
-    "chisle:chisle": { "always": true, "startup": "injected" },
-    "humanizer": { "need": "prose" },
-    "stop-slop": { "need": "prose" },
-    "impeccable": {
+    "terse:terse-mode": { "always": true, "startup": "injected" },
+    "writing-guide": { "need": "prose" },
+    "writing-check": { "need": "prose" },
+    "ui-design": {
       "need": "ui",
       "gate": { "tools": ["Write", "Edit", "Artifact"], "paths": ["**/*.html", "**/*.tsx"] },
-      "duty": { "after": { "tools": ["Write"], "paths": ["**/*.html"] }, "evidence": { "tool": "Bash", "command": "*impeccable*detect*" } }
+      "duty": { "after": { "tools": ["Write"], "paths": ["**/*.html"] }, "evidence": { "tool": "Bash", "command": "*ui-design*detect*" } }
     }
   },
   "needs": {
@@ -145,13 +145,13 @@ If the model skips the request, the gate is the backstop: the next gated step is
 
 Compaction can also happen in the middle of a long turn, when no user prompt follows for a while. Then the restore request rides on the next main-session tool call instead: Souffleur lets the call run and adds the request to its result as `context`, which the API offers for exactly this.
 
-Restores run in config order with no size cap. Restoring humanizer, stop-slop and impeccable after a compaction adds roughly 80 KB. The code marks this as a shortcut: add a priority cap if measurements show restores pushing sessions into the next compaction early.
+Restores run in config order with no size cap. Restoring two writing skills and a UI design skill after a compaction adds roughly 80 KB. The code marks this as a shortcut: add a priority cap if measurements show restores pushing sessions into the next compaction early.
 
 No cap applies to the skills' own text. The request that names the skills is cut at 5,000 characters, and the whole context block of a prompt (request, notes, reminders) at 10,000, because longer hook output is moved to a file. Skills left out stay `absent` or `stale` in `/souffleur` and are asked for on a later prompt.
 
 ### Skills loaded without `skill.prompt`
 
-Some skill text reaches the context through other paths: a plugin's own startup hook (Chisle injects its rules at startup), or the engine's re-attachment after compaction. Souffleur does not see these. A skill can set `"startup": "injected"` in the config; Souffleur then treats it as `loaded` at session start and `stale` after the first compaction, so it neither duplicates the startup text nor misses the loss.
+Some skill text reaches the context through other paths: a plugin's own startup hook (a token-saving plugin injects its rules at startup), or the engine's re-attachment after compaction. Souffleur does not see these. A skill can set `"startup": "injected"` in the config; Souffleur then treats it as `loaded` at session start and `stale` after the first compaction, so it neither duplicates the startup text nor misses the loss.
 
 Souffleur replaces the user's earlier preload and reload hooks. Removing those is part of adopting Souffleur; it does not run beside them.
 
@@ -159,7 +159,7 @@ Souffleur replaces the user's earlier preload and reload hooks. Removing those i
 
 A short, stable section added through `prompt.compose`:
 
-> Souffleur keeps track of skills in this session. If a message from Souffleur asks you to load skills, invoke each one with the Skill tool before you continue. Always-on skills: chisle:chisle.
+> Souffleur keeps track of skills in this session. If a message from Souffleur asks you to load skills, invoke each one with the Skill tool before you continue. Always-on skills: terse:terse-mode.
 
 It holds the rule and the `always` skills from the config, never the changing ledger, because sections are cached per thread and must not break the prompt cache. It also carries the notes without `need`, and one sentence asking the model to call `souffleur_propose` when a slip happened that a rule would have caught or the user asks it to remember a rule. Notes in the section are capped at 2,000 characters; above that the status line says so and `/souffleur` lists the notes that were left out.
 
@@ -299,7 +299,7 @@ The propose tool's server can disconnect between turns while the hooks keep runn
 2. Does `skill.prompt` fire for the engine's own re-attachment after compaction? (In the first test it did not.)
 3. Does `$.state` survive a reload of the mod and a resume, and does `$.store` keyed by session id cover the rest?
 4. How does the status line render in the desktop and mobile clients?
-5. Plugin skill names: is the `skill.prompt` key `chisle:chisle` or `chisle`?
+5. Plugin skill names: is the `skill.prompt` key `terse:terse-mode` or `terse-mode`?
 
 Items 1 to 5 were answered on 2.1.332; see [background.md](background.md). Item 4 was dropped: the status line is built for the terminal, and `/souffleur` shows the same everywhere. Items 7 to 10 were answered on 2.1.332 as well, with the evidence in [background.md](background.md#tests-for-rules-and-notes-claude-code-21332):
 
