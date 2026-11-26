@@ -284,3 +284,11 @@ test('the need-note block is capped and the rest follows on the next prompt', as
   const next = run(c, [prompt()], s)
   assert.match(ctx(next.out[0]!), /y{50}/, 'the rest follows on the next prompt')
 })
+
+test('a skill rule does not deny where its skill is excluded', () => {
+  const c = cfg({ rules: [skillRule], skills: { 'dev-workflow': { always: true, from: 'user', notIn: ['/work/a'] } } })
+  const here = decide(c, initSession(c, 's', 0, 'clear'), { ...tool('Agent'), root: '/work/a/' } as CoreEvent)
+  assert.equal(denial(here.actions), '')
+  const elsewhere = decide(c, initSession(c, 's', 0, 'clear'), { ...tool('Agent'), root: '/work/b' } as CoreEvent)
+  assert.match(denial(elsewhere.actions), /dev-workflow/)
+})

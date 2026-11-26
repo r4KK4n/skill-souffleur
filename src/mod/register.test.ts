@@ -462,7 +462,7 @@ test('new session id after clear starts a fresh ledger', async ($, on) => {
   expect(r.context?.join('\n')).toMatch(/writing-guide/)
 })
 
-test('the system prompt section names the always-on skills and depends on config only', async ($, on) => {
+test('the system prompt section states the audience rule and depends on config only', async ($, on) => {
   world(on, { [USER_FILE]: ALWAYS })
   on('prompt.compose', () => ({ sections: [] }))
   await start($)
@@ -475,7 +475,7 @@ test('the system prompt section names the always-on skills and depends on config
   expect(section?.text).not.toMatch(/Replies in this chat/)
 })
 
-test('the system section names the chat skill, and leaves out one excluded in this project', async ($, on) => {
+test('the system section names the chat skill', async ($, on) => {
   const chat = JSON.stringify({ mode: 'enforce', skills: { 'terse:terse-mode': { always: true, for: 'chat' }, 'ui-design': { always: true, for: 'users', notIn: ['/work/proj'] } } })
   world(on, { [USER_FILE]: chat })
   on('prompt.compose', () => ({ sections: [] }))
@@ -2503,4 +2503,23 @@ test('the Agent brief check leaves out a skill excluded in this project', async 
   await $.command.run({ command: 'souffleur', args: 'need ui' })
   const r = await $.tool.call({ tool: 'Agent', prompt: 'do it', description: 'd', subagent_type: 'general-purpose' } as never)
   expect(JSON.stringify(r)).toMatch(/Configured skills: writing-guide\./)
+})
+
+test('an always-on chat skill excluded in this project is not named in the system section', async ($, on) => {
+  const chat = JSON.stringify({ mode: 'enforce', skills: { 'terse:terse-mode': { always: true, for: 'chat', notIn: ['/work/proj'] } } })
+  world(on, { [USER_FILE]: chat })
+  on('prompt.compose', () => ({ sections: [] }))
+  await start($)
+  const r = await $.prompt.compose(COMPOSE)
+  const text = r.sections.find((s: { id: string }) => s.id === 'souffleur')?.text as string
+  expect(text).not.toMatch(/terse:terse-mode|Replies in this chat/)
+})
+
+test('the status line does not count a skill excluded in this project', async ($, on) => {
+  const cfg = JSON.stringify({ mode: 'enforce', skills: { 'ui-design': { always: true, notIn: ['/work/proj'] }, 'writing-guide': { always: true } } })
+  const w = world(on, { [USER_FILE]: cfg })
+  await start($)
+  await skillLoaded($, 'ui-design')
+  await skillLoaded($, 'writing-guide')
+  expect(w.statuses.at(-1)).toMatch(/^1 loaded/)
 })

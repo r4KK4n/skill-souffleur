@@ -5,7 +5,6 @@ import { audienceOf, neededSkills } from './needs.ts'
 import type { Proposal } from './proposals.ts'
 import { checkRules, contextNotes, ruleKind, ruleSkillNames } from './rules.ts'
 import { renderTable } from './status.ts'
-import { AUDIENCES } from './types.ts'
 import type { Audience, Config, NeedName, SkillName } from './types.ts'
 
 /** An open duty. `denied` is set once the duty has denied a call, so the retry passes. */
@@ -220,6 +219,7 @@ function onCompact(config: Config, s: Session, e: Extract<CoreEvent, { type: 'co
   return { ...s, ledger: compacted(s.ledger, e.now), compactedSincePrompt: true, notesSent: s.notesSent.filter((id) => !needNotes.has(id)) }
 }
 
+const ORDER: readonly Audience[] = ['readers', 'users', 'work', 'chat']
 const GROUP_SENTENCE: Record<Audience, string> = {
   chat: 'for your replies in this chat.',
   readers: 'for texts other people read (docs, issues, PRs, app copy). Not for your replies in this chat.',
@@ -229,13 +229,13 @@ const GROUP_SENTENCE: Record<Audience, string> = {
 
 /** The restore request for these skills: one line per audience, then the chat trailer, then `why`. */
 function restoreText(config: Config, names: readonly SkillName[], chat: readonly SkillName[], why: string): string {
-  const lines = AUDIENCES.flatMap((a) => {
+  const lines = ORDER.flatMap((a) => {
     const group = names.filter((n) => audienceOf(config, n) === a)
     return group.length ? [`- ${group.join(', ')}: ${GROUP_SENTENCE[a]}`] : []
   })
   const outward = names.some((n) => ['readers', 'users'].includes(audienceOf(config, n)))
   const trailer = chat.length && outward ? [`Your replies in this chat follow ${chat.join(', ')}.`] : []
-  return ['Souffleur: before anything else, invoke these skills with the Skill tool, one after another:', ...lines, ...trailer].join('\n') + (why ? `\n${why}` : '')
+  return ['Souffleur: before anything else, invoke these skills with the Skill tool, one after another:', ...lines, ...(why ? [why] : []), ...trailer].join('\n')
 }
 
 /**
@@ -387,7 +387,7 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
       const trusted = rule.from === 'user' || trustedRoot
       const state = next.ledger[name]?.state
       if (needed.includes(name) && state !== undefined && state !== 'loaded' && state !== 'unavailable') {
-        found.push({ text: `Souffleur: load ${name} with the Skill tool first, then retry. ${PAUSE_HINT}`, trusted })
+        found.push({ text: `Souffleur: load ${name} with the Skill tool first, then retry. ${name} is ${GROUP_SENTENCE[audienceOf(config, name)]} ${PAUSE_HINT}`, trusted })
       }
       const duty = next.duties.find((d) => d.skill === name)
       if (duty && !duty.denied && rule.duty) {

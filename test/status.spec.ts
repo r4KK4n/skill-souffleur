@@ -241,3 +241,24 @@ test('table: excluded skill shows its state text, needs without an audience get 
   assert.doesNotMatch(here, /^ui: no audience/m)
   assert.match(renderTable(c, s, T0, '/work/q'), /\| ui-design \| absent \|/)
 })
+
+test('status line leaves excluded skills out of the counts', () => {
+  const c: Config = { mode: 'enforce', trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true, needs: {}, skills: { a: { always: true, from: 'user', notIn: ['/work/p'] }, b: { always: true, from: 'user' } } }
+  let s = initSession(c, 's', T0, 'clear')
+  s = { ...s, ledger: skillLoaded(skillLoaded(s.ledger, 'a', T0, 'x'), 'b', T0, 'x') }
+  assert.equal(statusLine(s, 'enforce', 0, c, '/work/p/'), '1 loaded')
+  assert.equal(statusLine(s, 'enforce', 0, c, '/work/q'), '2 loaded')
+})
+
+test('needs without an audience: heading, and none for an untrusted project need', () => {
+  const c: Config = {
+    mode: 'enforce', trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true,
+    needs: { prose: { for: 'work', what: 'Text.', noAudience: true }, pn: { for: 'work', what: 'P.', noAudience: true } },
+    projectNeeds: ['pn'], skills: {},
+  }
+  const s = initSession(c, 's', T0, 'clear')
+  const t = renderTable(c, s, T0, '/work/p')
+  assert.match(t, /Needs without an audience:\nprose: no audience set, run \/souffleur init/)
+  assert.doesNotMatch(t, /pn: no audience/)
+  assert.match(renderTable({ ...c, trustProjects: ['/work/p'] }, s, T0, '/work/p'), /pn: no audience/)
+})

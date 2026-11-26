@@ -29,8 +29,9 @@ export function renderTable(config: Config, s: Session, now: number, root?: stri
   }
   const duties = s.duties.filter((d) => s.ledger[d.skill]?.state !== 'not installed here').map((d) => `- ${d.skill} (${d.by})`)
   if (duties.length) lines.push('', 'Open duties:', ...duties)
-  const bare = Object.entries(config.needs).filter(([, n]) => n.noAudience).map(([name]) => `${name}: no audience set, run /souffleur init`)
-  if (bare.length) lines.push('', ...bare)
+  const trusted = isTrustedRoot(config, root)
+  const bare = Object.entries(config.needs).filter(([name, n]) => n.noAudience && (trusted || !(config.projectNeeds ?? []).includes(name))).map(([name]) => `${name}: no audience set, run /souffleur init`)
+  if (bare.length) lines.push('', 'Needs without an audience:', ...bare)
   const needs = Object.entries(s.needs).map(([name, n]) => `- ${name} (since ${clock(n.since)})`)
   if (needs.length) lines.push('', 'Active needs:', ...needs)
   // Equal first sentences (per line, sorted) form one group, so a call that broke two checks stays apart from one that broke one.
@@ -63,10 +64,11 @@ export function renderTable(config: Config, s: Session, now: number, root?: stri
 }
 
 /** Short summary for the status line; undefined when no skill is configured. */
-export function statusLine(s: Session, mode: Mode, notesLeftOut = 0): string | undefined {
+export function statusLine(s: Session, mode: Mode, notesLeftOut = 0, config?: Config, root?: string): string | undefined {
   if (s.errors.length) return 'degraded, see /souffleur'
   const counts = { loaded: 0, restoring: 0, stale: 0, unavailable: 0, 'not installed here': 0 }
-  for (const e of Object.values(s.ledger)) {
+  for (const [name, e] of Object.entries(s.ledger)) {
+    if (config?.skills[name] !== undefined && excludedIn(config.skills[name]!, root)) continue
     if (e.state in counts) counts[e.state as keyof typeof counts] += 1
   }
   if (Object.keys(s.ledger).length === 0 && s.proposals.length === 0 && notesLeftOut === 0) return undefined

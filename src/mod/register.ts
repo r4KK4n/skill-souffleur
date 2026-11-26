@@ -160,7 +160,7 @@ async function persist($: Dollar, l: Loaded, s0: Session, quiet = false): Promis
   latest = s
   for (const line of lines) say($, l, line)
   // A broken file shows as degraded; only a clean start without a user file says "not set up".
-  $.ui.status(!l.setUp && !s.errors.length ? NOT_SET_UP : statusLine(s, l.config.mode, sectionNotes(l.config, l.root).leftOut.length))
+  $.ui.status(!l.setUp && !s.errors.length ? NOT_SET_UP : statusLine(s, l.config.mode, sectionNotes(l.config, l.root).leftOut.length, l.config, l.root))
   await $.state.set(REF, s)
   await $.store.set(`session:${s.id}`, s)
 }

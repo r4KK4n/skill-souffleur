@@ -1,4 +1,4 @@
-import { matches, matchesCommand, normRoot } from './config.ts'
+import { excludedIn, matches, matchesCommand, normRoot } from './config.ts'
 import type { Session } from './decide.ts'
 import type { Config, Match, Note, Rule, SkillName } from './types.ts'
 
@@ -60,6 +60,7 @@ export function checkRules(config: Config, s: Session, e: ToolEvent): RuleResult
   const base = e.tree ?? e.root
   for (const rule of config.rules) {
     if (!appliesHere(rule, e.root)) continue
+    if (rule.skill !== undefined && config.skills[rule.skill] !== undefined && excludedIn(config.skills[rule.skill]!, e.root)) continue
     const label = `Souffleur rule ${rule.id} (${describeRule(rule)})`
     switch (ruleKind(rule)) {
       case 'skill': {

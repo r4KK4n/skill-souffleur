@@ -278,7 +278,7 @@ Every skill shapes output for someone. Souffleur records who, and says it whenev
 
 `for` sits on a need (`"prose": { "for": "readers", "what": "A text people outside this chat will read …" }`), because the skills of one need share its deliverable. An `always` skill has no need and carries `for` itself. The old string form of a need still works and counts as `work`, with a status hint to run `/souffleur init`. `init` proposes `for` from the skill's description and warns when an always-on skill is `readers` or `users`.
 
-The load request groups skills by audience with a fixed sentence per value, for example: `writing-guide, writing-check: for texts other people read (docs, issues, PRs, app copy). Not for your replies in this chat.` When a `chat` skill is always on and the request holds a `readers` or `users` group, it ends with `Your replies in this chat follow <chat skill>.` The system prompt section says that each skill applies only to the output named with it, and names the `chat` skill.
+The load request groups skills by audience with a fixed sentence per value, for example: `writing-guide, writing-check: for texts other people read (docs, issues, PRs, app copy). Not for your replies in this chat.` Groups come in the order readers, users, work, chat, then the compaction sentence when it applies. When a `chat` skill is always on and the request holds a `readers` or `users` group, the last line is `Your replies in this chat follow <chat skill>.` The system prompt section says that each skill applies only to the output named with it, and names the `chat` skill.
 
 Needs start from the deliverable, not the topic:
 

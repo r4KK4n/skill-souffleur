@@ -707,10 +707,10 @@ test('restore request: one line per audience, fixed sentences, chat trailer', ()
   const text = ctx(decide(c, needsOn('prose', 'ui'), prompt('go on please now')).actions)
   assert.equal(text, [
     'Souffleur: before anything else, invoke these skills with the Skill tool, one after another:',
-    '- terse:terse-mode: for your replies in this chat.',
     '- writing-guide, writing-check: for texts other people read (docs, issues, PRs, app copy). Not for your replies in this chat.',
     '- ui-design: for what users of the product see (screens, pages, components). Not for your replies in this chat.',
     '- plain: for how you work on this task.',
+    '- terse:terse-mode: for your replies in this chat.',
     'Your replies in this chat follow terse:terse-mode.',
   ].join('\n'))
 })
@@ -720,15 +720,15 @@ test('restore request: no trailer without a readers or users group, no group lin
   const text = ctx(decide(c, needsOn(), prompt('go on please now')).actions)
   assert.equal(text, [
     'Souffleur: before anything else, invoke these skills with the Skill tool, one after another:',
-    '- terse:terse-mode: for your replies in this chat.',
     '- plain: for how you work on this task.',
+    '- terse:terse-mode: for your replies in this chat.',
   ].join('\n'))
 })
 
 test('restore after compaction keeps the compaction sentence after the groups', () => {
   const c = audienceConfig()
   const r = run(c, [loadSkill('plain'), compact(), prompt('next one please now')])
-  assert.match(ctx(r.out.at(-1)!), /\n- plain: for how you work on this task\.\n.*must not be run again does not apply/)
+  assert.match(ctx(r.out.at(-1)!), /\n- plain: for how you work on this task\.\n- terse:terse-mode: for your replies in this chat\.\n.*must not be run again does not apply to them: invoke them again\.$/)
 })
 
 test('restore request stays under RESTORE_LIMIT with groups and never splits a name', () => {
@@ -771,4 +771,30 @@ test('notIn: a skill excluded in this root is not requested, gated, or listed in
   // Elsewhere the skill counts as before.
   const e = decide(c, s0, { ...prompt('go on please now'), root: '/work/q' } as CoreEvent)
   assert.match(ctx(e.actions), /ui-design/)
+})
+
+test('restore: compaction sentence comes before the chat trailer, which is the last line', () => {
+  const c = audienceConfig()
+  const r = run(c, [loadSkill('writing-guide'), compact(), prompt('next one please now')], needsOn('prose'))
+  const lines = ctx(r.out.at(-1)!).split('\n')
+  assert.match(lines.at(-2)!, /must not be run again does not apply/)
+  assert.equal(lines.at(-1), 'Your replies in this chat follow terse:terse-mode.')
+})
+
+test('an always-on chat skill excluded in this root is not named in the trailer', () => {
+  const c = audienceConfig()
+  c.skills['terse:terse-mode'] = { always: true, for: 'chat', from: 'user', notIn: ['/work/p'] }
+  const text = ctx(decide(c, needsOn('prose'), { ...prompt('go on please now'), root: '/work/p' } as CoreEvent).actions)
+  assert.doesNotMatch(text, /terse:terse-mode|Your replies in this chat follow/)
+})
+
+test('gate denial names the audience of the skill', () => {
+  const c = cfg({
+    needs: { prose: { for: 'readers', what: 'Writing.' } },
+    skills: { 'writing-guide': { need: 'prose', from: 'user', gate: { tools: ['Write'], paths: ['**/*.md'] } } },
+  })
+  const s = { ...initSession(c, 's', 0, 'clear'), needs: { prose: { since: 0, reason: 't' } } }
+  const r = decide(c, s, tool('Write', { path: 'a.md' }))
+  const reason = (r.actions.find((x) => x.kind === 'deny') as { reason: string }).reason
+  assert.match(reason, /Souffleur: load writing-guide with the Skill tool first, then retry\. writing-guide is for texts other people read \(docs, issues, PRs, app copy\)\. Not for your replies in this chat\./)
 })
