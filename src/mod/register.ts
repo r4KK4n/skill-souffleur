@@ -444,12 +444,14 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
   const here = parseConfig(userSrc, projectSrc, l0.root)
   notes.push(...here.errors)
   // Raw keys, so an entry that failed validation is skipped as well.
-  const rawBlock = isRecord(userDoc) && isRecord(userDoc.projects) ? userDoc.projects[normRoot(l0.root)] : undefined
+  const rawKey = isRecord(userDoc) && isRecord(userDoc.projects) ? Object.keys(userDoc.projects).find((k) => normRoot(k) === normRoot(l0.root)) : undefined
+  const rawBlock = rawKey === undefined ? undefined : ((userDoc as Record<string, Record<string, unknown>>).projects[rawKey])
   const rawNames = (v: unknown): string[] => (isRecord(v) ? Object.keys(v) : [])
   const rawIds = (v: unknown): string[] => (Array.isArray(v) ? v.flatMap((x) => (isRecord(x) && typeof x.id === 'string' ? [x.id] : [])) : [])
   const skip = isRecord(rawBlock)
     ? [...(Array.isArray(rawBlock.block) ? rawBlock.block.filter((n): n is string => typeof n === 'string') : []), ...rawNames(rawBlock.skills), ...rawIds(rawBlock.notes), ...rawIds(rawBlock.rules)]
     : []
+  skip.push(...(here.config.project?.blocked ?? []), ...(here.config.project?.own ?? []))
   const projectSkills: Record<string, unknown> = Object.fromEntries(Object.entries(config.skills).filter(([, r]) => r.from === 'project'))
 
   const settings = await readSettings($, settingsPath, home)
@@ -811,7 +813,8 @@ async function runBlock($: Dollar, l0: Loaded, verb: 'block' | 'unblock', name: 
   const block: Record<string, unknown> = { ...(projects[key] as Record<string, unknown> | undefined) }
   if (block.block !== undefined && !(Array.isArray(block.block) && block.block.every((n) => typeof n === 'string'))) return `Souffleur: "block" for ${root} is not a list of names, so nothing was written.`
   const names: string[] = [...((block.block as string[] | undefined) ?? [])]
-  const std = standardNames(parseConfig(st.text, undefined).config)
+  const projectText = await readOptional($, `${l0.root}/.claude/souffleur.json`, [], home)
+  const std = standardNames(parseConfig(st.text, projectText === undefined ? undefined : stripBom(projectText)).config)
   if (!std.has(name) && !names.includes(name)) return `Souffleur: ${name} is not in your standard or this project's block.`
   if (verb === 'block') {
     if (names.includes(name)) return `Souffleur: ${name} is already blocked in ${root}.`
@@ -852,26 +855,32 @@ function standardNames(c: Config): Set<string> {
   return new Set([...Object.keys(c.skills), ...c.notes.map((n) => n.id), ...c.rules.map((r) => r.id)])
 }
 
-/** `/souffleur project`: the effective set here, one line per skill, note and rule id. */
+/** `/souffleur project`: what applies here, as a few short lines. Empty lines are left out. */
 async function runProject($: Dollar, l: Loaded): Promise<string> {
   const home: string | undefined = await $.env.get('HOME')
   const st = home ? await readState($, `${home}/.claude/souffleur.json`, home) : ({ kind: 'missing' } as FileState)
   const std = parseConfig(st.kind === 'ok' ? stripBom(st.text) : undefined, undefined).config
-  const p = l.config.project
-  const blocked = new Set(p?.blocked ?? [])
+  const c = l.config
+  const root = normRoot(l.root)
+  const p = c.project
   const own = new Set(p?.own ?? [])
-  const lines = [`Project: ${normRoot(l.root)}${p ? ` (block: ${p.blocked.length} blocked, ${p.own.length} own)` : ' (no block, the standard applies)'}`]
-  const row = (kind: string, id: string) => lines.push(`- ${kind} ${id}: ${blocked.has(id) ? 'blocked here' : 'standard'}`)
-  for (const name of Object.keys(std.skills)) row('skill', name)
-  for (const n of std.notes) row('note', n.id)
-  for (const r of std.rules) {
-    if (blocked.has(r.id)) row('rule', r.id)
-    else if (r.skill !== undefined && blocked.has(r.skill)) lines.push(`- rule ${r.id}: blocked here (its skill ${r.skill} is blocked)`)
-    else row('rule', r.id)
-  }
   const known = standardNames(std)
-  for (const name of p?.blocked ?? []) if (!known.has(name)) lines.push(`- ${name}: blocked here (not in standard)`)
-  for (const name of own) lines.push(`- ${name}: this project only`)
+  const blocked = (p?.blocked ?? []).map((n) => (known.has(n) ? n : `${n} (not in standard)`))
+  for (const r of std.rules) if (r.skill !== undefined && (p?.blockedSkills ?? []).includes(r.skill) && !(p?.blocked ?? []).includes(r.id)) blocked.push(`rule ${r.id} (its skill ${r.skill} is blocked)`)
+  const here = (where: string | undefined) => where === undefined || normRoot(where) === root
+  const userSkills = Object.entries(c.skills).filter(([n, r]) => r.from === 'user' && !own.has(n))
+  const offSkills = userSkills.filter(([, r]) => excludedIn(r, root)).map(([n]) => n)
+  const notes = c.notes.filter((n) => !own.has(n.id))
+  const rules = c.rules.filter((r) => !own.has(r.id))
+  const off = [...offSkills, ...notes.filter((n) => !here(n.where)).map((n) => n.id), ...rules.filter((r) => !here(r.where)).map((r) => r.id)]
+  const mine = [...(p?.own ?? [])].map((n) => `${n in c.skills ? 'skill' : c.notes.some((x) => x.id === n) ? 'note' : 'rule'} ${n}`)
+  const repo = Object.entries(c.skills).filter(([, r]) => r.from === 'project').map(([n]) => n)
+  const lines = [`Souffleur: project ${root}`]
+  if (blocked.length) lines.push(`Blocked here: ${blocked.join(', ')}`)
+  if (mine.length) lines.push(`This project only: ${mine.join(', ')}`)
+  if (off.length) lines.push(`Off here by notIn/where: ${off.join(', ')}`)
+  lines.push(`Standard: ${userSkills.length - offSkills.length} skills, ${notes.filter((n) => here(n.where)).length} notes, ${rules.filter((r) => here(r.where)).length} rules apply here`)
+  if (repo.length) lines.push(`Repository file: ${repo.join(', ')}`)
   return lines.join('\n')
 }
 
@@ -1367,6 +1376,7 @@ export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
     await safe($, 'session.start', undefined, async () => {
       loaded = undefined
+      backedUp = false // a session start is a fresh run: the first change saves a new backup
       const l = await getLoaded($)
       const id: string = await $.session.id()
       const version = (await $.session.version()).version
@@ -1391,7 +1401,7 @@ export const register: Register = (on) => {
     await pruneStore($, await $.session.id())
     await safe($, 'installed', undefined, () => refreshInstalled($))
     await safe($, 'command.register', undefined, async () => {
-      await $.command.register({ name: 'souffleur', description: 'Show which skills Souffleur keeps loaded', argumentHint: '[status | need <name> | drop <name> | pause | resume | init | migrate | rule <text> | review | accept <id> | decline <id>]' })
+      await $.command.register({ name: 'souffleur', description: 'Show which skills Souffleur keeps loaded', argumentHint: '[status | need <name> | drop <name> | pause | resume | init | migrate | rule <text> | review | accept <id> | decline <id> | block <name> | unblock <name> | project]' })
     })
     interactive = e.isInteractive === true
     lastPromptKind = undefined

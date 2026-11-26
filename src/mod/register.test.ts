@@ -633,7 +633,7 @@ test('the /souffleur command shows its arguments in the typeahead', async ($, on
   registeredCommands.length = 0
   world(on, { [USER_FILE]: ALWAYS })
   await start($)
-  expect(JSON.stringify(registeredCommands)).toContain('"argumentHint":"[status | need <name> | drop <name> | pause | resume | init | migrate | rule <text> | review | accept <id> | decline <id>]"')
+  expect(JSON.stringify(registeredCommands)).toContain('"argumentHint":"[status | need <name> | drop <name> | pause | resume | init | migrate | rule <text> | review | accept <id> | decline <id> | block <name> | unblock <name> | project]"')
 })
 
 // ---- review fixes ----
@@ -3021,18 +3021,56 @@ test('block stops when the file cannot be edited', async ($, on) => {
   expect(w.writes.length).toBe(0)
 })
 
-test('project lists the effective set, names not in the standard and rules dropped with their skill', async ($, on) => {
-  const user = JSON.stringify({ ...JSON.parse(BLOCKABLE), projects: { '/work/proj': { block: ['writing-guide', 'later-skill'], skills: { own: { always: true } }, notes: [{ id: 'n-own', text: 'Only here.' }] } } })
-  world(on, { [USER_FILE]: user })
+test('project shows the short form', async ($, on) => {
+  const user = JSON.stringify({
+    ...JSON.parse(BLOCKABLE),
+    skills: { ...JSON.parse(BLOCKABLE).skills, 'off-skill': { always: true, notIn: ['/work/proj'] } },
+    notes: [...JSON.parse(BLOCKABLE).notes, { id: 'n-far', text: 'Elsewhere.', where: '/elsewhere' }],
+    projects: { '/work/proj': { block: ['writing-guide', 'later-skill'], skills: { own: { always: true } }, notes: [{ id: 'n-own', text: 'Only here.' }] } },
+  })
+  world(on, { [USER_FILE]: user, [PROJECT_FILE]: JSON.stringify({ skills: { 'repo-a': { always: true } } }) })
   await start($)
-  const t = await run($, 'project')
-  expect(t).toMatch(/terse:terse-mode: standard/)
-  expect(t).toMatch(/writing-guide: blocked here/)
-  expect(t).toMatch(/later-skill: blocked here \(not in standard\)/)
-  expect(t).toMatch(/own: this project only/)
-  expect(t).toMatch(/n-own: this project only/)
-  expect(t).toMatch(/n-one: standard/)
-  expect(t).toMatch(/r-wg: blocked here \(its skill writing-guide is blocked\)/)
+  expect(await run($, 'project')).toBe(
+    [
+      'Souffleur: project /work/proj',
+      'Blocked here: writing-guide, later-skill (not in standard), rule r-wg (its skill writing-guide is blocked)',
+      'This project only: skill own, note n-own',
+      'Off here by notIn/where: off-skill, n-far',
+      'Standard: 1 skills, 1 notes, 0 rules apply here',
+      'Repository file: repo-a',
+    ].join('\n'),
+  )
+})
+
+test('project without a block says only what applies', async ($, on) => {
+  world(on, { [USER_FILE]: BLOCKABLE })
+  await start($)
+  expect(await run($, 'project')).toBe(['Souffleur: project /work/proj', 'Standard: 2 skills, 1 notes, 1 rules apply here'].join('\n'))
+})
+
+test('block accepts a skill only the repository file defines', async ($, on) => {
+  const w = world(on, { [USER_FILE]: BLOCKABLE, [PROJECT_FILE]: JSON.stringify({ skills: { 'repo-a': { always: true } } }) })
+  await start($)
+  expect(await run($, 'block repo-a')).toMatch(/repo-a blocked in/)
+  expect(JSON.parse(userWrites(w).at(-1)!.text).projects['/work/proj'].block).toEqual(['repo-a'])
+})
+
+test('a new session start saves a new backup, in any test order', async ($, on) => {
+  const w = world(on, { [USER_FILE]: BLOCKABLE })
+  await start($)
+  await run($, 'block writing-guide')
+  await start($)
+  await run($, 'unblock writing-guide')
+  expect(w.writes.filter((x) => /\.bak-\d+$/.test(x.path)).length).toBe(2)
+})
+
+test('init skips block names found under a root key with a trailing slash', async ($, on) => {
+  const user = JSON.stringify({ skills: { 'writing-guide': { always: true } }, projects: { '/work/proj/': { block: ['blocked-one'], skills: { 'own-ok': { always: true } } } } })
+  const w = world(on, { [USER_FILE]: user }, { skills: ['writing-guide', 'blocked-one', 'own-ok'], answers: ['From the start'] })
+  await start($)
+  const text = await run($, 'init')
+  expect(w.asked.length).toBe(1)
+  expect(text).not.toMatch(/blocked-one|own-ok/)
 })
 
 test('init leaves names of this root block out of its not-watched summary and skips raw block keys', async ($, on) => {
