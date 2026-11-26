@@ -214,6 +214,10 @@ A note has no trace and is never checked. A note without `need` goes into the sy
 
 Proposals wait in a queue. On `turn.complete`, if the queue is not empty and the session is interactive, Souffleur asks about the first one with `$.ui.ask`, Claude Code's own choice dialog: "Add rule: before Agent calls, dev-workflow is loaded?" with `Yes, everywhere`, `Yes, this project only`, `No`. The dialog shows the rule in its exact short form (`before Agent: skill dev-workflow loaded`), not a paraphrase. Text typed under "Other" goes to the main model in the next context block as a request to revise the proposal, whatever its source; the revision is asked about at a later turn end. One question per turn at most. A dismissed dialog leaves the proposal queued; `/souffleur` lists open proposals, and `/souffleur review` asks about them one by one. A declined proposal is remembered by its hash and not proposed again. Without an interactive surface (`claude -p`), or where `$.ui.ask` fails, nothing is asked: proposals stay queued, and `/souffleur review` and `/souffleur accept <id>` handle them in text. If the registered tool does not reach the model, the system prompt sentence about it is left out and `/souffleur rule` remains for the user's own rules.
 
+Sessions that Remote Control starts for the desktop and mobile apps run as SDK sessions and report `isInteractive: false`, although `$.ui.ask` reaches the person there. Souffleur therefore does not gate the question on `isInteractive`: it calls `$.ui.ask` at the end of every main-session answer while a proposal waits, and treats a rejection (nobody can answer, as under `claude -p`) as "no dialog here". A typed `/souffleur review` that cannot open its dialog inside the command queues the question for the end of the next turn.
+
+Where no dialog opens, Souffleur shows the waiting proposal as a notice: `Souffleur: proposal note-1a2b: <short form>. Reply "accept" or "decline".` The person's next prompt is checked before the model sees it. When its whole text, trimmed and lower-cased, is one of `accept`, `annehmen`, `ja`, `yes` or `decline`, `ablehnen`, `nein`, `no`, and it comes from the person (origin `composer` or `bridge`, never a peer, a subagent hand-back or the model), Souffleur applies it to the proposal it last showed, adds one line to the prompt's context saying so, and lets the prompt through. Any other text leaves the proposal waiting. `accept` means everywhere; `/souffleur accept <id> here` stays for one project.
+
 Confirmed rules and notes are written to the user file, `~/.claude/souffleur.json`, never to a project file, so what Souffleur learns about a user's way of working stays on their machine.
 
 #### Approaches considered
@@ -264,6 +268,9 @@ Without a dialog (`claude -p`), both commands print what they would ask, the con
 ### Status
 
 - `/souffleur` (or `/souffleur status`) prints the ledger: skill, state, since, reason, open duties.
+- Active needs show as `prose (since 05:27)`. The prompt excerpt that started a need goes to the debug log only.
+- "Would have denied" groups the entries by reason: `6× Agent brief without a "skills:" line (05:50–06:42)`, followed once by the full message of the newest entry.
+- A need ends by itself after 20 user prompts in a row that the classifier ran on and did not match to it. A need set with `/souffleur need` ends only with `/souffleur drop`. Ending a need writes a debug line, no notice.
 - The status line shows a short summary, for example `observe · 4 loaded, 1 restoring`. Claude Code puts the plugin name in front of it.
 - When the mod cannot read an event it expects (a renamed field, a missing event), the status line says `degraded, see /souffleur` and the command lists what failed.
 
