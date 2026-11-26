@@ -81,6 +81,8 @@ type Opts = {
   failLog?: boolean
   /** An Agent tool call stays open until this resolves, as a running subagent keeps it open. */
   holdAgent?: Promise<void>
+  /** A dialog never answers and never rejects, as in a session whose client does not show it. */
+  holdAsk?: boolean
 }
 
 /** Answers every call the mod makes on `$`; files maps an absolute path to its text, a missing path throws. */
@@ -206,6 +208,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
     asked.push(question)
     options.push(((e as unknown as { questions: { options?: ({ label: string } | string)[] }[] }).questions[0]!.options ?? []).map((o) => (typeof o === 'string' ? o : o.label)))
     opts.onAsk?.()
+    if (opts.holdAsk) return new Promise(() => {}) as never
     const label = answers.shift()
     if (opts.answers === 'reject' || label === undefined) throw new Error('nobody to ask')
     if (label === '__undefined__') return { result: { questions: [], answers: { [question]: undefined } } } as never
@@ -2323,4 +2326,81 @@ test('a prompt that starts a need writes the reason to the debug log only', asyn
   await $.prompt.submit({ text: 'build me a login screen' })
   expect(w.debugLogs.filter((l) => /need started: need:ui/.test(l))).toHaveLength(1)
   expect(w.logs.filter((l) => /need:ui/.test(l))).toEqual([])
+})
+
+// ---- hardening of the reply path (final review) ----
+test('a dialog nobody answers gives up after two minutes and shows the notice', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { holdAsk: true })
+  await start($)
+  const id = idOf(await propose($, note('Reply in German.')))
+  const t = turnEnd($)
+  await new Promise((r) => setTimeout(r, 50)) // let the turn end reach its dialog
+  await w.clock.advance(120_000)
+  await t
+  expect(w.logs.filter((l) => l.includes(`proposal ${id}`)).length).toBe(1)
+  await turnEnd($)
+  expect(w.asked.length).toBe(1)
+  await reply($, 'accept', COMPOSER)
+  expect(userFile(w).notes.length).toBe(1)
+})
+
+test('a throwing ui.log on a need-start prompt still delivers the restore context', async ($, on) => {
+  const w = world(on, { [USER_FILE]: UI }, { classify: 'match', failLog: true, skills: ['ui-checklist'] })
+  await start($)
+  const r = await $.prompt.submit({ text: 'build me a login screen' })
+  expect(r.context?.join('\n')).toMatch(/ui-checklist/)
+  expect(w.statuses.at(-1)).not.toMatch(/degraded/)
+})
+
+test('a reload while an offer is armed disarms it: accept does not act and the notice comes again', async ($, on) => {
+  const w = await armed($, on)
+  await start($)
+  await reply($, 'accept', COMPOSER)
+  expect(w.writes.length).toBe(0)
+  await turnEnd($)
+  expect(w.logs.filter((l) => l.includes('Reply "accept"')).length).toBe(2)
+  await reply($, 'accept', COMPOSER)
+  expect(userFile(w).notes.length).toBe(1)
+})
+
+test('a prompt handled as a reply is not classified', async ($, on) => {
+  const file = JSON.stringify({ mode: 'enforce', skills: {}, needs: { ui: 'Designing something a user sees.' } })
+  const w = world(on, { [USER_FILE]: file }, { answers: 'reject', classify: 'no-match' })
+  await start($)
+  await propose($, note('Reply in German.'))
+  await turnEnd($)
+  const before = w.classifyCalls()
+  await reply($, 'accept', COMPOSER)
+  expect(userFile(w).notes.length).toBe(1)
+  expect(w.classifyCalls()).toBe(before)
+})
+
+test('the notice names the command where the session takes no reply (sdk prompt, not interactive)', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: false })
+  const id = idOf(await propose($, note('Reply in German.')))
+  await $.prompt.submit({ text: 'hello', origin: { kind: 'sdk' } } as never)
+  await turnEnd($)
+  const line = w.logs.filter((l) => l.includes(`proposal ${id}`)).at(-1)!
+  expect(line).toContain(`/souffleur accept ${id}`)
+  expect(line).not.toContain('Reply "accept"')
+})
+
+test('the notice keeps the reply words over Remote Control (bridge prompt, not interactive)', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: false })
+  const id = idOf(await propose($, note('Reply in German.')))
+  await $.prompt.submit({ text: 'hello', origin: { kind: 'bridge' } } as never)
+  await turnEnd($)
+  expect(w.logs.filter((l) => l.includes(`proposal ${id}`)).at(-1)).toContain('Reply "accept"')
+})
+
+test('a failure after the answer was written still tells the model', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', onWrite: (path) => { if (path === USER_FILE) on('session.id', () => { throw new Error('gone') }) } })
+  await start($)
+  const id = idOf(await propose($, note('Reply in German.')))
+  await turnEnd($)
+  await reply($, 'accept', COMPOSER)
+  expect(w.writes.length).toBe(1)
+  expect(hasLine(w, `proposal ${id}`)).toBe(true)
 })

@@ -183,7 +183,8 @@ export function parseReply(text: string): 'accept' | 'decline' | undefined {
 }
 
 /** The notice that shows a waiting proposal where no dialog opens; the same caution as the dialog for a text read from a skill. */
-export function proposalNotice(p: Proposal): string {
+export function proposalNotice(p: Proposal, form: 'reply' | 'command' = 'reply'): string {
   const caution = p.from.startsWith('skill:') ? " (read from a skill's text, not verified)" : ''
-  return `Souffleur: proposal ${p.entry.id}${caution}: ${describeProposal(p).replace(/\.$/, '')}. Reply "accept" (everywhere) or "decline".`
+  const how = form === 'command' ? `Run /souffleur accept ${p.entry.id} or /souffleur decline ${p.entry.id}.` : 'Reply "accept" (everywhere) or "decline".'
+  return `Souffleur: proposal ${p.entry.id}${caution}: ${describeProposal(p).replace(/\.$/, '')}. ${how}`
 }

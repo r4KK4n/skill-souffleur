@@ -45,6 +45,10 @@ let shownHash: string | undefined
 let askAtTurnEnd = false
 /** `$.ui.ask` rejected in this session: nobody can answer a dialog, so waiting proposals are shown as notices. */
 let noDialog = false
+/** The origin kind of the last prompt of the person; under `claude -p` that is `sdk`, and no later prompt can carry a reply. */
+let lastPromptKind: string | undefined
+/** How long the dialog at a turn end may stay open before it counts as a rejection. */
+const ASK_WAIT_MS = 120_000
 /** The proposals a notice showed (kept after the offer ended), so each proposal gets one notice. */
 const noticed = new Set<string>()
 
@@ -839,7 +843,9 @@ async function commitAnswerNow($: Dollar, hash: string, label: string): Promise<
 /** Shows the first waiting proposal that no notice showed yet. A reply may answer only what was written to the transcript, so the offer is armed only then. */
 function noticeFirst($: Dollar, l: Loaded, session: Session): void {
   const p = session.proposals.find((x) => !noticed.has(x.hash))
-  if (p === undefined || !say($, l, proposalNotice(p))) return
+  // A session that takes no person prompt (`claude -p`) cannot be answered by a reply word: name the command.
+  const form = !interactive && lastPromptKind === 'sdk' ? 'command' : 'reply'
+  if (p === undefined || !say($, l, proposalNotice(p, form))) return
   shownHash = p.hash
   noticed.add(p.hash)
 }
@@ -851,7 +857,9 @@ async function askFirst($: Dollar, atTurnEnd = false): Promise<string | undefine
   if (!q) return undefined
   let label: unknown
   try {
-    label = await $.ui.ask(q.question, { options: q.options, header: 'Souffleur' })
+    const asking = $.ui.ask(q.question, { options: q.options, header: 'Souffleur' })
+    // At a turn end a client that shows no dialog may never answer: after two minutes it counts as a rejection.
+    label = atTurnEnd ? await Promise.race([asking, $.clock.sleep(ASK_WAIT_MS).then(() => Promise.reject(new Error('no answer')))]) : await asking
   } catch {
     if (atTurnEnd) {
       // Nobody can answer a dialog here: show the proposal once and let a one-word reply answer it.
@@ -885,15 +893,20 @@ async function answerShown($: Dollar, text: string): Promise<string | undefined>
   const line = await commitAnswer($, hash, verdict === 'accept' ? YES_EVERYWHERE : NO)
   askAtTurnEnd = true // the next waiting proposal gets its question or notice at the next turn end
   try {
-    $.ui.toast(line)
+    try {
+      $.ui.toast(line)
+    } catch {
+      say($, l, line)
+    }
+    const { l: l3, session: after } = await current($)
+    const active = [...l3.config.rules, ...l3.config.notes].some((x) => x.id === id)
+    if (verdict === 'accept' && !after.proposals.some((x) => x.hash === hash) && !active) return `Souffleur: the user accepted proposal ${id}, but the reader did not keep the entry; it is not active. Tell the user to check ~/.claude/souffleur.json.`
+    if (after.proposals.some((x) => x.hash === hash)) return `Souffleur: the user tried to ${verdict} proposal ${id}, but it could not be written; it stays queued. Do not retry it.`
+    return `Souffleur: the user ${verdict === 'accept' ? 'accepted' : 'declined'} proposal ${id}; nothing else to do for it.`
   } catch {
-    say($, l, line)
+    // The answer was committed; the model must not think nothing happened.
+    return `Souffleur: the user answered proposal ${id} with ${verdict}, and the answer was handled, but Souffleur could not check the result. Do not retry it; tell the user to check ~/.claude/souffleur.json.`
   }
-  const { l: l3, session: after } = await current($)
-  const active = [...l3.config.rules, ...l3.config.notes].some((x) => x.id === id)
-  if (verdict === 'accept' && !after.proposals.some((x) => x.hash === hash) && !active) return `Souffleur: the user accepted proposal ${id}, but the reader did not keep the entry; it is not active. Tell the user to check ~/.claude/souffleur.json.`
-  if (after.proposals.some((x) => x.hash === hash)) return `Souffleur: the user tried to ${verdict} proposal ${id}, but it could not be written; it stays queued. Do not retry it.`
-  return `Souffleur: the user ${verdict === 'accept' ? 'accepted' : 'declined'} proposal ${id}; nothing else to do for it.`
 }
 
 /** Queues a proposal. `from` is `slip` or `user`. */
@@ -1202,6 +1215,7 @@ export const register: Register = (on) => {
       await $.command.register({ name: 'souffleur', description: 'Show which skills Souffleur keeps loaded', argumentHint: '[status | need <name> | drop <name> | pause | resume | init | migrate | rule <text> | review | accept <id> | decline <id>]' })
     })
     interactive = e.isInteractive === true
+    lastPromptKind = undefined
     askStopped = false
     shownHash = undefined
     noticed.clear()
@@ -1243,6 +1257,7 @@ export const register: Register = (on) => {
 
   on('prompt.submit', async ($, e, next) => {
     const fromUser = isFromUser(e)
+    if (fromUser) lastPromptKind = e.origin?.kind
     if (fromUser) await safe($, 'tool.reconnect', undefined, () => reconnectTool($))
     // Only a prompt of the person (composer or bridge, no command) answers; any prompt of the person ends the offer.
     if (e.command !== undefined && isUserOrigin(e)) shownHash = undefined
@@ -1253,7 +1268,7 @@ export const register: Register = (on) => {
       // A need only the project file defines counts for a trusted root alone; nothing is classified while paused.
       const trusted = isTrustedRoot(config, l.root)
       const needs = Object.fromEntries(Object.entries(config.needs).filter(([name]) => trusted || !(config.projectNeeds ?? []).includes(name)))
-      const classify = fromUser && !session.paused && Object.keys(needs).length > 0
+      const classify = fromUser && answered === undefined && !session.paused && Object.keys(needs).length > 0
       // The skill listing runs beside the classification and gives up after its own short budget.
       const listing = fromUser ? safe($, 'installed', undefined, () => refreshInstalled($)) : undefined
       const verdict = classify
@@ -1266,7 +1281,14 @@ export const register: Register = (on) => {
         : undefined
       await listing
       const { actions } = await apply($, (l2) => ({ type: 'prompt', now: now(), text: e.text, fromUser, matched: verdict?.matched ?? [], root: l2.root, ...(verdict === undefined ? {} : { classifierFailed: verdict.failed }) }))
-      for (const a of actions) if (a.kind === 'debug') $.ui.log(a.text, { to: 'debug' })
+      for (const a of actions) {
+        if (a.kind !== 'debug') continue
+        try {
+          $.ui.log(a.text, { to: 'debug' })
+        } catch {
+          // a debug line is a courtesy; the restore context below must still reach the model
+        }
+      }
       return actions.flatMap((a) => (a.kind === 'context' ? [a.text] : []))
     })
     if (answered !== undefined) texts.push(answered)

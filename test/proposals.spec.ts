@@ -164,6 +164,7 @@ test('the notice carries the reply hint and the caution for a skill text', () =>
   const p = prop({ kind: 'note', text: 'Reply in German.' }, 'user')
   assert.equal(proposalNotice(p), `Souffleur: proposal ${p.entry.id}: ${describeProposal(p).replace(/\.$/, '')}. Reply "accept" (everywhere) or "decline".`)
   assert.doesNotMatch(proposalNotice(p), /\.\./)
+  assert.equal(proposalNotice(p, 'command'), `Souffleur: proposal ${p.entry.id}: ${describeProposal(p).replace(/\.$/, '')}. Run /souffleur accept ${p.entry.id} or /souffleur decline ${p.entry.id}.`)
   const q = { ...p, from: 'skill:writing-guide' }
   assert.match(proposalNotice(q), /read from a skill's text, not verified/)
 })
