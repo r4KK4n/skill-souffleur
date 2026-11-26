@@ -6,8 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
-- When the small model fails to pick a work need three prompts in a row, the status now shows `degraded, see /souffleur` and the fallback line lists the work needs, as it already did when the first classifier call fails. A good answer clears it (#57).
-- A failing step is announced once per session, even if it clears and comes back, and each failing step gets its own line with its own newest error. "Back to normal" no longer repeats while a problem flaps. `/souffleur` shows `Failures this session: tool.call 3, ...` so a failure that cleared stays countable (#48).
+- When the small model fails to pick a work need three prompts in a row, the status now shows `degraded, see /souffleur` and the fallback line lists the work needs (on prompts the first classifier call called code work), as it already did when the first classifier call fails. A good answer clears it (#57).
+- A failing step is told at most twice per session, the second time after a "back to normal" and marked "(again)"; each failing step gets its own line with its own newest error, and "back to normal" is not lost when one step flaps while another holds. `/souffleur` shows `Failures this session: tool.call 3, classifier B 1, ...` so a failure that cleared stays countable, including the first classifier call, the second one and learning (#48).
 
 ## [0.1.7] - 2026-11-26
 

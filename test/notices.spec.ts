@@ -143,7 +143,7 @@ test('notices false gives no lines', () => {
   const before = loadedBoth()
   const r = notices(off, before, { ...cutOf(before), errors: ['boom'] })
   assert.deepEqual(r.lines, [])
-  assert.deepEqual(r.session.noticed, { cut: ['writing-guide', 'writing-check'], problems: ['degraded:boom'], told: ['degraded:boom'] })
+  assert.deepEqual(r.session.noticed, { cut: ['writing-guide', 'writing-check'], problems: ['degraded:boom'], tells: { 'degraded:boom': 1 } })
 })
 
 test('a loaded skill that is not needed is not named in the cut line and does not stick', () => {
@@ -196,18 +196,53 @@ test('a skill excluded in this root is not counted as cut', () => {
 
 const withErrors = (s: Session, errors: string[]): Session => ({ ...s, errors })
 
-test('a step that fails, clears and fails again 10 times gives one degraded line and one back to normal', () => {
-  let s = fresh()
-  const lines: string[] = []
-  for (let i = 0; i < 10; i++) {
-    for (const errors of [['tool.call: boom'], []]) {
-      const r = notices(config, s, withErrors(s, errors))
-      lines.push(...r.lines)
-      s = r.session
-    }
+const play = (steps: string[][], start = fresh()) => {
+  let s = start
+  const per: string[][] = []
+  for (const errors of steps) {
+    const r = notices(config, s, withErrors(s, errors))
+    per.push(r.lines)
+    s = r.session
   }
-  assert.equal(lines.filter((l) => /degraded/.test(l)).length, 1, lines.join('\n'))
-  assert.equal(lines.filter((l) => /back to normal/.test(l)).length, 1, lines.join('\n'))
+  return { s, per, lines: per.flat() }
+}
+
+test('a step that fails and clears 10 times is told twice at most, the second time with (again), and back to normal twice', () => {
+  const r = play(Array.from({ length: 10 }, () => [['tool.call: boom'], []]).flat())
+  assert.deepEqual(r.lines, [
+    'Souffleur: degraded: tool.call: boom. Details: /souffleur.',
+    'Souffleur: back to normal.',
+    'Souffleur: degraded: tool.call: boom (again). Details: /souffleur.',
+    'Souffleur: back to normal.',
+  ])
+})
+
+test('a silent third return does not give a back to normal by itself', () => {
+  const r = play([['a: x'], [], ['a: x'], [], ['a: x'], []])
+  assert.equal(r.lines.filter((l) => /back to normal/.test(l)).length, 2, r.lines.join('\n'))
+  assert.deepEqual(r.per.at(-1), [])
+})
+
+test('back to normal is not lost when one step flaps while another holds', () => {
+  const r = play([['a: x', 'b: y'], ['b: y'], ['b: y', 'a: x'], ['a: x'], []])
+  assert.deepEqual(r.lines, [
+    'Souffleur: degraded: a: x. Details: /souffleur.',
+    'Souffleur: degraded: b: y. Details: /souffleur.',
+    'Souffleur: back to normal.',
+  ])
+})
+
+test('the again suffix goes before the final period of any line', () => {
+  const c: Config = { ...config, skills: { ...config.skills } }
+  const withMissing = (s: Session, state: 'unavailable' | 'absent'): Session => ({ ...s, ledger: { ...s.ledger, 'writing-guide': { ...s.ledger['writing-guide']!, state } } })
+  let s = fresh(c)
+  const r1 = notices(c, s, withMissing(s, 'unavailable'))
+  assert.deepEqual(r1.lines, ['Souffleur: writing-guide did not load after two requests.'])
+  const r2 = notices(c, r1.session, withMissing(r1.session, 'absent'))
+  assert.deepEqual(r2.lines, ['Souffleur: back to normal.'])
+  const r3 = notices(c, r2.session, withMissing(r2.session, 'unavailable'))
+  assert.deepEqual(r3.lines, ['Souffleur: writing-guide did not load after two requests (again).'])
+  assert.deepEqual(r3.session.noticed?.tells?.['missing:writing-guide'], 2)
 })
 
 test('two failing steps each get a line, and a line names only an error that holds', () => {
@@ -216,7 +251,7 @@ test('two failing steps each get a line, and a line names only an error that hol
   assert.deepEqual(r1.lines, ['Souffleur: degraded: tool.call: first. Details: /souffleur.', 'Souffleur: degraded: classifier: second. Details: /souffleur.'])
   const r2 = notices(config, r1.session, withErrors(r1.session, ['classifier: second']))
   assert.deepEqual(r2.lines, [], 'tool.call cleared, classifier is still the same problem')
-  assert.deepEqual(r2.session.noticed?.problems, ['degraded:classifier'])
+  assert.deepEqual(r2.session.noticed?.problems, ['degraded:tool.call', 'degraded:classifier'])
   const r3 = notices(config, r2.session, withErrors(r2.session, []))
   assert.deepEqual(r3.lines, ['Souffleur: back to normal.'])
 })
@@ -234,8 +269,12 @@ test('back to normal waits for the last told problem', () => {
   assert.deepEqual(notices(config, r2.session, withErrors(r2.session, [])).lines, ['Souffleur: back to normal.'])
 })
 
-test('a session stored by 0.1.7 (no told list) loads', () => {
-  const stored: Session = { ...fresh(), errors: ['tool.call: boom'], noticed: { cut: [], problems: ['degraded'] } }
+test('a session stored by 0.1.7 (no tells) loads: carried-over keys are not told again, a new degraded step is', () => {
+  const stored: Session = { ...fresh(), errors: ['tool.call: boom'], version: '99.0.0', ledger: { ...fresh().ledger, 'writing-guide': { ...fresh().ledger['writing-guide']!, state: 'unavailable' } }, noticed: { cut: [], problems: ['missing:writing-guide', 'version', 'degraded'] } }
+  assert.equal(stored.noticed?.tells, undefined)
   const r = notices(config, stored, stored)
+  assert.deepEqual(r.lines, ['Souffleur: degraded: tool.call: boom. Details: /souffleur.'])
   assert.deepEqual(r.session.noticed?.problems.includes('degraded:tool.call'), true)
+  assert.equal(r.session.noticed?.tells?.['missing:writing-guide'], 1)
+  assert.deepEqual(notices(config, r.session, r.session).lines, [])
 })

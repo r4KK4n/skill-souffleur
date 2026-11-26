@@ -77,15 +77,23 @@ export function notices(config: Config, before: Session, after: Session, root?: 
     nextCut = []
   }
 
-  // A key told once in a session is never told again. `problems` holds the told keys that hold now and were not
-  // already gone once, so a flapping problem gives one line and at most one `back to normal.`.
+  // A key is told at most twice a session: the second time only after a `back to normal`, with ` (again)`. A third
+  // return is silent and never counts as a told problem. `problems` holds the told keys of this round; it is
+  // emptied when nothing holds, so a step that clears while another still holds does not lose that `back to normal`.
   const now = problemKeys(config, after, root)
-  const told = was.told ?? was.problems
-  const fresh = [...now.keys()].filter((key) => !told.includes(key))
-  for (const key of fresh) lines.push(now.get(key)!)
-  const problems = [...was.problems.filter((key) => now.has(key)), ...fresh.filter((key) => !was.problems.includes(key))]
+  const tells: Record<string, number> = { ...(was.tells ?? Object.fromEntries(was.problems.map((key) => [key, 1]))) }
+  const told: string[] = []
+  for (const [key, line] of now) {
+    const n = tells[key] ?? 0
+    if (n === 0 || (n === 1 && !was.problems.includes(key))) {
+      lines.push(n === 0 ? line : line.replace(/\.( Details: \/souffleur\.)?$/, (_, details: string | undefined) => ` (again).${details ?? ''}`))
+      tells[key] = n + 1
+      told.push(key)
+    }
+  }
+  const problems = now.size === 0 ? [] : [...new Set([...was.problems, ...told])]
   if (was.problems.length > 0 && now.size === 0) lines.push(`${PREFIX}back to normal.`)
 
-  const session: Session = { ...after, noticed: { cut: nextCut, problems, told: [...told, ...fresh] } }
+  const session: Session = { ...after, noticed: { cut: nextCut, problems, tells } }
   return { lines: config.notices === false ? [] : lines, session }
 }

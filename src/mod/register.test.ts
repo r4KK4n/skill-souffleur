@@ -2557,6 +2557,18 @@ test('three failed call B runs in a row show degraded in the status', async ($, 
   expect(w.statuses.at(-1)).toMatch(/degraded/)
 })
 
+test('three failing call B runs then a good one (A says code work): status clears, /souffleur keeps the count', async ($, on) => {
+  let bGood = false
+  const w = world(on, { [USER_FILE]: JSON.stringify({ skills: { g: { need: 'n' } }, needs: { n: { for: 'work', what: 'Something.' } } }) }, { classify: (labels) => (labels?.includes('chat-reply') ? 'code-or-repo-work' : bGood ? 'n' : 'banana') })
+  await start($)
+  for (let i = 0; i < 3; i++) await $.prompt.submit({ text: 'one two three four' })
+  expect(w.statuses.at(-1)).toMatch(/degraded/)
+  bGood = true
+  await $.prompt.submit({ text: 'one two three four' })
+  expect(w.statuses.at(-1)).not.toMatch(/degraded/)
+  expect(await table($)).toMatch(/^Failures this session: classifier B 1$/m)
+})
+
 // --- Reply check ---
 
 const REPLY_CFG = JSON.stringify({ mode: 'enforce', skills: { 'terse:terse-mode': { always: true, for: 'chat', reply: { maxChars: 200, headings: 0 } } } })

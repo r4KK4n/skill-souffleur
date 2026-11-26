@@ -61,7 +61,7 @@ export type Session = {
   /** When this copy was stored last, so old copies in the plugin store can be removed. */
   touched?: number
   /** What notices already told the user: skills cut by compaction, and problem keys shown. */
-  noticed?: { cut: SkillName[]; problems: string[]; /** Every problem key whose line was told in this session; never told again. */ told?: string[] }
+  noticed?: { cut: SkillName[]; problems: string[]; /** How often each problem key's line was told in this session (at most 2: the second after a back to normal). */ tells?: Record<string, number> }
   /** Failures per step (`error` events by `where`) in this session, kept after the error cleared and over reload and resume. */
   failCounts?: Record<string, number>
   /** The reply check of the chat skill: replies checked, replies over the limit, user prompts since the last reminder, and the reminder waiting for a prompt. */
@@ -158,7 +158,10 @@ function track(s: Session, key: 'classifyFails' | 'workFails' | 'learnFails', pr
   const has = s.errors.some((m) => m.startsWith(prefix))
   if (!failed) return (s[key] ?? 0) === 0 && !has ? s : { ...s, [key]: 0, errors: s.errors.filter((m) => !m.startsWith(prefix)) }
   const n = (s[key] ?? 0) + 1
-  return { ...s, [key]: n, errors: n >= FAIL_LIMIT && !has ? lastN(s.errors, `${prefix}${message}`) : s.errors }
+  if (n < FAIL_LIMIT || has) return { ...s, [key]: n }
+  // The third failure in a row records the error and counts once for the session.
+  const step = prefix.replace(/: $/, '')
+  return { ...s, [key]: n, errors: lastN(s.errors, `${prefix}${message}`), failCounts: { ...s.failCounts, [step]: (s.failCounts?.[step] ?? 0) + 1 } }
 }
 
 export function decide(config: Config, s: Session, e: CoreEvent): Result {
@@ -396,7 +399,10 @@ function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'pro
     return true
   }
   if (r?.text !== undefined) add(r.text)
-  if (((next.classifyFails ?? 0) >= FAIL_LIMIT || (next.workFails ?? 0) >= FAIL_LIMIT) && !s.paused) {
+  // A failed call A hides every need; a failed call B hides only the work needs, and only a prompt A called code work needs them.
+  const aDown = (next.classifyFails ?? 0) >= FAIL_LIMIT
+  const bDown = !aDown && (next.workFails ?? 0) >= FAIL_LIMIT && e.deliverable === 'code-or-repo-work'
+  if ((aDown || bDown) && !s.paused) {
     const listed = Object.entries(config.needs)
       .filter(([name, n]) => n.for === 'work' && !(name in next.needs) && (trusted || !(config.projectNeeds ?? []).includes(name)))
       .map(([name, n]) => {
@@ -406,7 +412,7 @@ function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'pro
         return skills.length ? `${name} (${n.what}): ${skills.join(', ')}` : ''
       })
       .filter(Boolean)
-    if (listed.length) add(`Souffleur cannot classify prompts right now. If this prompt starts one of these, invoke its skills first: ${listed.join('; ')}`)
+    if (listed.length) add(`Souffleur cannot ${aDown ? 'classify prompts' : 'pick a work need'} right now. If this prompt starts one of these, invoke its skills first: ${listed.join('; ')}`)
   }
   const notes = contextNotes(config, next, e.root).kept
   if (notes.length && add(`Souffleur notes from the user's config:\n${notes.map((n) => `- ${n.text}`).join('\n')}`)) {
