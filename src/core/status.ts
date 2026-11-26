@@ -35,7 +35,7 @@ export function renderTable(config: Config, s: Session, now: number, root?: stri
     .filter(([name, r]) => r.always === true && r.for === undefined && !excludedIn(r, root) && s.ledger[name]?.state !== 'not installed here' && (trusted || r.from !== 'project'))
     .map(([name]) => `${name}: always on without "for"; add "for": "chat" if it shapes your replies in this chat`)
   if (bare.length || bareAlways.length) lines.push('', 'Audience not set:', ...bare, ...bareAlways)
-  const needs = Object.entries(s.needs).map(([name, n]) => `- ${name} (since ${clock(n.since)})`)
+  const needs = Object.entries(s.needs).map(([name, n]) => `- ${name} (since ${clock(n.since)}${n.dormant ? ', waiting since compaction' : ''})`)
   if (needs.length) lines.push('', 'Active needs:', ...needs)
   // Equal first sentences (per line, sorted) form one group, so a call that broke two checks stays apart from one that broke one.
   const groups = new Map<string, { n: number; first: number; last: number; newest: string; newestAt: number }>()

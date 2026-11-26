@@ -65,10 +65,10 @@ export async function classifyDeliverable(
 }
 
 /** Skills with `always`, plus skills whose `need` is active, in config order, then `extra` (skills a rule fired or saw loaded). */
-export function neededSkills(config: Config, active: Record<NeedName, unknown>, extra: readonly SkillName[] = [], root?: string): SkillName[] {
+export function neededSkills(config: Config, active: Record<NeedName, { dormant?: boolean }>, extra: readonly SkillName[] = [], root?: string): SkillName[] {
   const here = (name: string) => config.skills[name] === undefined || !excludedIn(config.skills[name]!, root)
   const named = Object.entries(config.skills)
-    .filter(([, rule]) => rule.always === true || (rule.need !== undefined && rule.need in active && !(active[rule.need] as { dormant?: boolean } | undefined)?.dormant))
+    .filter(([, rule]) => rule.always === true || (rule.need !== undefined && rule.need in active && !active[rule.need]!.dormant))
     .map(([name]) => name)
     .filter(here)
   return [...named, ...extra.filter((name) => !named.includes(name) && here(name))]

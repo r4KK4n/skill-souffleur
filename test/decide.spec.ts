@@ -158,7 +158,7 @@ test('gate denies Write to x.html while ui-checklist is needed and stale, allows
   assert.equal(s0.ledger['ui-checklist']!.state, 'stale')
   const denied = denies(one(base, [tool('Write', { path: 'x.html' })], s0))
   assert.equal(denied.length, 1)
-  assert.match((denied[0] as { reason: string }).reason, /load ui-checklist with the Skill tool first, then retry\. .*\/souffleur pause/)
+  assert.match((denied[0] as { reason: string }).reason, /ui-checklist.*\/souffleur pause/s)
   const ok = run(base, [loadSkill('ui-checklist'), tool('Write', { path: 'x.html' })], s0)
   assert.deepEqual(ok.out[1], [])
   assert.deepEqual(denies(one(base, [tool('Write', { path: 'x.ts' })], s0)), [])
@@ -316,17 +316,16 @@ test('observe mode: gate, duty and Agent-brief checks deny nothing and record wo
   const config = cfg({ mode: 'observe' })
   const s0 = run(config, [prompt('screen', ['ui']), loadSkill('ui-checklist'), compact()]).s
   const r = run(config, [
-    tool('Write', { path: 'a.html' }), // gate: stale
+    tool('Write', { path: 'a.html' }), // wakes the dormant need: toolContext, not recorded
     loadSkill('ui-checklist'),
     tool('Write', { path: 'a.html' }), // opens duty
     tool('Write', { path: 'b.html' }), // duty
     tool('Agent', { brief: 'nothing' }), // brief
   ], s0)
   assert.deepEqual(r.out.flatMap(denies), [])
-  assert.equal(r.s.observed.length, 3)
-  assert.match(r.s.observed[0]!.reason, /load ui-checklist/)
-  assert.match(r.s.observed[1]!.reason, /open duty/)
-  assert.match(r.s.observed[2]!.reason, /skills:/)
+  assert.equal(r.s.observed.length, 2)
+  assert.match(r.s.observed[0]!.reason, /open duty/)
+  assert.match(r.s.observed[1]!.reason, /skills:/)
 })
 
 test('observe mode still sends the restore context', () => {
@@ -898,6 +897,8 @@ const evCfg = (patch: Partial<Config> = {}): Config => cfg({
   ...patch,
 })
 const bash = (command: string, extra: Partial<Extract<CoreEvent, { type: 'tool' }>> = {}): CoreEvent => tool('Bash', { command, ...extra })
+/** What the call said about skills: the deny reason (enforce) or the toolContext text (observe). */
+const said = (a: Action[]): string => a.map((x) => (x.kind === 'deny' ? x.reason : x.kind === 'toolContext' ? x.text : '')).join('\n')
 const sessionWith = (c: Config, needs: Session['needs']): Session => ({ ...initSession(c, 's', 0, 'clear'), needs })
 
 test('evidence: a gate-path call starts the users need and asks for its skill', () => {
@@ -905,7 +906,7 @@ test('evidence: a gate-path call starts the users need and asks for its skill', 
   const r = decide(c, initSession(c, 's', 0, 'clear'), tool('Write', { path: 'src/page.html' }))
   assert.match(r.session.needs.ui!.reason, /^tool: Write src\/page\.html/)
   assert.equal(r.session.ledger['ui-design']!.requests, 1)
-  assert.match((r.actions.find((a) => a.kind === 'toolContext') as { text: string }).text, /ui-design/)
+  assert.match(said(r.actions), /ui-design/)
 })
 
 test('evidence: gate-path call in enforce mode denies until the skill is loaded', () => {
@@ -920,7 +921,7 @@ test('evidence: gh issue comment starts readers, not users', () => {
   const r = decide(c, initSession(c, 's', 0, 'clear'), bash('gh issue comment 12 --body x'))
   assert.match(r.session.needs.prose!.reason, /^tool: Bash gh issue comment/)
   assert.equal('ui' in r.session.needs, false)
-  assert.match((r.actions.find((a) => a.kind === 'toolContext') as { text: string }).text, /writing-guide/)
+  assert.match(said(r.actions), /writing-guide/)
 })
 
 test('evidence: each listed command starts readers', () => {
@@ -947,7 +948,7 @@ test('evidence: a need already active is only refreshed, not requested again', (
   assert.equal(r.session.needs.prose!.reason, 'need:prose from "x"')
   assert.equal(r.session.needs.prose!.since, 1)
   assert.equal(r.session.needs.prose!.misses, 0)
-  assert.equal(r.actions.filter((a) => a.kind === 'toolContext').length, 0)
+  assert.equal(said(r.actions), '')
 })
 
 test('evidence: a paused session starts nothing; a subagent call starts nothing', () => {
@@ -973,11 +974,11 @@ test('Review Focus 3: a dormant readers need requests nothing on the first promp
   assert.doesNotMatch(ctx(r.out.at(-1)!), /writing-guide/)
   assert.equal(r.s.ledger['writing-guide']!.requests, 0)
   const t1 = decide(c, r.s, bash('gh pr create --fill'))
-  assert.match((t1.actions.find((a) => a.kind === 'toolContext') as { text: string }).text, /writing-guide/)
+  assert.match(said(t1.actions), /writing-guide/)
   assert.equal(t1.session.needs.prose!.dormant, undefined)
 })
 
-test('dormant: a dormant need blocks no gate and is not counted for the brief check', () => {
+test('dormant: a dormant users need is not counted as active for the Agent brief check', () => {
   const c = evCfg()
   const s0 = sessionWith(c, { ui: { since: 1, reason: 't', dormant: true } })
   const w = decide(c, s0, tool('Agent', { brief: 'do it' }))
@@ -1027,7 +1028,7 @@ test('expiry: readers need counts a miss only when A answered another deliverabl
 test('Review Focus 5: evidence in a notIn root requests no excluded skill; untrusted project skills and needs are not requested', () => {
   const c = evCfg({ skills: { 'writing-guide': { need: 'prose', from: 'user', notIn: ['/work/p'] }, 'writing-check': { need: 'prose', from: 'user' } } })
   const r = decide(c, initSession(c, 's', 0, 'clear'), bash('git commit -m x', { root: '/work/p/' }))
-  const text = (r.actions.find((a) => a.kind === 'toolContext') as { text: string }).text
+  const text = said(r.actions)
   assert.match(text, /writing-check/)
   assert.doesNotMatch(text, /writing-guide/)
   assert.equal(r.session.ledger['writing-guide']!.requests, 0)
@@ -1045,4 +1046,94 @@ test('Review Focus 5: evidence in a notIn root requests no excluded skill; untru
   assert.equal(r4.actions.filter((a) => a.kind === 'toolContext').length, 0)
   const trusted = evCfg({ ...c3, trustProjects: ['/work/q'] })
   assert.ok('prose' in decide(trusted, initSession(trusted, 's', 0, 'clear'), bash('git commit -m x', { root: '/work/q' })).session.needs)
+})
+
+// --- fix round 1 ---
+test('evidence in enforce: the first call is denied once with the scoped restore text, the retry passes', () => {
+  const c = evCfg()
+  for (const ev of [bash('gh pr create --fill'), tool('Write', { path: 'a.html' })]) {
+    const r1 = decide(c, initSession(c, 's', 0, 'clear'), ev)
+    assert.equal(denies(r1.actions).length, 1)
+    assert.equal(r1.actions.filter((a) => a.kind === 'toolContext').length, 0)
+    const own = ev.type === 'tool' && ev.tool === 'Bash' ? 'writing-guide' : 'ui-design'
+    assert.match(said(r1.actions), new RegExp(own))
+    assert.equal(r1.session.ledger[own]!.requests, 1)
+    const r2 = decide(c, r1.session, { ...ev, now: at() } as CoreEvent)
+    if (own === 'writing-guide') assert.deepEqual(denies(r2.actions), [])
+    assert.equal(r2.session.ledger[own]!.requests, 1)
+  }
+})
+
+test('evidence in observe: no denial, toolContext after the call', () => {
+  const c = evCfg({ mode: 'observe' })
+  for (const ev of [bash('gh pr create --fill'), tool('Write', { path: 'a.html' })]) {
+    const r = decide(c, initSession(c, 's', 0, 'clear'), ev)
+    assert.deepEqual(denies(r.actions), [])
+    assert.equal(r.actions.filter((a) => a.kind === 'toolContext').length, 1)
+  }
+})
+
+test('evidence restore is scoped to the started need; the deny names every skill it counted', () => {
+  const c = evCfg({ skills: { ...evCfg().skills, 'other-ui': { need: 'ui', from: 'user' }, 'terse:terse-mode': { always: true, from: 'user' } } })
+  const r = decide(c, initSession(c, 's', 0, 'clear'), bash('git commit -m x'))
+  assert.match(said(r.actions), /writing-guide/)
+  assert.doesNotMatch(said(r.actions), /terse|ui-design|other-ui/)
+  for (const n of ['terse:terse-mode', 'ui-design', 'other-ui']) assert.equal(r.session.ledger[n]!.requests, 0, n)
+  assert.equal(r.session.ledger['writing-guide']!.requests, 1)
+})
+
+test('gate-path call on a dormant users need wakes it (observe: toolContext, enforce: deny)', () => {
+  for (const mode of ['observe', 'enforce'] as const) {
+    const c = evCfg({ mode })
+    const s0 = sessionWith(c, { ui: { since: 1, reason: 't', dormant: true } })
+    const r = decide(c, s0, tool('Write', { path: 'a.html' }))
+    assert.equal(r.session.needs.ui!.dormant, undefined)
+    assert.match(said(r.actions), /ui-design/)
+    assert.equal(denies(r.actions).length, mode === 'enforce' ? 1 : 0)
+  }
+})
+
+test('contextNotes: notes of a dormant need wait until it wakes', () => {
+  const c = evCfg({ notes: [{ id: 'n1', text: 'Write short.', need: 'prose', source: 'user' }] })
+  const s0 = sessionWith(c, { prose: { since: 1, reason: 't', dormant: true } })
+  assert.doesNotMatch(ctx(decide(c, s0, prompt('a prompt of some words here')).actions), /Write short/)
+  const w = decide(c, s0, { ...prompt('write the readme for the project now', ['prose']), classifierFailed: false, deliverable: 'text-for-others' } as CoreEvent)
+  assert.match(ctx(w.actions), /Write short/)
+})
+
+test('commands: prefixes, assignments and git -C are normalised; commit-graph and commit-tree are not commits', () => {
+  const c = evCfg()
+  for (const cmd of ['GIT_AUTHOR_NAME=x git commit -m a', 'env A=1 git commit -m a', 'sudo git commit -m a', 'time git commit -m a', 'command git commit', 'git -C ../repo commit -m a', 'git commit', 'FOO=1 BAR=2 gh pr create']) {
+    assert.ok('prose' in decide(c, initSession(c, 's', 0, 'clear'), bash(cmd)).session.needs, cmd)
+  }
+  for (const cmd of ['git commit-graph write', 'git commit-tree abc', 'gh pr create-x', 'git -C x commit-tree y']) {
+    assert.equal('prose' in decide(c, initSession(c, 's', 0, 'clear'), bash(cmd)).session.needs, false, cmd)
+  }
+})
+
+test('commands: a quoted git commit inside echo counts (accepted false positive)', () => {
+  const c = evCfg()
+  assert.ok('prose' in decide(c, initSession(c, 's', 0, 'clear'), bash('echo "ok && git commit -m x"')).session.needs)
+})
+
+test('compaction: a need set with the command never goes dormant', () => {
+  const c = evCfg()
+  const s = decide(c, sessionWith(c, { prose: { since: 1, reason: 'command' }, ui: { since: 1, reason: 't' } }), compact()).session
+  assert.equal(s.needs.prose!.dormant, undefined)
+  assert.equal(s.needs.ui!.dormant, true)
+})
+
+test('trust: a prompt does not wake a project-only dormant need in an untrusted root', () => {
+  const c = evCfg({ needs: { prose: { for: 'readers', what: 'w' } }, projectNeeds: ['prose'], skills: { 'proj-guide': { need: 'prose', from: 'project' } } })
+  const s0 = sessionWith(c, { prose: { since: 1, reason: 't', dormant: true } })
+  const r = decide(c, s0, { ...prompt('write the readme for the project now'), classifierFailed: false, deliverable: 'text-for-others', root: '/work/q' } as CoreEvent)
+  assert.equal(r.session.needs.prose!.dormant, true)
+})
+
+test('status: a dormant need is listed as waiting since compaction', async () => {
+  const { statusText } = await import('../src/core/decide.ts')
+  const c = evCfg()
+  const text = statusText(c, sessionWith(c, { prose: { since: 0, reason: 't', dormant: true }, ui: { since: 0, reason: 't' } }), 1)
+  assert.match(text, /- prose \(since \d\d:\d\d, waiting since compaction\)/)
+  assert.match(text, /- ui \(since \d\d:\d\d\)/)
 })

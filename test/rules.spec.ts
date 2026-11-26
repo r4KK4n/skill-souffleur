@@ -162,7 +162,7 @@ test('note without need goes to section, capped at 2000 chars', () => {
 
 test('need note sent on first match and after compaction', () => {
   const c = cfg({ notes: [{ id: 'ui-copy', text: 'Show copy first.', need: 'ui', source: 'user' }] })
-  const { out } = run(c, [prompt(), prompt(['ui']), prompt(), compact(), prompt()])
+  const { out } = run(c, [prompt(), prompt(['ui']), prompt(), compact(), prompt(['ui'])])
   assert.equal(ctx(out[0]!), '')
   assert.match(ctx(out[1]!), /Show copy first\./)
   assert.equal(ctx(out[2]!), '', 'once while the need stays')

@@ -24,8 +24,8 @@ test('neededSkills keeps config order and includes always skills', () => {
       d: { from: 'user' },
     },
   }
-  assert.deepEqual(neededSkills(config, { prose: 1 }), ['b', 'c'])
-  assert.deepEqual(neededSkills(config, { prose: 1, ui: 1 }), ['a', 'b', 'c'])
+  assert.deepEqual(neededSkills(config, { prose: {} }), ['b', 'c'])
+  assert.deepEqual(neededSkills(config, { prose: {}, ui: {} }), ['a', 'b', 'c'])
   assert.deepEqual(neededSkills(config, {}), ['b'])
 })
 
@@ -34,9 +34,9 @@ test('neededSkills leaves out skills excluded in the root, extras included', () 
     mode: 'observe', needs, trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true,
     skills: { a: { always: true, from: 'user', notIn: ['/work/p'] }, b: { need: 'ui', from: 'user' }, c: { from: 'user', notIn: ['/work/p'] } },
   }
-  assert.deepEqual(neededSkills(config, { ui: 1 }, ['c'], '/work/p/'), ['b'])
-  assert.deepEqual(neededSkills(config, { ui: 1 }, ['c'], '/work/q'), ['a', 'b', 'c'])
-  assert.deepEqual(neededSkills(config, { ui: 1 }, ['c']), ['a', 'b', 'c'])
+  assert.deepEqual(neededSkills(config, { ui: {} }, ['c'], '/work/p/'), ['b'])
+  assert.deepEqual(neededSkills(config, { ui: {} }, ['c'], '/work/q'), ['a', 'b', 'c'])
+  assert.deepEqual(neededSkills(config, { ui: {} }, ['c']), ['a', 'b', 'c'])
 })
 
 test('call A asks about the deliverable with the exact labels and text', async () => {
