@@ -223,15 +223,17 @@ test('a publish after evidence opens no duty, and a second publish neither (#51)
   assert.deepEqual(r.out[4], [])
 })
 
-test('a publish of a written file without evidence opens a duty (#51)', () => {
+test('a Write opens the duty; the publish after it does not add one (#51)', () => {
   const r = run(pubCfg, [tool('Write', { path: 'x.html' }), tool('Artifact', { path: 'x.html' })], uiLoaded())
   assert.equal(r.s.duties.length, 1)
+  assert.ok(r.s.duties[0]!.by.startsWith('Write'))
 })
 
-test('a publish of a file never written opens no duty; Edit, no evidence, Edit keeps one duty (#51)', () => {
+test('a publish never arms a duty; Edit, no evidence, Edit leaves the duty from the Write open (#51)', () => {
   assert.equal(run(pubCfg, [tool('Artifact', { path: 'y.html' })], uiLoaded()).s.duties.length, 0)
-  const r = run(pubCfg, [tool('Edit', { path: 'x.html' }), tool('Edit', { path: 'x.html' }), tool('Edit', { path: 'x.html' })], uiLoaded())
+  const r = run(pubCfg, [tool('Write', { path: 'x.html' }), tool('Edit', { path: 'x.html' }), tool('Edit', { path: 'x.html' })], uiLoaded())
   assert.equal(r.s.duties.length, 1)
+  assert.ok(r.s.duties[0]!.by.startsWith('Write'))
 })
 
 test('duty denies once, retry passes', () => {

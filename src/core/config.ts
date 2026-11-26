@@ -241,6 +241,7 @@ function parseRule(v: unknown, where: string, source: Origin, soft: (m: string) 
     const duty = obj.duty as Record<string, unknown>
     onlyKeys(duty, ['after', 'evidence'], `${where}.duty`)
     const after = parseMatch(duty.after, `${where}.duty.after`)
+    if (!after.tools.some((t) => ['Write', 'Edit', 'MultiEdit', 'NotebookEdit'].includes(t))) soft(`${name}.duty.after.tools: needs Write, Edit, MultiEdit or NotebookEdit; the duty never opens`)
     check(isObject(duty.evidence), `${where}.duty.evidence`, 'must be an object')
     const ev = duty.evidence as Record<string, unknown>
     onlyKeys(ev, ['tool', 'command'], `${where}.duty.evidence`)

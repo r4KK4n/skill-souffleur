@@ -477,3 +477,11 @@ test('notIn holds at most 20 paths; for on a startup-injected skill without alwa
   assert.match(s.errors[0]!, /g\.for: only for always-on skills; ignored/)
   assert.equal(s.config.skills.g?.for, undefined)
 })
+
+test('a duty whose after.tools has no file-changing tool is kept with an error', () => {
+  const cfg = { skills: { x: { need: 'n', duty: { after: { tools: ['Artifact'] }, evidence: { tool: 'Bash' } } } }, needs: { n: 'Something.' } }
+  const { config, errors } = parseConfig(json(cfg), undefined)
+  assert.ok(config.skills.x?.duty)
+  assert.equal(errors.length, 1)
+  assert.match(errors[0]!, /x\.duty\.after\.tools: needs Write, Edit, MultiEdit or NotebookEdit; the duty never opens/)
+})
