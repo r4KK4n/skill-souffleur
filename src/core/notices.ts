@@ -22,6 +22,13 @@ function plainError(text: string): string {
   return line.length > 120 ? `${line.slice(0, 117)}...` : line
 }
 
+/** The step an error belongs to: its first line up to the first `: `, else the whole line. */
+function stepOf(error: string): string {
+  const line = plainError(error)
+  const i = line.indexOf(': ')
+  return i > 0 ? line.slice(0, i) : line
+}
+
 /** The problems that hold now, key to line text. A key stays the same while the problem lasts. */
 export function problemKeys(config: Config, s: Session, root?: string): Map<string, string> {
   const out = new Map<string, string>()
@@ -29,7 +36,10 @@ export function problemKeys(config: Config, s: Session, root?: string): Map<stri
   for (const [name, e] of Object.entries(s.ledger)) {
     if (e.state === 'unavailable') out.set(`missing:${name}`, `${PREFIX}${name} did not load after two requests.`)
   }
-  if (s.errors.length > 0) out.set('degraded', `${PREFIX}degraded: ${plainError(s.errors.at(-1)!).replace(/\.$/, '')}. Details: /souffleur.`)
+  // One key per step (the text before the first ": "); the line names that step's newest error.
+  const newest = new Map<string, string>()
+  for (const err of s.errors) newest.set(stepOf(err), err)
+  for (const [step, err] of newest) out.set(`degraded:${step}`, `${PREFIX}degraded: ${plainError(err).replace(/\.$/, '')}. Details: /souffleur.`)
   const version = versionNotice(s.version)
   if (version) out.set('version', `${PREFIX}${version}`)
   if (!isTrustedRoot(config, root) && Object.values(config.skills).some((r) => r.from === 'project')) {
@@ -67,10 +77,15 @@ export function notices(config: Config, before: Session, after: Session, root?: 
     nextCut = []
   }
 
+  // A key told once in a session is never told again. `problems` holds the told keys that hold now and were not
+  // already gone once, so a flapping problem gives one line and at most one `back to normal.`.
   const now = problemKeys(config, after, root)
-  for (const [key, text] of now) if (!was.problems.includes(key)) lines.push(text)
+  const told = was.told ?? was.problems
+  const fresh = [...now.keys()].filter((key) => !told.includes(key))
+  for (const key of fresh) lines.push(now.get(key)!)
+  const problems = [...was.problems.filter((key) => now.has(key)), ...fresh.filter((key) => !was.problems.includes(key))]
   if (was.problems.length > 0 && now.size === 0) lines.push(`${PREFIX}back to normal.`)
 
-  const session: Session = { ...after, noticed: { cut: nextCut, problems: [...now.keys()] } }
+  const session: Session = { ...after, noticed: { cut: nextCut, problems, told: [...told, ...fresh] } }
   return { lines: config.notices === false ? [] : lines, session }
 }

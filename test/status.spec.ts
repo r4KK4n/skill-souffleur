@@ -286,3 +286,10 @@ test('reply check: the chat skill row note counts violations; nothing without re
   assert.doesNotMatch(renderTable(bare, s, T1), /replies over the limit/)
   assert.doesNotMatch(renderTable(config, fresh(), T1), /replies over the limit/)
 })
+
+test('the table shows failure counts after the error cleared', () => {
+  const s: Session = { ...fresh(), failCounts: { 'tool.call': 3, classifier: 1 } }
+  assert.match(renderTable(config, s, T1), /^Failures this session: tool\.call 3, classifier 1$/m)
+  assert.doesNotMatch(renderTable(config, { ...fresh(), failCounts: { 'tool.call': 0 } }, T1), /Failures this session/)
+  assert.doesNotMatch(renderTable(config, fresh(), T1), /Failures this session/)
+})

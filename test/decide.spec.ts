@@ -903,6 +903,16 @@ test('a stored session without workFails counts from zero', () => {
   assert.equal(run(workCfg, [{ ...prompt('x'), classifierFailed: false, workFailed: true } as CoreEvent], s).s.workFails, 1)
 })
 
+test('every error event counts per step, a recovery keeps the count, clear resets it, reload and resume keep it', () => {
+  const err = (where: string): CoreEvent => ({ type: 'error', now: at(), where, message: 'boom' })
+  const s = run(base, [err('tool.call'), err('tool.call'), err('classifier'), { type: 'recovered', now: at(), where: 'tool.call' }, err('tool.call')]).s
+  assert.deepEqual(s.failCounts, { 'tool.call': 3, classifier: 1 })
+  assert.equal(initSession(base, 'session-2', 0, 'clear').failCounts, undefined)
+  for (const start of ['reload', 'resume'] as const) {
+    assert.deepEqual(run(base, [{ type: 'start', now: at(), start }], s).s.failCounts, { 'tool.call': 3, classifier: 1 }, start)
+  }
+})
+
 const fallbackCfg = (patch: Partial<Config>) => cfg({ needs: { ...base.needs, debug: { for: 'work', what: 'Debugging a failure.' } }, ...patch })
 const failedSession = (c: Config, extra: Partial<Session> = {}) => ({ ...initSession(c, 'session-1', 0, 'clear'), classifyFails: 3, ...extra })
 const fallbackLine = (c: Config, s: Session) => ctx(one(c, [failedPrompt()], s))

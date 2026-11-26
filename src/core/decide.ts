@@ -61,7 +61,9 @@ export type Session = {
   /** When this copy was stored last, so old copies in the plugin store can be removed. */
   touched?: number
   /** What notices already told the user: skills cut by compaction, and problem keys shown. */
-  noticed?: { cut: SkillName[]; problems: string[] }
+  noticed?: { cut: SkillName[]; problems: string[]; /** Every problem key whose line was told in this session; never told again. */ told?: string[] }
+  /** Failures per step (`error` events by `where`) in this session, kept after the error cleared and over reload and resume. */
+  failCounts?: Record<string, number>
   /** The reply check of the chat skill: replies checked, replies over the limit, user prompts since the last reminder, and the reminder waiting for a prompt. */
   replyCheck?: { total: number; over: number; sinceReminder: number; pending?: string }
 }
@@ -204,7 +206,7 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
     case 'learned':
       return { session: track(s, 'learnFails', 'learn: ', !e.ok, 'the small model failed or gave no usable answer 3 times in a row, so skill texts are not read'), actions: [] }
     case 'error':
-      return { session: { ...s, errors: lastN(s.errors, `${e.where}: ${e.message}`) }, actions: [] }
+      return { session: { ...s, errors: lastN(s.errors, `${e.where}: ${e.message}`), failCounts: { ...s.failCounts, [e.where]: (s.failCounts?.[e.where] ?? 0) + 1 } }, actions: [] }
     case 'recovered': {
       const prefix = `${e.where}: `
       if (OWN_LIFECYCLE.includes(e.where)) return { session: s, actions: [] }

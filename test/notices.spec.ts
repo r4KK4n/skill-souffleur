@@ -92,7 +92,7 @@ test('a cut again while another is pending names the whole union once', () => {
 
 test('degraded line drops one trailing period of the error', () => {
   const s: Session = { ...fresh(), errors: ['tool_name missing.'] }
-  assert.equal(problemKeys(config, s).get('degraded'), 'Souffleur: degraded: tool_name missing. Details: /souffleur.')
+  assert.equal(problemKeys(config, s).get('degraded:tool_name missing.'), 'Souffleur: degraded: tool_name missing. Details: /souffleur.')
 })
 
 test('reloaded once all loaded', () => {
@@ -123,8 +123,8 @@ test('problem keys: degraded, version, untrusted, not installed here', () => {
   const s: Session = { ...fresh(project), errors: ['a', 'tool_name missing'], version: '99.0.0' }
   s.ledger['p:skill'] = { state: 'not installed here', since: T, reason: '', requests: 0 }
   const m = problemKeys(project, s, '/work/x')
-  assert.deepEqual([...m.keys()], ['degraded', 'version', 'untrusted'])
-  assert.equal(m.get('degraded'), 'Souffleur: degraded: tool_name missing. Details: /souffleur.')
+  assert.deepEqual([...m.keys()], ['degraded:a', 'degraded:tool_name missing', 'version', 'untrusted'])
+  assert.equal(m.get('degraded:tool_name missing'), 'Souffleur: degraded: tool_name missing. Details: /souffleur.')
   assert.match(m.get('version')!, /^Souffleur: Running Claude Code 99\.0\.0;/)
   assert.equal(m.get('untrusted'), "Souffleur: this project's skill file is not trusted; its skills are listed only.")
 })
@@ -143,7 +143,7 @@ test('notices false gives no lines', () => {
   const before = loadedBoth()
   const r = notices(off, before, { ...cutOf(before), errors: ['boom'] })
   assert.deepEqual(r.lines, [])
-  assert.deepEqual(r.session.noticed, { cut: ['writing-guide', 'writing-check'], problems: ['degraded'] })
+  assert.deepEqual(r.session.noticed, { cut: ['writing-guide', 'writing-check'], problems: ['degraded:boom'], told: ['degraded:boom'] })
 })
 
 test('a loaded skill that is not needed is not named in the cut line and does not stick', () => {
@@ -180,7 +180,7 @@ test('an untrusted project skill is not named in the cut line', () => {
 
 test('degraded line uses the first line, ASCII only, at most 120 characters', () => {
   const err = `read failed: caf\u00e9 ${'x'.repeat(200)}\nsecond line /home/bob/secret`
-  const line = problemKeys(config, { ...fresh(), errors: [err] }).get('degraded')!
+  const line = problemKeys(config, { ...fresh(), errors: [err] }).get('degraded:read failed')!
   assert.ok(!line.includes('second line'))
   assert.match(line, /^[\x20-\x7e]+$/)
   assert.match(line, /^Souffleur: degraded: read failed: caf\? x+\.\.\. Details: \/souffleur\.$/)
@@ -192,4 +192,50 @@ test('a skill excluded in this root is not counted as cut', () => {
   const s = { ...initSession(c, 's1', T, 'clear'), needs: { prose: { since: T, reason: 'test' } } }
   const before = withLedger(s, skillLoaded(skillLoaded(s.ledger, 'writing-guide', T, 'x'), 'writing-check', T, 'x'))
   assert.deepEqual(notices(c, before, cutOf(before), '/work/p').lines, ['Souffleur: cut by compaction: writing-check; will ask the model to reload them.'])
+})
+
+const withErrors = (s: Session, errors: string[]): Session => ({ ...s, errors })
+
+test('a step that fails, clears and fails again 10 times gives one degraded line and one back to normal', () => {
+  let s = fresh()
+  const lines: string[] = []
+  for (let i = 0; i < 10; i++) {
+    for (const errors of [['tool.call: boom'], []]) {
+      const r = notices(config, s, withErrors(s, errors))
+      lines.push(...r.lines)
+      s = r.session
+    }
+  }
+  assert.equal(lines.filter((l) => /degraded/.test(l)).length, 1, lines.join('\n'))
+  assert.equal(lines.filter((l) => /back to normal/.test(l)).length, 1, lines.join('\n'))
+})
+
+test('two failing steps each get a line, and a line names only an error that holds', () => {
+  const s0 = fresh()
+  const r1 = notices(config, s0, withErrors(s0, ['tool.call: first', 'classifier: second']))
+  assert.deepEqual(r1.lines, ['Souffleur: degraded: tool.call: first. Details: /souffleur.', 'Souffleur: degraded: classifier: second. Details: /souffleur.'])
+  const r2 = notices(config, r1.session, withErrors(r1.session, ['classifier: second']))
+  assert.deepEqual(r2.lines, [], 'tool.call cleared, classifier is still the same problem')
+  assert.deepEqual(r2.session.noticed?.problems, ['degraded:classifier'])
+  const r3 = notices(config, r2.session, withErrors(r2.session, []))
+  assert.deepEqual(r3.lines, ['Souffleur: back to normal.'])
+})
+
+test('a step names its newest error', () => {
+  const s = { ...fresh(), errors: ['tool.call: old', 'classifier: other', 'tool.call: new'] }
+  assert.equal(problemKeys(config, s).get('degraded:tool.call'), 'Souffleur: degraded: tool.call: new. Details: /souffleur.')
+})
+
+test('back to normal waits for the last told problem', () => {
+  const s0 = fresh()
+  const r1 = notices(config, s0, withErrors(s0, ['a: x', 'b: y']))
+  const r2 = notices(config, r1.session, withErrors(r1.session, ['b: y']))
+  assert.deepEqual(r2.lines, [])
+  assert.deepEqual(notices(config, r2.session, withErrors(r2.session, [])).lines, ['Souffleur: back to normal.'])
+})
+
+test('a session stored by 0.1.7 (no told list) loads', () => {
+  const stored: Session = { ...fresh(), errors: ['tool.call: boom'], noticed: { cut: [], problems: ['degraded'] } }
+  const r = notices(config, stored, stored)
+  assert.deepEqual(r.session.noticed?.problems.includes('degraded:tool.call'), true)
 })
