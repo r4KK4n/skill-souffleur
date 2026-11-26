@@ -4,7 +4,7 @@ Keeps Claude Code skills loaded and in use for the whole session, including afte
 
 In a theatre, the souffleur sits out of sight at the edge of the stage and gives an actor the line they forgot, at the moment they need it. Souffleur does the same for skills: when compaction drops a skill the current task needs, it brings the skill back.
 
-> **Status:** version 0.1.1 is ready and installable from this repository (see [Install](#install)). The release tag is pending. See the [roadmap](#roadmap).
+> **Status:** version 0.1.2, released as tag `v0.1.2` (see [Install](#install) and the [roadmap](#roadmap)).
 >
 > **Early access.** Souffleur is a Claude Code mod: TypeScript that runs inside Claude Code through its mod API, shipped and installed as a plugin. Anthropic still changes that API between releases, so an update of Claude Code can break Souffleur until it is adapted. It is provided as is, with no guarantee of fixes or dates. [docs/compatibility.md](docs/compatibility.md) lists the versions each behaviour was checked on.
 
@@ -74,6 +74,25 @@ claude plugin update skill-souffleur@skill-souffleur
 ```
 
 Restart Claude Code afterwards. Every change that users notice raises the plugin version, so the update finds it. If Claude Code is newer than the version Souffleur was checked on, `/souffleur` says so in one line.
+
+### Updates without a restart
+
+An installed plugin reaches a running session only after `/reload-plugins` or a restart, and `/reload-plugins` is not available in Remote Control sessions. Claude Code also loads a plugin from a folder under `~/.claude/skills/` and watches that folder, so a running session reloads Souffleur when its files change (checked on 2.1.332, see [docs/compatibility.md](docs/compatibility.md)). Install it there from a release tag instead of the marketplace:
+
+```
+claude plugin uninstall skill-souffleur@skill-souffleur
+git clone --branch v0.1.2 https://github.com/r4KK4n/skill-souffleur ~/.claude/skills/skill-souffleur
+```
+
+Update to a newer release:
+
+```
+cd ~/.claude/skills/skill-souffleur && git fetch --tags && git checkout <tag>
+```
+
+Every running session picks up the new version, usually within half a minute. Use release tags only, never `main`: a release with a fault would reach every running session at once. To go back, check out the previous tag. A session that was already running when the folder was created does not see it; start that one once more.
+
+Use one install method, not both. While the marketplace plugin is installed, Claude Code does not load the folder at all: the installed plugin keeps the name `skill-souffleur`. The folder install keeps its own stored data. Copy the old store file if you want to keep it: in `~/.claude/plugins/store/`, the marketplace install writes `skill-souffleur_skill-souffleur-<hash>.json` and the folder install `skill-souffleur_skills-dir-<hash>.json`. Without the copy, skill texts are read again once, earlier proposals can come back (decline them again with `/souffleur decline <id>`), and a session resumed after the switch starts with an empty ledger.
 
 ## Quick start
 
@@ -229,7 +248,8 @@ Costs:
 - [x] `/souffleur init` per skill and `/souffleur migrate` for old hooks
 - [x] Install guide
 - [x] Short notices in the transcript for start, compaction and problems
-- [ ] Release tag `v0.1.1` (version 0.1.1 is ready and installable from the repository; no tag exists yet, the maintainer tags it)
+- [x] Release tags `v0.1.0`, `v0.1.1`, `v0.1.2`
+- [x] Updates that reach running sessions (install from a folder)
 
 ## Contributing
 

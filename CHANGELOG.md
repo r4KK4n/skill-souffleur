@@ -6,12 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-26
+
 - Fixed: field rules no longer see the event metadata of a tool call (`tool`, `tool_use_id`, `agentId`, `requestMeta`) as arguments, so a field rule named like one of them no longer passes without that argument (#40).
 - Fixed: a resume in a new process resets the per-run counters (subagents running, main skill calls, denied agent and field rules, pending learn calls), so a stale count no longer blocks or misreads the resumed session; a reload in the same process keeps them (#32).
 - Fixed: a hook error clears once that hook works again, so one transient failure no longer keeps the status `degraded` until restart. Config errors and the classifier and learn failure counts keep their own lifecycle (#35).
+
+## [0.1.1] - 2026-11-26
+
 - Notices: short `Souffleur:` lines in the transcript for session start, compaction and problems, once per event and for the main session only. `"notices": false` in the user file turns them off.
 - The propose tool is registered again on a user prompt when it dropped out of the tool list. The line `Souffleur: tool reconnected.` appears only when the tool was seen and then went missing; a tool the list never showed is registered again silently, once per process.
-- Version `0.1.1`.
+
+## [0.1.0] - 2026-11-25
+
 - A project file is report only unless its root is in `trustProjects`: Souffleur no longer asks the model to load its skills, names them in the system prompt or lets its needs deny an `Agent` brief. A project file may define 20 skills and 10 needs; more get an error that names the cap. Duty evidence gets the same length and control character checks as rule evidence, and `trustProjects` ignores trailing slashes.
 - The restore request and the notes of one prompt stay under 10,000 characters. Skills that do not fit are asked for on a later prompt and stay listed in `/souffleur`.
 - The status turns `degraded` after three failed classifier runs or three failed skill reads in a row, and clears after a good one.
