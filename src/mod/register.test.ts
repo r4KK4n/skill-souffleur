@@ -382,6 +382,34 @@ test('session restored from $.store when $.state is empty', async ($, on) => {
   expect(r.context).toBe(undefined)
 })
 
+test('a reload of the held state keeps per-run counters', async ($, on) => {
+  const { config } = parseConfig(ALWAYS, undefined)
+  const busy = { ...initSession(config, 's1', 1, 'startup', '2.1.331'), subagentsRunning: 2 }
+  const written: any[] = []
+  on('state.get', () => ({ value: { value: busy, version: 0 } }) as never)
+  on('state.set', (_, e) => {
+    written.push(e.value)
+    return { value: { isSet: true, version: 1 } }
+  })
+  world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  expect(written.at(-1).subagentsRunning).toBe(2)
+})
+
+test('a resume from the store resets per-run counters', async ($, on) => {
+  const { config } = parseConfig(ALWAYS, undefined)
+  const busy = { ...initSession(config, 's1', 1, 'startup', '2.1.331'), subagentsRunning: 2 }
+  const written: any[] = []
+  on('state.get', () => ({ value: { value: undefined, version: 0 } }) as never)
+  on('state.set', (_, e) => {
+    written.push(e.value)
+    return { value: { isSet: true, version: 1 } }
+  })
+  world(on, { [USER_FILE]: ALWAYS }, { stored: { 'session:s1': busy } })
+  await start($)
+  expect(written.at(-1).subagentsRunning).toBe(0)
+})
+
 test('compaction marks the skill stale and the next prompt asks for it again', async ($, on) => {
   world(on, { [USER_FILE]: ALWAYS })
   await start($)

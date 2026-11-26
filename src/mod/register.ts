@@ -1136,7 +1136,7 @@ export const register: Register = (on) => {
       let s: Session
       if (before) {
         // Resume or reload: the ledger stays, what the config said last time does not.
-        s = decide(l.config, { ...before, errors: [] }, { type: 'start', now: now(), start: 'resume', version }).session
+        s = decide(l.config, { ...before, errors: [] }, { type: 'start', now: now(), start: held?.id === id ? 'reload' : 'resume', version }).session
         s = decide(l.config, s, { type: 'config', now: now(), errors: l.errors }).session
       } else s = await freshSession($, l, id, 'startup')
       // Problems that hold at the start are news once; a resumed session's stored `noticed` keeps them from repeating.

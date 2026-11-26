@@ -57,7 +57,7 @@ export type Session = {
 }
 
 export type CoreEvent =
-  | { type: 'start'; now: number; start: 'startup' | 'resume' | 'clear'; version?: string }
+  | { type: 'start'; now: number; start: 'startup' | 'resume' | 'reload' | 'clear'; version?: string }
   | { type: 'skill'; now: number; skill: string; text?: string; source?: string; pluginName?: string; path?: string }
   | { type: 'compact'; now: number; phase: 'before' | 'after'; trigger: string; skipped?: boolean; agentId?: string }
   /** `classifierFailed`: the classifier ran and failed (true) or answered every need (false); absent when it did not run. */
@@ -98,7 +98,7 @@ const RESTORE_LIMIT = 5000
 const FAIL_LIMIT = 3
 const PAUSE_HINT = 'To turn checks off for this session: /souffleur pause.'
 
-export function initSession(config: Config, id: string, now: number, start: 'startup' | 'resume' | 'clear', version?: string): Session {
+export function initSession(config: Config, id: string, now: number, start: 'startup' | 'clear', version?: string): Session {
   const s: Session = {
     ledger: initLedger(config, now, start, ruleSkillNames(config)),
     needs: {},
@@ -146,11 +146,17 @@ function track(s: Session, key: 'classifyFails' | 'learnFails', prefix: string, 
 export function decide(config: Config, s: Session, e: CoreEvent): Result {
   switch (e.type) {
     case 'start':
-      // A resume keeps the ledger: what was loaded stays in the transcript until a compaction.
-      // A pause is not carried over. Counters of the previous run restart.
-      if (e.start === 'resume') return {
-        session: { ...s, paused: false, subagentsRunning: 0, mainSkillCalls: [], agentDenied: false, learnCalls: [], ...(e.version === undefined ? {} : { version: e.version }) },
-        actions: [],
+      // A resume or reload keeps the ledger: what was loaded stays in the transcript until a compaction.
+      // A pause is not carried over. A reload (same process, state still held) keeps the per-run counters;
+      // a resume (a new process) restarts them.
+      if (e.start === 'resume' || e.start === 'reload') {
+        const counters = e.start === 'resume'
+          ? { subagentsRunning: 0, mainSkillCalls: [], agentDenied: false, learnCalls: [], fieldDenied: [] }
+          : {}
+        return {
+          session: { ...s, paused: false, ...counters, ...(e.version === undefined ? {} : { version: e.version }) },
+          actions: [],
+        }
       }
       return { session: initSession(config, s.id, e.now, e.start, e.version), actions: [] }
     case 'skill': {

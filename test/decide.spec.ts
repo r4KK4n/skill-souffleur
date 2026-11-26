@@ -326,16 +326,45 @@ test('resume keeps the ledger, clear starts a fresh session', () => {
 
 test('resume resets per-process counters', () => {
   const s0 = run(withAlways, [prompt(), loadSkill('terse:terse-mode')]).s
-  const s: Session = { ...s0, subagentsRunning: 2, mainSkillCalls: ['x'], agentDenied: true, learnCalls: ['y'] }
+  const s: Session = {
+    ...s0,
+    subagentsRunning: 2,
+    mainSkillCalls: ['x'],
+    agentDenied: true,
+    learnCalls: ['y'],
+    fieldDenied: ['f'],
+    needs: { ui: { since: 1, reason: 'kept' } },
+    proposals: [{ id: 'p1' } as never],
+    noticed: { cut: ['terse:terse-mode'], problems: ['p'] },
+    openRules: [{ id: 'r', by: 'b', denied: false, told: false }],
+    duties: [{ skill: 'ui-checklist', openedAt: 1, by: 'b', denied: false }],
+    ruleSkills: ['terse:terse-mode'],
+  }
   const resumed = decide(withAlways, s, { type: 'start', now: at(), start: 'resume' }).session
   assert.equal(resumed.subagentsRunning, 0)
   assert.deepEqual(resumed.mainSkillCalls, [])
   assert.equal(resumed.agentDenied, false)
   assert.deepEqual(resumed.learnCalls, [])
+  assert.deepEqual(resumed.fieldDenied, [])
   assert.deepEqual(resumed.ledger, s.ledger)
   assert.deepEqual(resumed.needs, s.needs)
   assert.deepEqual(resumed.proposals, s.proposals)
   assert.deepEqual(resumed.noticed, s.noticed)
+  assert.deepEqual(resumed.openRules, s.openRules)
+  assert.deepEqual(resumed.duties, s.duties)
+  assert.deepEqual(resumed.ruleSkills, s.ruleSkills)
+})
+
+test('reload keeps per-run counters', () => {
+  const s0 = run(withAlways, [prompt(), loadSkill('terse:terse-mode')]).s
+  const s: Session = { ...s0, subagentsRunning: 2, mainSkillCalls: ['x'], agentDenied: true, learnCalls: ['y'], fieldDenied: ['f'] }
+  const reloaded = decide(withAlways, s, { type: 'start', now: at(), start: 'reload' }).session
+  assert.equal(reloaded.subagentsRunning, 2)
+  assert.deepEqual(reloaded.mainSkillCalls, ['x'])
+  assert.equal(reloaded.agentDenied, true)
+  assert.deepEqual(reloaded.learnCalls, ['y'])
+  assert.deepEqual(reloaded.fieldDenied, ['f'])
+  assert.deepEqual(reloaded.ledger, s.ledger)
 })
 
 test('startup still gives a fresh session', () => {
@@ -346,6 +375,7 @@ test('startup still gives a fresh session', () => {
   assert.deepEqual(fresh.mainSkillCalls, [])
   assert.equal(fresh.agentDenied, false)
   assert.equal(fresh.learnCalls, undefined)
+  assert.equal(fresh.ledger['terse:terse-mode']!.state, 'absent')
 })
 
 test('session survives JSON round trip', () => {
