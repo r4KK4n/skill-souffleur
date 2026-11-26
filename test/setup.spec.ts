@@ -282,3 +282,16 @@ test('applyChoice strips for when a skill moves from always to need, and need to
   const r2 = applyChoice({ skills: { a: { need: 'n', for: 'chat' } }, needs: { n: 'T.' } }, 'a', 'start')
   assert.deepEqual(doc(r2.config).skills, { a: { always: true, for: 'chat' } })
 })
+
+test('candidates leaves out skipped names', () => {
+  const c = config({ skills: { x: { always: true }, y: { always: true } } })
+  const out = candidates(c, ['x', 'y', 'o', 'z'], ['o'], ['z'], ['x', 'o'])
+  assert.deepEqual(out.map((k) => k.skill), ['y', 'z'])
+})
+
+test('need pruning counts needs used by any project block skill or note', () => {
+  const user = { skills: { a: { need: 'n1' } }, needs: { n1: 'One.', n2: 'Two.', n3: 'Three.', n4: 'Four.' }, projects: { '/w': { skills: { o: { need: 'n2' } }, notes: [{ id: 'q', text: 't', need: 'n3' }] } } }
+  const r = applyChoice(user, 'a', 'need', { key: 'n1', text: 'One.' })
+  assert.deepEqual(r.pruned, ['n4'])
+  assert.ok((r.config as { projects: unknown }).projects)
+})

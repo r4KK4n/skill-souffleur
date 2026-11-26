@@ -76,14 +76,14 @@ export function choiceOf(label: string): LoadChoice | 'stop' | undefined {
  * model's picks. A skill that only a project file configures comes last and is listed, not asked:
  * `init` writes the user file.
  */
-export function candidates(config: Config, installed: string[], reloadHooked: string[], picked: string[]): Candidate[] {
+export function candidates(config: Config, installed: string[], reloadHooked: string[], picked: string[], skip: readonly string[] = []): Candidate[] {
   const out: Candidate[] = []
-  const has = (skill: string) => out.some((c) => c.skill === skill)
-  for (const [skill, rule] of Object.entries(config.skills)) if (rule.from === 'user') out.push({ skill, source: 'user' })
+  const has = (skill: string) => out.some((c) => c.skill === skill) || skip.includes(skill)
+  for (const [skill, rule] of Object.entries(config.skills)) if (rule.from === 'user' && !skip.includes(skill)) out.push({ skill, source: 'user' })
   const known = (skill: string) => !(skill in config.skills) && !has(skill) && installed.includes(skill)
   for (const skill of reloadHooked) if (known(skill)) out.push({ skill, source: 'hook' })
   for (const skill of picked) if (known(skill)) out.push({ skill, source: 'model' })
-  for (const [skill, rule] of Object.entries(config.skills)) if (rule.from === 'project') out.push({ skill, source: 'project' })
+  for (const [skill, rule] of Object.entries(config.skills)) if (rule.from === 'project' && !skip.includes(skill)) out.push({ skill, source: 'project' })
   return out
 }
 
@@ -183,7 +183,10 @@ export function applyChoice(
   }
 
   const notes = Array.isArray(doc.notes) ? doc.notes : []
-  const used = new Set([...Object.values(skills), ...Object.values(projectSkills), ...notes].flatMap((r) => (isObject(r) && typeof r.need === 'string' ? [r.need] : [])))
+  // A block's own skills and notes keep their needs alive too.
+  const blocks = isObject(doc.projects) ? Object.values(doc.projects).filter(isObject) : []
+  const inBlocks = blocks.flatMap((b) => [...(isObject(b.skills) ? Object.values(b.skills) : []), ...(Array.isArray(b.notes) ? b.notes : [])])
+  const used = new Set([...Object.values(skills), ...Object.values(projectSkills), ...notes, ...inBlocks].flatMap((r) => (isObject(r) && typeof r.need === 'string' ? [r.need] : [])))
   const pruned: string[] = []
   for (const key of Object.keys(needs)) {
     if (used.has(key)) continue

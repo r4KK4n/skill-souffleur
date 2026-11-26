@@ -437,9 +437,13 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
     if (problem) return stop(`${shown(configPath)} cannot be edited because ${problem}`)
   }
   const projectText = await readOptional($, `${l0.root}/.claude/souffleur.json`, notes, home)
-  const parsed = parseConfig(user.kind === 'ok' ? stripBom(user.text) : undefined, projectText === undefined ? undefined : stripBom(projectText), l0.root)
-  const config = parsed.config
-  notes.push(...parsed.errors)
+  // init edits the standard: it reads the config without this root's block, and leaves out what the block names or adds.
+  const userSrc = user.kind === 'ok' ? stripBom(user.text) : undefined
+  const projectSrc = projectText === undefined ? undefined : stripBom(projectText)
+  const config = parseConfig(userSrc, projectSrc).config
+  const here = parseConfig(userSrc, projectSrc, l0.root)
+  notes.push(...here.errors)
+  const skip = [...(here.config.project?.blocked ?? []), ...(here.config.project?.own ?? [])]
   const projectSkills: Record<string, unknown> = Object.fromEntries(Object.entries(config.skills).filter(([, r]) => r.from === 'project'))
 
   const settings = await readSettings($, settingsPath, home)
@@ -474,7 +478,7 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
     }
   }
 
-  const plans: Plan[] = candidates(config, installed, reloadHooked, picks.map((x) => x.skill)).map(({ skill, source }) => {
+  const plans: Plan[] = candidates(config, installed, reloadHooked, picks.map((x) => x.skill), skip).map(({ skill, source }) => {
     const current = currentChoice(config.skills[skill])
     const pick = picks.find((x) => x.skill === skill)
     const need = pick ? { need: pick.need } : {}

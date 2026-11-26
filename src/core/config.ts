@@ -407,11 +407,20 @@ function parseFile(text: string, source: Origin, errors: string[], extraNeeds: r
 
 type Block = { blocked: string[]; blockedSkills: string[]; ownSkills: string[]; ownNotes: string[]; ownRules: string[]; ignored: string[] }
 
-/** The names of a block's list (`block`, `ignored`): at most 20 valid names, else the whole list is ignored. */
+/** The names of a block's list (`block`, `ignored`): the first 20 entries, each invalid name dropped with its own error, so a typo never unblocks the rest. */
 function nameList(v: unknown, where: string, errors: string[]): string[] {
-  if (Array.isArray(v) && v.length <= MAX_LIST && v.every((n) => typeof n === 'string' && NAME.test(n) && n !== '__proto__')) return [...new Set(v as string[])]
-  errors.push(`${where}: must be a list of at most ${MAX_LIST} names; ignored`)
-  return []
+  if (!Array.isArray(v)) {
+    errors.push(`${where}: must be a list of names; ignored`)
+    return []
+  }
+  if (v.length > MAX_LIST) errors.push(`${where}: at most ${MAX_LIST} names are read; the rest are ignored`)
+  const out: string[] = []
+  for (const n of v.slice(0, MAX_LIST)) {
+    if (typeof n === 'string' && NAME.test(n) && n !== '__proto__') {
+      if (!out.includes(n)) out.push(n)
+    } else errors.push(`${where}: ${show(n)} is not a valid name; ignored`)
+  }
+  return out
 }
 
 /**
@@ -456,6 +465,7 @@ function applyBlock(user: FileConfig, root: string, errors: string[]): Block | u
   const clash = (path: string): void => void errors.push(`${W}.${path}: already in the standard; block it first or rename; entry dropped`)
   for (const [name, rule] of Object.entries(mine.skills)) {
     if (user.skillKeys.includes(name)) clash(`skills.${name}`)
+    else if (rule.notIn !== undefined) errors.push(`${W}.skills.${name}: notIn has no meaning inside a block; entry dropped`)
     else {
       user.skills[name] = rule
       user.skillKeys.push(name)
@@ -473,6 +483,10 @@ function applyBlock(user: FileConfig, root: string, errors: string[]): Block | u
     for (const entry of list) {
       if (taken.has(entry.id)) {
         clash(`${kind}.${entry.id}`)
+        continue
+      }
+      if (entry.where !== undefined) {
+        errors.push(`${W}.${kind}.${entry.id}: where has no meaning inside a block; entry dropped`)
         continue
       }
       taken.add(entry.id)
@@ -538,6 +552,16 @@ export function parseConfig(
     dropUnknownNeed(user, 'user', new Set(Object.keys(user.needs)))
     Object.assign(config.skills, user.skills)
     Object.assign(config.needs, user.needs)
+  }
+  if (project && block) {
+    // The block wins over the repository file too: a blocked name stays out, and may name a repository skill.
+    for (const name of block.blocked) {
+      if (name in project.skills) {
+        delete project.skills[name]
+        if (!block.blockedSkills.includes(name)) block.blockedSkills.push(name)
+      }
+    }
+    block.blockedSkills = block.blocked.filter((n) => block.blockedSkills.includes(n))
   }
   if (project) {
     const userSkills = new Set(user?.skillKeys)

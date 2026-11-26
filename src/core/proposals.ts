@@ -68,6 +68,8 @@ export function enqueue(config: Config, s: Session, p: Proposal): { session: Ses
   if (s.declined.includes(p.hash)) return { session: s, status: 'declined' }
   const known = [...config.rules.map((r) => hashEntry('rule', r)), ...config.notes.map((n) => hashEntry('note', n)), ...s.proposals.map((q) => q.hash)]
   if (known.includes(p.hash)) return { session: s, status: 'duplicate' }
+  // An id the open root blocks is a standard entry this project turned off: do not ask about it again.
+  if (config.project?.blocked.includes(p.entry.id)) return { session: s, status: 'duplicate' }
   // `accept <id>` must name one proposal: a short id that already waits makes the new one a duplicate.
   if (s.proposals.some((q) => q.entry.id === p.entry.id)) return { session: s, status: 'duplicate' }
   if (s.proposals.length >= QUEUE_CAP) return { session: s, status: 'full' }
@@ -133,6 +135,10 @@ export function addEntry(doc: unknown, kind: 'rule' | 'note', entry: Rule | Note
   const base: Record<string, unknown> = isDoc(doc) ? { ...doc } : {}
   const list: unknown[] = Array.isArray(base[key]) ? [...(base[key] as unknown[])] : []
   if (list.some((x) => isObject(x) && x.id === entry.id)) return { config: doc, note: `${entry.id} is already in the file.` }
+  if (where === undefined && isObject(base.projects)) {
+    const used = Object.values(base.projects).some((b) => isObject(b) && ['notes', 'rules'].some((k) => Array.isArray(b[k]) && (b[k] as unknown[]).some((x) => isObject(x) && x.id === entry.id)))
+    if (used) return { config: doc, note: `${entry.id} is already used by a project block, so nothing was added. Rename it or remove it there.` }
+  }
   list.push(where === undefined ? entry : { ...entry, where })
   base[key] = list
   return { config: base }

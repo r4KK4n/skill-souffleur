@@ -2925,3 +2925,20 @@ test('a skill blocked in this root is left out of the system section and shown a
   expect(t).toMatch(/^Project: \/work\/proj \(block: 1 blocked, 0 own\)$/m)
   expect(t).toMatch(/\| terse:terse-mode \| blocked here \|/)
 })
+
+test('init works on the standard: names in this root block or own are neither asked nor rewritten', async ($, on) => {
+  const user = JSON.stringify({
+    skills: { x: { always: true }, 'writing-guide': { always: true } },
+    projects: { '/work/proj': { block: ['x'], skills: { o: { always: true } } } },
+  })
+  const w = world(on, { [USER_FILE]: user }, { skills: ['x', 'o', 'writing-guide'], answers: ['When the task needs it', 'When the task needs it', 'When the task needs it'] })
+  await start($)
+  await run($, 'init')
+  expect(w.asked.length).toBe(1)
+  expect(w.asked[0]).toMatch(/writing-guide/)
+  const written = JSON.parse(w.writes.filter((x) => x.path === USER_FILE).at(-1)!.text)
+  expect(written.skills.x).toEqual({ always: true })
+  expect(written.skills.o).toBeUndefined()
+  expect(written.projects['/work/proj'].skills.o).toEqual({ always: true })
+  expect(written.projects['/work/proj'].block).toEqual(['x'])
+})
