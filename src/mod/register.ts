@@ -874,7 +874,7 @@ function noticeFirst($: Dollar, l: Loaded, session: Session): void {
 /** One dialog about the first waiting proposal. Returns the line to show, or undefined when nothing was asked or the dialog gave no answer. */
 async function askFirst($: Dollar, atTurnEnd = false): Promise<string | undefined> {
   const { l, session } = await current($)
-  // A proposal whose dialog timed out is shown as a notice; it is not asked again while that dialog is still open.
+  // A proposal whose dialog timed out (at a turn end or in a typed command) is not asked again while that dialog is still open.
   const waiting = await withStoredDeclined($, session)
   const q = nextQuestion({ ...waiting, proposals: waiting.proposals.filter((p) => !timedOutAsk.has(p.hash)) })
   if (!q) return undefined
@@ -919,7 +919,7 @@ class TimedOut extends Error {}
 const ASK_TIMEOUT_LINE = 'Souffleur: no answer within two minutes; the proposal stays queued. A late tap in the dialog still counts.'
 /** How the mod kit words the rejection of a dialog the person closed: `$.ui.ask: no answer (the dialog was dismissed)`. */
 const DISMISSED = /dismissed/i
-/** Proposals whose turn-end dialog timed out and may still be answered. */
+/** Proposals whose dialog timed out (turn end or typed command) and may still be answered. */
 const timedOutAsk = new Set<string>()
 
 /** A dialog answered after its timeout: counts only while the proposal still waits (a reply may have answered it first). */
@@ -1141,6 +1141,7 @@ async function runRule($: Dollar, text: string): Promise<string> {
   })
   if (status !== 'queued') return status === 'duplicate' ? 'Souffleur: that is already a rule or note, or already waiting.' : status === 'declined' ? 'Souffleur: you declined this before.' : 'Souffleur: twenty proposals wait already. Run /souffleur review first.'
   const asked = await askFirst($)
+  if (asked === ASK_TIMEOUT_LINE) return `${asked} Or run /souffleur accept ${p.entry.id}.`
   if (asked !== undefined) return asked
   return `Souffleur: queued ${p.kind} ${p.entry.id}: ${describeProposal(p)}. Run /souffleur review to answer, or /souffleur accept ${p.entry.id}.`
 }

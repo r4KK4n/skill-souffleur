@@ -2893,7 +2893,10 @@ test('a typed rule whose dialog never answers returns after the limit and sets n
   const t = run($, 'rule Always say hi')
   await idle()
   await w.clock.advance(120_000)
-  expect(await t).toMatch(NO_ANSWER)
+  const text = await t
+  expect(text).toMatch(NO_ANSWER)
+  expect(text).toMatch(/Or run \/souffleur accept note-[0-9a-f]+\.$/)
+  expect(await table($)).toMatch(/Open proposals \(1\)/)
   expect(String((await propose($, note('Keep commits small.'))).result)).not.toBe(STOPPED)
 })
 
