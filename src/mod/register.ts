@@ -1,9 +1,9 @@
 import type { Register } from 'claude-code'
-import { excludedIn, isTrustedRoot, normRoot, parseConfig } from '../core/config.ts'
+import { MAX_LIST, MAX_PROJECT_ROOTS, excludedIn, isTrustedRoot, normRoot, parseConfig } from '../core/config.ts'
 import { decide, initSession, normalizeSession } from '../core/decide.ts'
 import { MIGRATE_INTRO, describeHook, findHookOverlaps, findPassages, hookQuestion, hookSteps, isGuess, migrateSteps, passageLines, removeHook } from '../core/migrate.ts'
 import type { HookOverlap, Passage } from '../core/migrate.ts'
-import { CHOICE_LABEL, INJECTED_HELP, addSkillToProject, hasProjectKey, ignoreInProject, touchProject, NOT_SET_UP, SETUP_INTRO, applyChoice, candidates, choiceOf, cleanNeedText, configProblem, currentChoice, describePlan, explicitOnly, injectedWarning, needKeyFor, options, parsePicks, parseSkips, picksPrompt, setupSteps } from '../core/setup.ts'
+import { CHOICE_LABEL, INJECTED_HELP, addSkillToProject, hasProjectKey, ignoreInProject, NOT_SET_UP, SETUP_INTRO, applyChoice, candidates, choiceOf, cleanNeedText, configProblem, currentChoice, describePlan, explicitOnly, injectedWarning, needKeyFor, options, parsePicks, parseSkips, picksPrompt, setupSteps } from '../core/setup.ts'
 import type { LoadChoice, NeedText, Plan, StartHooks, Suggestion } from '../core/setup.ts'
 import type { Action, CoreEvent, Session } from '../core/decide.ts'
 import { audienceOf, classifyDeliverable, needTexts } from '../core/needs.ts'
@@ -414,7 +414,7 @@ const withNotes = (text: string, notes: string[]) => (notes.length ? `${text}\n\
  * It reads the files fresh, writes only the user file, and writes nothing when the file cannot be read or edited.
  * Where no dialog answers, it returns the recommendations and the config they give, and writes nothing.
  */
-async function runInit($: Dollar, l0: Loaded): Promise<string> {
+async function runInit($: Dollar, l0: Loaded, only?: string[]): Promise<string> {
   const notes: string[] = []
   const home: string | undefined = await $.env.get('HOME')
   if (!home) return 'Souffleur init: the home folder is unknown, so nothing was changed.'
@@ -469,7 +469,7 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
   const explicit = new Set(described.filter((x) => explicitOnly(x.description)).map((x) => x.name))
   const pool = described.filter((x) => {
     const rule = config.skills[x.name]
-    return !explicit.has(x.name) && (rule === undefined || (rule.from === 'user' && rule.need === undefined))
+    return (only === undefined || only.includes(x.name)) && !explicit.has(x.name) && (rule === undefined || (rule.from === 'user' && rule.need === undefined))
   })
   const skips = new Set(explicit)
   let picks: Suggestion[] = []
@@ -488,7 +488,7 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
 
   // Skills of this project that nothing names yet: asked again here, for this project or everywhere.
   const ownHere = new Set((await projectInstalled($)).filter((n) => !(n in config.skills) && !skip.includes(n)))
-  const plans: Plan[] = candidates(config, installed, reloadHooked, [...picks.map((x) => x.skill), ...ownHere], skip).map(({ skill, source }) => {
+  const plans: Plan[] = candidates(config, installed, reloadHooked, [...picks.map((x) => x.skill), ...ownHere], skip).filter((c) => only === undefined || only.includes(c.skill)).map(({ skill, source }) => {
     const current = currentChoice(config.skills[skill])
     const pick = picks.find((x) => x.skill === skill)
     const need = pick ? { need: pick.need } : {}
@@ -835,12 +835,12 @@ async function runBlock($: Dollar, l0: Loaded, verb: 'block' | 'unblock', name: 
   if (block.block !== undefined && !(Array.isArray(block.block) && block.block.every((n) => typeof n === 'string'))) return `Souffleur: "block" for ${root} is not a list of names, so nothing was written.`
   const names: string[] = [...((block.block as string[] | undefined) ?? [])]
   const projectText = await readOptional($, `${l0.root}/.claude/souffleur.json`, [], home)
-  const std = standardNames(parseConfig(st.text, projectText === undefined ? undefined : stripBom(projectText)).config)
+  const std = standardNames(parseConfig(stripBom(st.text), projectText === undefined ? undefined : stripBom(projectText)).config)
   if (!std.has(name) && !names.includes(name)) return `Souffleur: ${name} is not in your standard or this project's block.`
   if (verb === 'block') {
     if (names.includes(name)) return `Souffleur: ${name} is already blocked in ${root}.`
-    if (names.length >= 20) return `Souffleur: the block of ${root} already has 20 names, so nothing was written.`
-    if (!(key in projects) && Object.keys(projects).length >= 50) return 'Souffleur: at most 50 project blocks are read, so nothing was written.'
+    if (names.length >= MAX_LIST) return `Souffleur: the block of ${root} already has ${MAX_LIST} names, so nothing was written.`
+    if (!(key in projects) && Object.keys(projects).length >= MAX_PROJECT_ROOTS) return `Souffleur: at most ${MAX_PROJECT_ROOTS} project blocks are read, so nothing was written.`
     names.push(name)
     block.block = names
   } else {
@@ -956,13 +956,15 @@ async function editUserFile($: Dollar, change: (doc: unknown) => { config: unkno
 
 /** Set once the question about the project's own skills was handled in this session. */
 let ownHandled = false
-const OWN_ADD = 'Add to this project'
-const OWN_START = 'Add, from the start'
-const OWN_IGNORE = 'Ignore here'
+const OWN_NOW = 'Set up now'
+const OWN_IGNORE = 'Ignore all here'
+const OWN_LATER = 'Later'
 
 /**
- * At a turn end in a repository whose root has no block yet: asks once about the installed project skills that nothing names,
- * one dialog each, or, where no dialog opens, shows one notice. Every outcome leaves a block key (possibly `{}`) in the user file.
+ * At the first turn end of a session in a repository whose root has no block yet: one dialog about the installed project skills
+ * that nothing names. `Set up now` runs init's round for them, `Ignore all here` writes them to `ignored`, anything else
+ * (`Later`, a dismissal, a timeout, no dialog) writes nothing and sets no stop, so the next session asks again.
+ * Where no dialog opens, one notice names the count.
  */
 async function askOwnSkills($: Dollar, dialog: boolean): Promise<void> {
   if (ownHandled) return
@@ -989,51 +991,34 @@ async function askOwnSkills($: Dollar, dialog: boolean): Promise<void> {
   if (configProblem(doc) || hasProjectKey(doc, l.root)) return
   const names = (await projectInstalled($)).filter((n) => !(n in l.config.skills))
   if (!names.length) return
-  const root = l.root
-  const picked: { name: string; how: 'need' | 'start' | 'ignore' }[] = []
-  let opened = dialog
-  let dismissed = false
-  if (dialog) {
-    const described = new Map((await installedWithDescriptions($)).map((x) => [x.name, x.description]))
-    for (const name of names) {
-      let answer: unknown
-      try {
-        const desc = described.get(name)
-        const question = `This project has its own skill ${name}${desc ? ` (${desc.slice(0, 160)})` : ''} that your config does not name. Add it for this project only, or ignore it here? Nothing is added to your other projects.`
-        const asking = Promise.resolve().then(() => $.ui.ask(question, { options: [OWN_ADD, OWN_START, OWN_IGNORE], header: 'Souffleur' }))
-        answer = await Promise.race([asking, $.clock.sleep(ASK_WAIT_MS).then(() => Promise.reject(new TimedOut()))])
-      } catch (err) {
-        if (DISMISSED.test(message(err))) dismissed = true
-        else opened = picked.length > 0
-        break
-      }
-      if (typeof answer !== 'string' || answer.trim() === '') {
-        dismissed = true
-        break
-      }
-      picked.push({ name, how: answer === OWN_START ? 'start' : answer === OWN_ADD ? 'need' : 'ignore' })
-    }
-    if (!picked.length && !dismissed) {
-      noDialog = true
-      askStopped = true
-    }
-  }
-  if (dismissed) await markStopped($, { ask: true })
-  const r = await editUserFile($, (d) => {
-    let config: unknown = touchProject(d, root)
-    for (const { name, how } of picked) {
-      const next = how === 'ignore' ? ignoreInProject(config, root, name) : addSkillToProject(config, root, name, how, { key: needKeyFor(name), text: `The task calls for ${name}.` })
-      if (next.note) return { config: d, note: next.note }
-      config = next.config
-    }
-    return { config }
-  })
-  if (!r.ok) {
-    say($, l, `Souffleur: ${r.text}.`)
+  const notice = () => void say($, l, `Souffleur: this project has ${names.length} skills not in your config. /souffleur init asks about them.`)
+  if (!dialog) return notice()
+  const shown = names.slice(0, 5).join(', ') + (names.length > 5 ? ', …' : '')
+  const question = `This project has ${names.length} skill${names.length === 1 ? '' : 's'} not in your config: ${shown}. Set ${names.length === 1 ? 'it' : 'them'} up now?`
+  let answer: unknown
+  try {
+    const asking = Promise.resolve().then(() => $.ui.ask(question, { options: [OWN_NOW, OWN_IGNORE, OWN_LATER], header: 'Souffleur' }))
+    asking.catch(() => undefined) // a late rejection after a timeout is nobody's business
+    answer = await Promise.race([asking, $.clock.sleep(ASK_WAIT_MS).then(() => Promise.reject(new TimedOut()))])
+  } catch (err) {
+    // Dismissed or timed out: ask again next session. Nobody can answer: say so once.
+    if (!(err instanceof TimedOut) && !DISMISSED.test(message(err))) notice()
     return
   }
-  if (!opened && !picked.length && !dismissed) say($, l, `Souffleur: this project has ${names.length} skills not in your config. /souffleur init asks about them.`)
-  else if (picked.length) await safe($, 'installed', undefined, () => refreshInstalled($))
+  if (answer === OWN_NOW) {
+    const text = await runInit($, l, names)
+    say($, l, text)
+    return
+  }
+  if (answer !== OWN_IGNORE) return
+  const kept = names.slice(0, MAX_LIST)
+  const r = await editUserFile($, (d) => {
+    let config: unknown = d
+    for (const name of kept) config = ignoreInProject(config, l.root, name).config
+    return { config }
+  })
+  if (!r.ok) say($, l, `Souffleur: ${r.text}.`)
+  else if (names.length > kept.length) say($, l, `Souffleur: the ignored list of this project holds ${MAX_LIST} names; ${names.length - kept.length} skills stay unasked. /souffleur init asks about them.`)
 }
 
 /**
@@ -1733,8 +1718,7 @@ export const register: Register = (on) => {
         }
         const hadProposals = (await current($)).session.proposals.length > 0
         const line = await askFirst($, true)
-        if (!hadProposals && line === undefined && !noDialog && !askStopped) await askOwnSkills($, true)
-        else if (!hadProposals && noDialog) await askOwnSkills($, false)
+        if (!hadProposals && line === undefined && !noDialog && !askStopped) await askOwnSkills($, interactive)
         if (line !== undefined) {
           try {
             $.ui.toast(line)

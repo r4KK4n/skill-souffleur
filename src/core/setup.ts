@@ -1,4 +1,4 @@
-import { normRoot } from './config.ts'
+import { MAX_LIST, normRoot } from './config.ts'
 import type { Config, SkillRule } from './types.ts'
 
 /** What `/souffleur init` works with. Pure functions only: the adapter reads, asks and writes. */
@@ -129,7 +129,6 @@ function forkKey(needs: Record<string, unknown>, key: string, skill: string): st
   return candidate
 }
 
-const MAX_BLOCK_LIST = 20
 
 /** The raw block of `root` in a user file (its key may differ by a trailing slash), created when absent. The input is not changed. */
 function openBlock(userConfig: unknown, root: string): { doc: Record<string, unknown>; projects: Record<string, unknown>; key: string; block: Record<string, unknown> } {
@@ -150,17 +149,12 @@ export function hasProjectKey(userConfig: unknown, root: string): boolean {
   return isObject(userConfig) && isObject(userConfig.projects) && Object.keys(userConfig.projects).some((k) => normRoot(k) === normRoot(root))
 }
 
-/** The user file with an empty block for the root, so the question about the project's own skills is not asked again. */
-export function touchProject(userConfig: unknown, root: string): unknown {
-  return closeBlock(openBlock(userConfig, root))
-}
-
 /** The user file with the skill under `projects[root].ignored`. A full list leaves the file as it was and says so. */
 export function ignoreInProject(userConfig: unknown, root: string, skill: string): { config: unknown; note?: string } {
   const o = openBlock(userConfig, root)
   const list = Array.isArray(o.block.ignored) ? (o.block.ignored as unknown[]) : []
   if (list.includes(skill)) return { config: closeBlock(o) }
-  if (list.length >= MAX_BLOCK_LIST) return { config: userConfig, note: `${skill}: the ignored list of this project is full (${MAX_BLOCK_LIST} names), so nothing was written for it.` }
+  if (list.length >= MAX_LIST) return { config: userConfig, note: `${skill}: the ignored list of this project is full (${MAX_LIST} names), so nothing was written for it.` }
   o.block.ignored = [...list, skill]
   return { config: closeBlock(o) }
 }
@@ -172,7 +166,7 @@ export function ignoreInProject(userConfig: unknown, root: string, skill: string
 export function addSkillToProject(userConfig: unknown, root: string, skill: string, choice: 'start' | 'injected' | 'need', need?: NeedText): { config: unknown; note?: string } {
   const o = openBlock(userConfig, root)
   const skills: Record<string, unknown> = isObject(o.block.skills) ? { ...o.block.skills } : {}
-  if (!(skill in skills) && Object.keys(skills).length >= MAX_BLOCK_LIST) return { config: userConfig, note: `${skill}: this project's block already holds ${MAX_BLOCK_LIST} skills, so nothing was written for it.` }
+  if (!(skill in skills) && Object.keys(skills).length >= MAX_LIST) return { config: userConfig, note: `${skill}: this project's block already holds ${MAX_LIST} skills, so nothing was written for it.` }
   const needText = (n: unknown): string | undefined => (typeof n === 'string' ? n : isObject(n) && typeof n.what === 'string' ? n.what : undefined)
   if (choice === 'start') skills[skill] = { always: true }
   else if (choice === 'injected') skills[skill] = { always: true, startup: 'injected' }
@@ -212,6 +206,9 @@ export function applyChoice(
 ): { config: unknown; note?: string; pruned?: string[] } {
   const problem = configProblem(userConfig)
   if (problem) return { config: userConfig, note: `${skill}: the config file was not changed because ${problem}.` }
+  if (isObject(userConfig) && isObject(userConfig.projects) && Object.values(userConfig.projects).some((b) => isObject(b) && isObject(b.skills) && skill in b.skills)) {
+    return { config: userConfig, note: `${skill} is already a skill of a project block, so it was not added to the standard. Rename or remove it there first.` }
+  }
   if (need && (!NEED_KEY.test(need.key) || cleanNeedText(need.text) !== need.text)) {
     return { config: userConfig, note: `${skill}: the description was skipped because it is not one line of 1 to 200 characters.` }
   }

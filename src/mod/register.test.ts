@@ -3096,48 +3096,93 @@ const STD = JSON.stringify({ mode: 'enforce', skills: { 'writing-guide': { alway
 const rootBlock = (w: World) => JSON.parse(userWrites(w).at(-1)!.text).projects?.[MAIN]
 const NOTICE2 = 'Souffleur: this project has 2 skills not in your config. /souffleur init asks about them.'
 
-test('the first turn end asks once about a project skill and writes it into this project only', async ($, on) => {
-  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, skills: ['writing-guide'], projectSkills: ['proj-skill'], answers: ['Add to this project'] })
+test('one dialog names the skills; Set up now runs the init round and writes only into the block', async ($, on) => {
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, skills: ['writing-guide'], projectSkills: ['proj-skill', 'second-skill'], answers: ['Set up now', 'When the task needs it', 'This project only', "Don't watch"] })
   await start($)
   await turnEnd($)
-  expect(w.asked.length).toBe(1)
-  expect(w.asked[0]).toMatch(/proj-skill/)
+  expect(w.asked[0]).toMatch(/This project has 2 skills not in your config: proj-skill, second-skill\. Set them up now\?/)
+  expect(w.options[0]).toEqual(['Set up now', 'Ignore all here', 'Later'])
+  expect(w.asked.some((q) => /where/i.test(q) && /proj-skill/.test(q))).toBe(true)
+  expect(w.asked.some((q) => /writing-guide/.test(q))).toBe(false)
   const written = JSON.parse(userWrites(w).at(-1)!.text)
   expect(written.skills).toEqual({ 'writing-guide': { always: true } })
   expect(written.projects[MAIN].skills['proj-skill'].need).toBeTruthy()
-  expect(w.writes.filter((x) => /\.bak-/.test(x.path)).length).toBe(1)
+  expect(written.projects[MAIN].ignored).toEqual(['second-skill'])
   await turnEnd($)
-  expect(w.asked.length).toBe(1)
-  expect(await table($)).toMatch(/proj-skill/)
+  expect(w.asked.filter((q) => /not in your config/.test(q)).length).toBe(1)
 })
 
-test('Ignore here lists the skill under ignored and adds no skill', async ($, on) => {
-  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['proj-skill'], answers: ['Ignore here'] })
+test('Ignore all here writes every name to ignored and nothing else', async ($, on) => {
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['a-skill', 'b-skill'], answers: ['Ignore all here'] })
   await start($)
   await turnEnd($)
-  expect(rootBlock(w)).toEqual({ ignored: ['proj-skill'] })
+  expect(w.asked.length).toBe(1)
+  expect(rootBlock(w)).toEqual({ ignored: ['a-skill', 'b-skill'] })
 })
 
-test('a dismissed dialog asks nothing more and still writes the key', async ($, on) => {
-  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['a-skill', 'b-skill'], answers: ['__undefined__'] })
+test('more than 20 names: the first 20 are ignored, the rest stay unasked, one error line', async ($, on) => {
+  const names = Array.from({ length: 22 }, (_, i) => `s${String(i).padStart(2, '0')}`)
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: names, answers: ['Ignore all here'] })
+  await start($)
+  await turnEnd($)
+  expect(rootBlock(w).ignored.length).toBe(20)
+  expect(w.logs.filter((l) => /ignored list/.test(l)).length).toBe(1)
+})
+
+test('Later writes nothing, sets no stop, and asks again at the next session only', async ($, on) => {
+  const w = world(on, { [USER_FILE]: JSON.stringify({ mode: 'enforce', skills: { 'dev-workflow': { always: true } } }) }, { repoRoot: MAIN, projectSkills: ['proj-skill'], answers: ['Later', 'Yes, everywhere', 'Later'] })
   await start($)
   await turnEnd($)
   await turnEnd($)
   expect(w.asked.length).toBe(1)
-  expect(rootBlock(w)).toEqual({})
+  expect(w.writes.length).toBe(0)
+  await propose($, AGENT_RULE)
+  await turnEnd($)
+  expect(w.asked.length).toBe(2)
+  expect(w.asked[1]).toMatch(/Add rule/)
+  await start($)
+  await turnEnd($)
+  expect(w.asked.length).toBe(3)
+  expect(w.asked[2]).toMatch(/not in your config/)
 })
 
-test('where no dialog opens one notice names the count and the key is written', async ($, on) => {
+test('a dismissed own-skill dialog writes nothing and proposals are still asked', async ($, on) => {
+  const w = world(on, { [USER_FILE]: JSON.stringify({ mode: 'enforce', skills: { 'dev-workflow': { always: true } } }) }, { repoRoot: MAIN, projectSkills: ['proj-skill'], answers: ['__undefined__', 'Yes, everywhere'] })
+  await start($)
+  await turnEnd($)
+  expect(w.writes.length).toBe(0)
+  await propose($, AGENT_RULE)
+  await turnEnd($)
+  expect(w.asked.length).toBe(2)
+  expect(userWrites(w).length).toBe(1)
+})
+
+test('a timed out own-skill dialog writes nothing, and a late tap is ignored', async ($, on) => {
+  let tap: (label: string) => void = () => {}
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['proj-skill'], holdAsk: new Promise<string>((r) => { tap = r }) })
+  await start($)
+  const t = turnEnd($)
+  await new Promise((r) => setTimeout(r, 50))
+  await w.clock.advance(120_000)
+  await t
+  tap('Ignore all here')
+  await new Promise((r) => setTimeout(r, 50))
+  expect(w.writes.length).toBe(0)
+  await turnEnd($)
+  expect(w.asked.length).toBe(1)
+})
+
+test('where no dialog opens one notice names the count and nothing is written', async ($, on) => {
   const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['a-skill', 'b-skill'], answers: 'reject' })
   await start($)
   await turnEnd($)
   await turnEnd($)
   expect(w.logs.filter((l) => l === NOTICE2).length).toBe(1)
-  expect(rootBlock(w)).toEqual({})
+  expect(w.writes.length).toBe(0)
 })
 
 test('a waiting proposal is asked first and the own skills wait for the next turn end', async ($, on) => {
-  const w = world(on, { [USER_FILE]: JSON.stringify({ mode: 'enforce', skills: { 'dev-workflow': { always: true } } }) }, { repoRoot: MAIN, projectSkills: ['proj-skill'], answers: ['Yes, everywhere', 'Ignore here'] })
+  const w = world(on, { [USER_FILE]: JSON.stringify({ mode: 'enforce', skills: { 'dev-workflow': { always: true } } }) }, { repoRoot: MAIN, projectSkills: ['proj-skill'], answers: ['Yes, everywhere', 'Later'] })
   await start($)
   await propose($, AGENT_RULE)
   await turnEnd($)
@@ -3149,7 +3194,7 @@ test('a waiting proposal is asked first and the own skills wait for the next tur
 })
 
 test('own-skill questions never come outside a repository, with a key present, or for names already known', async ($, on) => {
-  const outside = world(on, { [USER_FILE]: STD }, { projectSkills: ['proj-skill'], answers: ['Ignore here'] })
+  const outside = world(on, { [USER_FILE]: STD }, { projectSkills: ['proj-skill'], answers: ['Ignore all here'] })
   await start($)
   await turnEnd($)
   expect(outside.asked.length).toBe(0)
@@ -3157,7 +3202,7 @@ test('own-skill questions never come outside a repository, with a key present, o
 })
 
 test('a root with a key, and names in the standard or ignored, are not asked about', async ($, on) => {
-  const keyed = world(on, { [USER_FILE]: JSON.stringify({ skills: {}, projects: { [`${MAIN}/`]: {} } }) }, { repoRoot: MAIN, projectSkills: ['proj-skill'], answers: ['Ignore here'] })
+  const keyed = world(on, { [USER_FILE]: JSON.stringify({ skills: {}, projects: { [`${MAIN}/`]: {} } }) }, { repoRoot: MAIN, projectSkills: ['proj-skill'], answers: ['Ignore all here'] })
   await start($)
   await turnEnd($)
   expect(keyed.asked.length).toBe(0)
@@ -3165,7 +3210,7 @@ test('a root with a key, and names in the standard or ignored, are not asked abo
 })
 
 test('names the standard or the repository file already has are not asked about', async ($, on) => {
-  const w = world(on, { [USER_FILE]: STD, [`${MAIN}/.claude/souffleur.json`]: JSON.stringify({ skills: { 'repo-skill': { always: true } } }) }, { repoRoot: MAIN, projectSkills: ['writing-guide', 'repo-skill'], answers: ['Ignore here'] })
+  const w = world(on, { [USER_FILE]: STD, [`${MAIN}/.claude/souffleur.json`]: JSON.stringify({ skills: { 'repo-skill': { always: true } } }) }, { repoRoot: MAIN, projectSkills: ['writing-guide', 'repo-skill'], answers: ['Ignore all here'] })
   await start($)
   await turnEnd($)
   expect(w.asked.length).toBe(0)

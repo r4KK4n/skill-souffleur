@@ -52,8 +52,10 @@ export function hasControl(s: string): boolean {
   })
 }
 
-const MAX_LIST = 20
-const MAX_PROJECT_ROOTS = 50
+/** Entries per list, also in a project block. */
+export const MAX_LIST = 20
+/** Project blocks read from the user file. */
+export const MAX_PROJECT_ROOTS = 50
 const MAX_TOOL = 100
 const MAX_GLOB = 200
 /** A project file is untrusted input: it may define this many skills and needs. */

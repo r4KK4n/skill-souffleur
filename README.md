@@ -127,6 +127,13 @@ If you edit a config file by hand, new entries apply after `/souffleur` (it read
 - `/souffleur need <name>` turns a need on for this session, even when no prompt matched it. A need a prompt started ends by itself after 20 prompts in a row that did not match it (prompts of three words or fewer do not count); a need set this way ends only with `drop`.
 - `/souffleur drop <name>` turns a need off again.
 - `/souffleur block <name>` and `/souffleur unblock <name>` turn a skill, note or rule of your standard off or on in this project only; other projects keep it. `/souffleur project` shows what applies here in a few lines: what is blocked, what is only for this project, what `notIn` or `where` turns off, and how many standard skills, notes and rules apply. The blocks live in the `projects` key of `~/.claude/souffleur.json`, keyed by the project's main folder (`"projects": { "/work/app": { "block": ["writing-guide"] } }`); the first change in a run saves `souffleur.json.bak-<time>` beside it.
+- Per-project blocks. The top level of `~/.claude/souffleur.json` is the standard for every project. To change it for one repository only, add a block under `projects`, keyed by the repository's main folder:
+
+  ```json
+  { "projects": { "/work/app": { "block": ["writing-guide"], "skills": { "app-lint": { "always": true } }, "ignored": ["old-helper"] } } }
+  ```
+
+  `block` turns standard skills, notes or rules off there; `skills`, `needs`, `notes` and `rules` add entries for that project only; `ignored` lists project skills you do not want to be asked about. A project file in the repository cannot hold `projects`. Souffleur writes to a block only after your answer: `/souffleur block` and `unblock`, the one question about a project's own skills (`Ignore all here` fills `ignored`), and `/souffleur init`, which offers `This project only` or `Everywhere` for a skill that only this project has. Before the first write of a session it saves `souffleur.json.bak-<time>` beside the file.
 - `/souffleur pause` switches Souffleur off for this session: no restore requests, no need detection (so no classifier calls), no turn-end questions, no reading of skill texts, and no gate, duty, rule or brief denial. The ledger keeps tracking loads and compactions. `/souffleur resume` undoes it. A pause belongs to the running session and is not carried over when you resume a session.
 - `/souffleur init` asks, skill by skill, how Souffleur should keep each one and writes your answers to `~/.claude/souffleur.json`. See [Setting up your skills](#setting-up-your-skills).
 - `/souffleur migrate` goes through your old reload hooks and offers to turn them off. See [Coming from your own hooks](#coming-from-your-own-hooks).
