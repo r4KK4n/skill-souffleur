@@ -91,6 +91,9 @@ function parseMatch(v: unknown, where: string): Match {
 }
 
 
+const ABSOLUTE = /^(\/|[A-Za-z]:[\\/])/
+const isAbsolutePath = (v: unknown, max: number): v is string => typeof v === 'string' && ABSOLUTE.test(v) && !hasControl(v) && v.length <= max
+
 const SOURCE = /^(skill(:[A-Za-z0-9:_-]{1,64})?|slip|user)$/
 const FIELD = /^[A-Za-z0-9_]{1,40}$/
 const ENTRY_ID = /^[A-Za-z0-9:_-]{1,64}$/
@@ -104,7 +107,7 @@ function entryCommon(obj: Record<string, unknown>, where: string): { id: string;
     out.source = obj.source as string
   }
   if (obj.where !== undefined) {
-    check(typeof obj.where === 'string' && /^(\/|[A-Za-z]:[\\/])/.test(obj.where) && !hasControl(obj.where) && obj.where.length <= 500, `${where}.where`, 'must be an absolute one-line path')
+    check(isAbsolutePath(obj.where, 500), `${where}.where`, 'must be an absolute one-line path')
     out.where = normRoot(obj.where as string)
   }
   return out
@@ -179,17 +182,14 @@ const FOR_ERROR = 'must be one of chat, readers, users, work; ignored'
 const isAudience = (v: unknown): v is Audience => typeof v === 'string' && (AUDIENCES as readonly string[]).includes(v)
 
 /** Parses one need: the old string form (counts as `work`) or `{ for, what }`. */
-function parseNeed(value: unknown, name: string, soft: (m: string) => void): Need | undefined {
+function parseNeed(value: unknown, name: string, soft: (m: string) => void): Need {
   const where = `need ${show(name)}`
   let what: unknown = value
   let audience: Audience = 'work'
   if (isObject(value)) {
     onlyKeys(value, ['for', 'what'], where)
-    if (!isAudience(value.for)) {
-      soft(`${name}.for: ${FOR_ERROR}`)
-      return undefined
-    }
-    audience = value.for
+    if (isAudience(value.for)) audience = value.for
+    else soft(`${name}.for: must be one of chat, readers, users, work; counted as work`)
     what = value.what
   }
   check(typeof what === 'string', where, isObject(value) ? '"what" must be a string' : 'must be a string or { "for", "what" }')
@@ -225,7 +225,7 @@ function parseRule(v: unknown, where: string, source: Origin, soft: (m: string) 
   if (obj.notIn !== undefined) {
     const list = obj.notIn
     if (source === 'project') soft(`${name}.notIn is only allowed in the user config; ignored`)
-    else if (Array.isArray(list) && list.length <= MAX_LIST && list.every((p) => typeof p === 'string' && /^(\/|[A-Za-z]:[\\/])/.test(p) && !hasControl(p) && p.length <= MAX_GLOB)) rule.notIn = (list as string[]).map(normRoot)
+    else if (Array.isArray(list) && list.length <= MAX_LIST && list.every((p) => isAbsolutePath(p, MAX_GLOB))) rule.notIn = (list as string[]).map(normRoot)
     else soft(`${name}.notIn: must be a list of at most ${MAX_LIST} absolute paths; ignored`)
   }
   if (obj.gate !== undefined) {
@@ -315,8 +315,7 @@ function parseFile(text: string, source: Origin, errors: string[]): FileConfig {
         if (kind === 'skill') {
           file.skills[name] = { from: source, ...parseRule(value, `skill ${show(name)}`, source, fail, name) }
         } else {
-          const need = parseNeed(value, name, fail)
-          if (need) file.needs[name] = need
+          file.needs[name] = parseNeed(value, name, fail)
         }
       } catch (e) {
         if (!(e instanceof SchemaError)) throw e

@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { decide, initSession } from '../src/core/decide.ts'
-import { addEntry, answer, describeProposal, enqueue, makeProposal, nextQuestion, parseReply, parseShaped, proposalNotice } from '../src/core/proposals.ts'
+import { addEntry, answer, describeProposal, enqueue, makeProposal, nextQuestion, parseReply, parseShaped, proposalNotice, shapePrompt } from '../src/core/proposals.ts'
 import type { Proposal } from '../src/core/proposals.ts'
 import type { Config, Note, Rule } from '../src/core/types.ts'
 
@@ -167,4 +167,10 @@ test('the notice carries the reply hint and the caution for a skill text', () =>
   assert.equal(proposalNotice(p, 'command'), `Souffleur: proposal ${p.entry.id}: ${describeProposal(p).replace(/\.$/, '')}. Run /souffleur accept ${p.entry.id} or /souffleur decline ${p.entry.id}.`)
   const q = { ...p, from: 'skill:writing-guide' }
   assert.match(proposalNotice(q), /read from a skill's text, not verified/)
+})
+
+test('shapePrompt lists needs by their text', () => {
+  const prompt = shapePrompt('x', { ui: { for: 'users', what: 'Building a screen.' } })
+  assert.match(prompt, /ui: Building a screen\./)
+  assert.doesNotMatch(prompt, /\[object Object\]/)
 })

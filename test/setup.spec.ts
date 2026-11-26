@@ -4,7 +4,7 @@ import { parseConfig } from '../src/core/config.ts'
 import { applyChoice, candidates, cleanNeedText, CHOICE_LABEL, explicitOnly, injectedWarning, options, parsePicks, parseSkips, picksPrompt, setupSteps, SETUP_INTRO, INJECTED_HELP } from '../src/core/setup.ts'
 
 const config = (user: unknown, project?: unknown) => parseConfig(JSON.stringify(user), project === undefined ? undefined : JSON.stringify(project)).config
-const doc = (c: unknown) => c as { mode?: string; skills: Record<string, Record<string, unknown>>; needs: Record<string, string> }
+const doc = (c: unknown) => c as { mode?: string; skills: Record<string, Record<string, unknown>>; needs: Record<string, unknown> }
 
 test('options for a plain skill end with Stop', () => {
   const o = options('writing-guide', undefined, 'need')
@@ -244,4 +244,41 @@ test('setupSteps lists warnings after the recommendations', () => {
   const plans = [{ skill: 'flow:plan', source: 'user' as const, current: 'injected' as const, recommended: 'injected' as const }]
   const text = setupSteps({ plans, userConfig: undefined, configPath: '~/c.json', unwatched: [], warnings: ['Warning: x.'] })
   assert.match(text, /Warning: x\./)
+})
+
+const O = (f: 'chat' | 'readers' | 'users' | 'work', what: string) => ({ for: f, what })
+test('applyChoice keeps an object need when its text is unchanged (shared need)', () => {
+  const cfg = { skills: { a: { need: 'prose' }, b: { need: 'prose' } }, needs: { prose: O('readers', 'Writing.') } }
+  const r = applyChoice(cfg, 'a', 'need', { key: 'prose', text: 'Writing.' })
+  assert.deepEqual(doc(r.config).needs, { prose: O('readers', 'Writing.') })
+  assert.deepEqual(doc(r.config).skills, cfg.skills)
+})
+test('applyChoice keeps an object need when its text is unchanged (single skill)', () => {
+  const cfg = { skills: { a: { need: 'prose' } }, needs: { prose: O('readers', 'Writing.') } }
+  const r = applyChoice(cfg, 'a', 'need', { key: 'prose', text: 'Writing.' })
+  assert.deepEqual(doc(r.config).needs, { prose: O('readers', 'Writing.') })
+})
+test('applyChoice with changed text keeps the audience of an object need', () => {
+  const cfg = { skills: { a: { need: 'prose' } }, needs: { prose: O('readers', 'Writing.') } }
+  const r = applyChoice(cfg, 'a', 'need', { key: 'prose', text: 'Writing more.' })
+  assert.deepEqual(doc(r.config).needs, { prose: O('readers', 'Writing more.') })
+})
+test('applyChoice without a need argument reuses the object need text and keeps it', () => {
+  const cfg = { skills: { a: { need: 'prose' } }, needs: { prose: O('users', 'Screens.') } }
+  const r = applyChoice(cfg, 'a', 'need')
+  assert.deepEqual(doc(r.config).needs, { prose: O('users', 'Screens.') })
+  assert.deepEqual(doc(r.config).skills, { a: { need: 'prose' } })
+})
+test('applyChoice shared object need with changed text forks and keeps for', () => {
+  const cfg = { skills: { a: { need: 'prose' }, b: { need: 'prose' } }, needs: { prose: O('readers', 'Writing.') } }
+  const r = applyChoice(cfg, 'a', 'need', { key: 'prose', text: 'Other.' })
+  const needs = doc(r.config).needs as Record<string, unknown>
+  assert.deepEqual(needs.prose, O('readers', 'Writing.'))
+  assert.ok(Object.values(needs).some((n) => JSON.stringify(n) === JSON.stringify(O('readers', 'Other.'))))
+})
+test('applyChoice strips for when a skill moves from always to need, and need to start', () => {
+  const r = applyChoice({ skills: { a: { always: true, for: 'chat' } } }, 'a', 'need', { key: 'n', text: 'T.' })
+  assert.deepEqual(doc(r.config).skills, { a: { need: 'n' } })
+  const r2 = applyChoice({ skills: { a: { need: 'n', for: 'chat' } }, needs: { n: 'T.' } }, 'a', 'start')
+  assert.deepEqual(doc(r2.config).skills, { a: { always: true, for: 'chat' } })
 })

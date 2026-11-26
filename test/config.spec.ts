@@ -414,14 +414,21 @@ test('an object need is parsed with its audience', () => {
   assert.deepEqual(config.needs.prose, { for: 'readers', what: 'A text others read.' })
 })
 
-test('an object need with a bad or missing for, or unknown key, is dropped with the error', () => {
-  for (const need of [{ for: 'everyone', what: 'x' }, { what: 'x' }, { for: 'work' }, { for: 'work', what: 'x', extra: 1 }]) {
+test('an object need with a bad or missing for is kept as work, with the error', () => {
+  for (const need of [{ for: 'everyone', what: 'x' }, { what: 'x' }]) {
     const { config, errors } = parseConfig(json({ needs: { prose: need } }), undefined)
     assert.equal(errors.length, 1, JSON.stringify(need))
+    assert.match(errors[0]!, /prose\.for: must be one of chat, readers, users, work; counted as work/)
+    assert.deepEqual(config.needs.prose, { for: 'work', what: 'x' })
+  }
+})
+
+test('an object need with an unknown key, no what, or a bad what is dropped', () => {
+  for (const need of [{ for: 'work' }, { for: 'work', what: 'x', extra: 1 }, { what: '' }]) {
+    const { config, errors } = parseConfig(json({ needs: { prose: need } }), undefined)
+    assert.ok(errors.length >= 1, JSON.stringify(need))
     assert.deepEqual(config.needs, {})
   }
-  const bad = parseConfig(json({ needs: { prose: { for: 'everyone', what: 'x' } } }), undefined)
-  assert.match(bad.errors[0]!, /prose\.for: must be one of chat, readers, users, work; ignored/)
 })
 
 test('for on an always-on skill is read; elsewhere it is an error and ignored', () => {
@@ -458,4 +465,15 @@ test('notIn in the project file is an error and ignored; it cannot switch off a 
   assert.equal(config.skills.g?.notIn, undefined)
   assert.equal(config.skills.h?.notIn, undefined)
   assert.equal(config.skills.h?.always, true)
+})
+
+test('notIn holds at most 20 paths; for on a startup-injected skill without always is an error', () => {
+  const many = Array.from({ length: 21 }, (_, i) => `/r${i}`)
+  const r = parseConfig(json({ skills: { g: { always: true, notIn: many } } }), undefined)
+  assert.equal(r.errors.length, 1)
+  assert.equal(r.config.skills.g?.notIn, undefined)
+  assert.deepEqual(parseConfig(json({ skills: { g: { always: true, notIn: many.slice(0, 20) } } }), undefined).errors, [])
+  const s = parseConfig(json({ skills: { g: { startup: 'injected', for: 'chat' } } }), undefined)
+  assert.match(s.errors[0]!, /g\.for: only for always-on skills; ignored/)
+  assert.equal(s.config.skills.g?.for, undefined)
 })
