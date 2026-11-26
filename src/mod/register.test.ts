@@ -82,7 +82,7 @@ type Opts = {
   /** An Agent tool call stays open until this resolves, as a running subagent keeps it open. */
   holdAgent?: Promise<void>
   /** A dialog never answers and never rejects, as in a session whose client does not show it. */
-  holdAsk?: boolean
+  holdAsk?: boolean | Promise<string>
 }
 
 /** Answers every call the mod makes on `$`; files maps an absolute path to its text, a missing path throws. */
@@ -208,7 +208,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
     asked.push(question)
     options.push(((e as unknown as { questions: { options?: ({ label: string } | string)[] }[] }).questions[0]!.options ?? []).map((o) => (typeof o === 'string' ? o : o.label)))
     opts.onAsk?.()
-    if (opts.holdAsk) return new Promise(() => {}) as never
+    if (opts.holdAsk) return (opts.holdAsk === true ? new Promise(() => {}) : opts.holdAsk.then((l) => ({ result: { questions: [], answers: { [question]: l } } }))) as never
     const label = answers.shift()
     if (opts.answers === 'reject' || label === undefined) throw new Error('nobody to ask')
     if (label === '__undefined__') return { result: { questions: [], answers: { [question]: undefined } } } as never
@@ -2402,5 +2402,68 @@ test('a failure after the answer was written still tells the model', async ($, o
   await turnEnd($)
   await reply($, 'accept', COMPOSER)
   expect(w.writes.length).toBe(1)
+  expect(hasLine(w, `proposal ${id}`)).toBe(true)
+})
+
+const lateWorld = (on: any) => {
+  let tap!: (label: string) => void
+  const held = new Promise<string>((r) => { tap = r })
+  const w = world(on, { [USER_FILE]: ENFORCE }, { holdAsk: held })
+  return { w, tap }
+}
+const timedOut = async ($: any, w: World) => {
+  const t = turnEnd($)
+  await new Promise((r) => setTimeout(r, 50))
+  await w.clock.advance(120_000)
+  await t
+}
+const idle = () => new Promise((r) => setTimeout(r, 50))
+
+test('a dialog tapped after the timeout still writes once and disarms the reply', async ($, on) => {
+  const { w, tap } = lateWorld(on)
+  await start($)
+  await propose($, note('Reply in German.'))
+  await timedOut($, w)
+  tap('Yes, everywhere')
+  await idle()
+  expect(userFile(w).notes.length).toBe(1)
+  await reply($, 'accept', COMPOSER)
+  expect(userFile(w).notes.length).toBe(1)
+  expect(hasLine(w, 'the user accepted')).toBe(false)
+})
+
+test('a reply first, then a late tap: one write', async ($, on) => {
+  const { w, tap } = lateWorld(on)
+  await start($)
+  await propose($, note('Reply in German.'))
+  await timedOut($, w)
+  await reply($, 'accept', COMPOSER)
+  tap('Yes, everywhere')
+  await idle()
+  expect(userFile(w).notes.length).toBe(1)
+  expect(w.writes.length).toBe(1)
+})
+
+test('after a timeout the next proposal still gets a dialog attempt', async ($, on) => {
+  const { w } = lateWorld(on)
+  await start($)
+  await propose($, note('First note here.'))
+  await timedOut($, w)
+  await propose($, note('Second note here.'))
+  const t = turnEnd($)
+  await idle()
+  expect(w.asked.length).toBe(2)
+  expect(w.asked[1]).toMatch(/Second note here/)
+  await w.clock.advance(120_000)
+  await t
+})
+
+test('a failure inside the commit after the write still tells the model', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  const id = idOf(await propose($, note('Reply in German.')))
+  await turnEnd($)
+  w.stored['declined'] = 'junk'
+  await reply($, 'accept', COMPOSER)
   expect(hasLine(w, `proposal ${id}`)).toBe(true)
 })

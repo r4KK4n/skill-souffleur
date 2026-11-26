@@ -271,7 +271,7 @@ function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'pro
       debug.push({ kind: 'debug', text: `need started: ${reason}` })
     }
     // Only a prompt the classifier ran on without failing counts as a miss; a need set with the command never ends by itself.
-    // A reply of a word or two ("ja") says nothing about the topic: it neither counts nor resets.
+    // A reply of a word or two ("ja") says nothing about the topic: it does not count as a miss. A match on it still resets the count (see the matched branch above).
     if (e.classifierFailed === false && e.text.trim().split(/\s+/).length > SHORT_PROMPT_WORDS) {
       for (const [name, n] of Object.entries(needs)) {
         if (e.matched.includes(name) || n.reason === 'command') continue

@@ -853,15 +853,22 @@ function noticeFirst($: Dollar, l: Loaded, session: Session): void {
 /** One dialog about the first waiting proposal. Returns the line to show, or undefined when nothing was asked or the dialog gave no answer. */
 async function askFirst($: Dollar, atTurnEnd = false): Promise<string | undefined> {
   const { l, session } = await current($)
-  const q = nextQuestion(await withStoredDeclined($, session))
+  // A proposal whose dialog timed out is shown as a notice; it is not asked again while that dialog is still open.
+  const waiting = await withStoredDeclined($, session)
+  const q = nextQuestion({ ...waiting, proposals: waiting.proposals.filter((p) => !timedOutAsk.has(p.hash)) })
   if (!q) return undefined
   let label: unknown
+  const asking = Promise.resolve().then(() => $.ui.ask(q.question, { options: q.options, header: 'Souffleur' }))
   try {
-    const asking = $.ui.ask(q.question, { options: q.options, header: 'Souffleur' })
-    // At a turn end a client that shows no dialog may never answer: after two minutes it counts as a rejection.
-    label = atTurnEnd ? await Promise.race([asking, $.clock.sleep(ASK_WAIT_MS).then(() => Promise.reject(new Error('no answer')))]) : await asking
-  } catch {
-    if (atTurnEnd) {
+    // At a turn end a client that shows no dialog may never answer: after two minutes this proposal falls back to the notice.
+    label = atTurnEnd ? await Promise.race([asking, $.clock.sleep(ASK_WAIT_MS).then(() => Promise.reject(new TimedOut()))]) : await asking
+  } catch (err) {
+    if (err instanceof TimedOut) {
+      // Only this proposal falls back. The dialog stays open: a later tap still counts while the proposal waits.
+      timedOutAsk.add(q.hash)
+      asking.then((late) => lateAnswer($, q.hash, late), () => undefined).finally(() => timedOutAsk.delete(q.hash))
+      noticeFirst($, l, session)
+    } else if (atTurnEnd) {
       // Nobody can answer a dialog here: show the proposal once and let a one-word reply answer it.
       askStopped = true
       noDialog = true
@@ -874,6 +881,29 @@ async function askFirst($: Dollar, atTurnEnd = false): Promise<string | undefine
     return undefined
   }
   return commitAnswer($, q.hash, label)
+}
+
+class TimedOut extends Error {}
+/** Proposals whose turn-end dialog timed out and may still be answered. */
+const timedOutAsk = new Set<string>()
+
+/** A dialog answered after its timeout: counts only while the proposal still waits (a reply may have answered it first). */
+async function lateAnswer($: Dollar, hash: string, label: unknown): Promise<void> {
+  if (typeof label !== 'string' || label.trim() === '') return
+  try {
+    const { session } = await current($)
+    if (session.paused || !session.proposals.some((p) => p.hash === hash)) return
+    if (shownHash === hash) shownHash = undefined
+    askAtTurnEnd = true
+    const line = await commitAnswer($, hash, label)
+    try {
+      $.ui.toast(line)
+    } catch {
+      // a toast is a courtesy
+    }
+  } catch {
+    // a late answer that cannot be applied leaves the proposal queued
+  }
 }
 
 /**
@@ -890,9 +920,9 @@ async function answerShown($: Dollar, text: string): Promise<string | undefined>
   if (!p) return undefined
   const id = p.entry.id
   // By the full hash: the short id may name another waiting proposal.
-  const line = await commitAnswer($, hash, verdict === 'accept' ? YES_EVERYWHERE : NO)
-  askAtTurnEnd = true // the next waiting proposal gets its question or notice at the next turn end
   try {
+    const line = await commitAnswer($, hash, verdict === 'accept' ? YES_EVERYWHERE : NO)
+    askAtTurnEnd = true // the next waiting proposal gets its question or notice at the next turn end
     try {
       $.ui.toast(line)
     } catch {
@@ -1219,6 +1249,7 @@ export const register: Register = (on) => {
     askStopped = false
     shownHash = undefined
     noticed.clear()
+    timedOutAsk.clear()
     noDialog = false
     askAtTurnEnd = false
     proposeReady = false
