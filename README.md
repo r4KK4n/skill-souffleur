@@ -4,7 +4,7 @@ Keeps Claude Code skills loaded and in use for the whole session, including afte
 
 In a theatre, the souffleur sits out of sight at the edge of the stage and gives an actor the line they forgot, at the moment they need it. Souffleur does the same for skills: when compaction drops a skill the current task needs, it brings the skill back.
 
-> **Status:** version 0.1.6, released as tag `v0.1.6` (see [Install](#install) and the [roadmap](#roadmap)).
+> **Status:** version 0.1.7, released as tag `v0.1.7` (see [Install](#install) and the [roadmap](#roadmap)).
 >
 > **Early access.** Souffleur is a Claude Code mod: TypeScript that runs inside Claude Code through its mod API, shipped and installed as a plugin. Anthropic still changes that API between releases, so an update of Claude Code can break Souffleur until it is adapted. It is provided as is, with no guarantee of fixes or dates. [docs/compatibility.md](docs/compatibility.md) lists the versions each behaviour was checked on.
 
@@ -81,7 +81,7 @@ An installed plugin reaches a running session only after `/reload-plugins` or a 
 
 ```
 claude plugin uninstall skill-souffleur@skill-souffleur
-git clone --branch v0.1.6 https://github.com/r4KK4n/skill-souffleur ~/.claude/skills/skill-souffleur
+git clone --branch v0.1.7 https://github.com/r4KK4n/skill-souffleur ~/.claude/skills/skill-souffleur
 ```
 
 Update to a newer release:
@@ -255,7 +255,7 @@ Costs:
 - [x] Needs by deliverable
 - [x] Reply check
 - [x] Short notices in the transcript for start, compaction and problems
-- [x] Release tags `v0.1.0` to `v0.1.6`
+- [x] Release tags `v0.1.0` to `v0.1.7`
 - [x] Updates that reach running sessions (install from a folder)
 
 ## Contributing

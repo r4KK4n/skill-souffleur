@@ -49,7 +49,7 @@ export type Session = {
   proposed: string[]
   /** The person declined or skipped a proposal: the model proposes no more in this session (kept over reload and resume). */
   proposalsStopped?: boolean
-  /** A dialog was dismissed or could not open: no more questions at turn end in this session (kept over reload and resume). */
+  /** The person dismissed a dialog: no more questions at turn end in this session (kept over reload and resume; a dialog that could not open is not kept). */
   askStopped?: boolean
   /** Counts the stores, so the newer of two copies can be told. */
   rev?: number

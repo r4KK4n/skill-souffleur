@@ -2733,7 +2733,7 @@ test('already queued proposals stay visible in review after a stop', async ($, o
   await start($)
   await propose($, AGENT_RULE)
   await turnEnd($)
-  expect(await run($, 'review')).toMatch(/Waiting for your answer|no dialog/)
+  expect(await run($, 'review')).toMatch(/no dialog/)
 })
 
 test('a reply offer that a person prompt ends without an answer does not stop proposals', async ($, on) => {
@@ -2821,4 +2821,15 @@ test('an accepted reply does not stop proposals', async ($, on) => {
   await reply($, 'accept', COMPOSER)
   expect(userFile(w).notes.length).toBe(1)
   expect(String((await propose($, note('Answer in French, always.'))).result)).toMatch(/Queued as note-/)
+})
+
+test('a late Yes on a timed-out dialog does not stop later proposals', async ($, on) => {
+  const { w, tap } = lateWorld(on)
+  await start($)
+  await propose($, note('Reply in German.'))
+  await timedOut($, w)
+  tap('Yes, everywhere')
+  await idle()
+  expect(userFile(w).notes.length).toBe(1)
+  expect(String((await propose($, note('Keep commits small.'))).result)).not.toBe(STOPPED)
 })

@@ -37,7 +37,7 @@ let latest: Session | undefined
 /** Set by `session.start`: a person is at the prompt, and the propose tool is registered. */
 let interactive = false
 let proposeReady = false
-/** A dialog was dismissed or could not open: no more questions at turn end in this session. */
+/** A dialog was dismissed or could not open: no more questions at turn end in this process; only a dismissal is stored in the session. */
 let askStopped = false
 /** The hash of the proposal a notice showed because no dialog opens; only the person's very next prompt can answer it, by one reply word. */
 let shownHash: string | undefined
