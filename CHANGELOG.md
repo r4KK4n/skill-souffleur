@@ -6,6 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- Fixed: a resume resets the per-process counters (subagents running, main skill calls, denied agent, pending learn calls), so a stale count no longer blocks or misreads the resumed session (#32).
 - Fixed: a hook error clears once that hook works again, so one transient failure no longer keeps the status `degraded` until restart. Config errors and the classifier and learn failure counts keep their own lifecycle.
 - Notices: short `Souffleur:` lines in the transcript for session start, compaction and problems, once per event and for the main session only. `"notices": false` in the user file turns them off.
 - The propose tool is registered again on a user prompt when it dropped out of the tool list. The line `Souffleur: tool reconnected.` appears only when the tool was seen and then went missing; a tool the list never showed is registered again silently, once per process.

@@ -147,8 +147,11 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
   switch (e.type) {
     case 'start':
       // A resume keeps the ledger: what was loaded stays in the transcript until a compaction.
-      // A pause is not carried over.
-      if (e.start === 'resume') return { session: { ...s, paused: false, ...(e.version === undefined ? {} : { version: e.version }) }, actions: [] }
+      // A pause is not carried over. Counters of the previous run restart.
+      if (e.start === 'resume') return {
+        session: { ...s, paused: false, subagentsRunning: 0, mainSkillCalls: [], agentDenied: false, learnCalls: [], ...(e.version === undefined ? {} : { version: e.version }) },
+        actions: [],
+      }
       return { session: initSession(config, s.id, e.now, e.start, e.version), actions: [] }
     case 'skill': {
       const announced = (s.learnCalls ?? []).indexOf(e.skill)

@@ -324,6 +324,30 @@ test('resume keeps the ledger, clear starts a fresh session', () => {
   assert.equal(cleared.id, s.id)
 })
 
+test('resume resets per-process counters', () => {
+  const s0 = run(withAlways, [prompt(), loadSkill('terse:terse-mode')]).s
+  const s: Session = { ...s0, subagentsRunning: 2, mainSkillCalls: ['x'], agentDenied: true, learnCalls: ['y'] }
+  const resumed = decide(withAlways, s, { type: 'start', now: at(), start: 'resume' }).session
+  assert.equal(resumed.subagentsRunning, 0)
+  assert.deepEqual(resumed.mainSkillCalls, [])
+  assert.equal(resumed.agentDenied, false)
+  assert.deepEqual(resumed.learnCalls, [])
+  assert.deepEqual(resumed.ledger, s.ledger)
+  assert.deepEqual(resumed.needs, s.needs)
+  assert.deepEqual(resumed.proposals, s.proposals)
+  assert.deepEqual(resumed.noticed, s.noticed)
+})
+
+test('startup still gives a fresh session', () => {
+  const s0 = run(withAlways, [prompt(), loadSkill('terse:terse-mode')]).s
+  const s: Session = { ...s0, subagentsRunning: 2, mainSkillCalls: ['x'], agentDenied: true, learnCalls: ['y'] }
+  const fresh = decide(withAlways, s, { type: 'start', now: at(), start: 'startup' }).session
+  assert.equal(fresh.subagentsRunning, 0)
+  assert.deepEqual(fresh.mainSkillCalls, [])
+  assert.equal(fresh.agentDenied, false)
+  assert.equal(fresh.learnCalls, undefined)
+})
+
 test('session survives JSON round trip', () => {
   const events: CoreEvent[] = [
     { type: 'start', now: at(), start: 'startup', version: '2.1.332' },
