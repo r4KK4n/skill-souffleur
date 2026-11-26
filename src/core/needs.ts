@@ -68,7 +68,7 @@ export async function classifyDeliverable(
 export function neededSkills(config: Config, active: Record<NeedName, unknown>, extra: readonly SkillName[] = [], root?: string): SkillName[] {
   const here = (name: string) => config.skills[name] === undefined || !excludedIn(config.skills[name]!, root)
   const named = Object.entries(config.skills)
-    .filter(([, rule]) => rule.always === true || (rule.need !== undefined && rule.need in active))
+    .filter(([, rule]) => rule.always === true || (rule.need !== undefined && rule.need in active && !(active[rule.need] as { dormant?: boolean } | undefined)?.dormant))
     .map(([name]) => name)
     .filter(here)
   return [...named, ...extra.filter((name) => !named.includes(name) && here(name))]

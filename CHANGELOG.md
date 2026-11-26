@@ -6,6 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- A `readers` or `users` need starts from tool evidence, without a model call: a call that matches a gate of one of its skills, or for `readers` a Bash command `gh issue create|comment`, `gh pr create|edit` or `git commit` (also inside `cd x && git commit …`). After a compaction these needs go dormant: their skills are requested again only on the next such evidence or when a prompt is classified as a text for others or a screen. Excluded (`notIn`) and untrusted-project skills are never requested because of evidence.
 - A prompt is classified by what the agent will produce, in two parallel calls (A within 2.5 s, B within 4 s): call A (`chat-reply`, `text-for-others`, `screen`, `code-or-repo-work`) starts the `readers` or `users` needs, call B picks a `work` need and counts only for code or repo work. One slow call B no longer fails the whole prompt (#52). After three failures in a row each prompt lists the `work` needs and their skills so the model can pick (needs already active and skills already loaded are left out); each failure's kind (`timeout`, `rejected`, `unknown-label`) goes to the debug log.
 
 ## [0.1.4] - 2026-11-26
