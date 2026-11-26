@@ -2544,3 +2544,84 @@ test('a failed call B writes classifier B to the debug log', async ($, on) => {
   expect(w.debugLogs.join('\n')).toMatch(/classifier B: unknown-label/)
   expect(w.debugLogs.join('\n')).not.toMatch(/classifier: /)
 })
+
+// --- Reply check ---
+
+const REPLY_CFG = JSON.stringify({ mode: 'enforce', skills: { 'terse:terse-mode': { always: true, for: 'chat', reply: { maxChars: 200, headings: 0 } } } })
+const LONG_REPLY = `# Head\n${'word '.repeat(80)}`
+
+test('a long chat reply is counted and the next prompt carries the reminder line', async ($, on) => {
+  const w = world(on, { [USER_FILE]: REPLY_CFG })
+  await start($)
+  await skillLoaded($, 'terse:terse-mode')
+  await $.prompt.submit({ text: 'first question' })
+  await turnEnd($, { answer: LONG_REPLY })
+  const r = await $.prompt.submit({ text: 'second question' })
+  expect(r.context?.join('\n')).toMatch(/Souffleur: your last reply had \d+ characters and 1 heading \(limit 200 characters, 0 headings\)\. Replies in this chat follow terse:terse-mode\./)
+  expect(await table($)).toMatch(/- terse:terse-mode: 1 of 1 replies over the limit/)
+  expect(w.toasts).toEqual([])
+  expect((await $.prompt.submit({ text: 'third question' })).context?.join('\n') ?? '').not.toMatch(/last reply/)
+})
+
+test('replies of subagents, other turn reasons, aborted turns and paused sessions are not checked', async ($, on) => {
+  world(on, { [USER_FILE]: REPLY_CFG })
+  await start($)
+  await skillLoaded($, 'terse:terse-mode')
+  await turnEnd($, { answer: LONG_REPLY, agentId: 'a1' })
+  await turnEnd($, { answer: LONG_REPLY, reason: 'error' })
+  await turnEnd($, { answer: LONG_REPLY, isAborted: true })
+  expect(await table($)).not.toMatch(/replies over the limit/)
+  await run($, 'pause')
+  await turnEnd($, { answer: LONG_REPLY })
+  await run($, 'resume')
+  expect(await table($)).not.toMatch(/replies over the limit/)
+  expect((await $.prompt.submit({ text: 'q' })).context?.join('\n') ?? '').not.toMatch(/last reply/)
+})
+
+test('the reply to a typed command is not checked', async ($, on) => {
+  world(on, { [USER_FILE]: REPLY_CFG })
+  await start($)
+  await skillLoaded($, 'terse:terse-mode')
+  await $.prompt.submit({ text: '/review the diff', command: { name: 'review', args: 'the diff' } } as never)
+  await turnEnd($, { answer: LONG_REPLY })
+  expect(await table($)).not.toMatch(/replies over the limit/)
+  await $.prompt.submit({ text: 'plain question' })
+  await turnEnd($, { answer: LONG_REPLY })
+  expect(await table($)).toMatch(/1 of 1 replies over the limit/)
+})
+
+test('a config without reply counts nothing', async ($, on) => {
+  world(on, { [USER_FILE]: JSON.stringify({ mode: 'enforce', skills: { 'terse:terse-mode': { always: true, for: 'chat' } } }) })
+  await start($)
+  await skillLoaded($, 'terse:terse-mode')
+  await turnEnd($, { answer: LONG_REPLY })
+  expect(await table($)).not.toMatch(/replies over the limit/)
+  expect((await $.prompt.submit({ text: 'q' })).context?.join('\n') ?? '').not.toMatch(/last reply/)
+})
+
+test('the counts survive a resume of the session', async ($, on) => {
+  const w = world(on, { [USER_FILE]: REPLY_CFG })
+  await start($)
+  await skillLoaded($, 'terse:terse-mode')
+  await $.prompt.submit({ text: 'question' })
+  await turnEnd($, { answer: LONG_REPLY })
+  await $.session.start({ cwd: '/work/proj', surface: 'terminal', isInteractive: true, source: 'resume' } as never)
+  expect(w.stored).toBeTruthy()
+  expect(await table($)).toMatch(/1 of 1 replies over the limit/)
+})
+
+test('a turn that is not the answer to a person prompt is not counted and keeps a waiting reminder', async ($, on) => {
+  world(on, { [USER_FILE]: REPLY_CFG })
+  await start($)
+  await skillLoaded($, 'terse:terse-mode')
+  await $.prompt.submit({ text: 'question' })
+  await turnEnd($, { answer: LONG_REPLY })
+  // a background notification turn: a prompt that is not from the person, then a short answer
+  await $.prompt.submit({ text: '<task-notification>done</task-notification>', isMeta: true } as never)
+  await turnEnd($, { answer: 'ok' })
+  expect(await table($)).toMatch(/1 of 1 replies over the limit/)
+  expect((await $.prompt.submit({ text: 'next' })).context?.join('\n')).toMatch(/last reply had/)
+  await $.prompt.submit({ text: '<task-notification>again</task-notification>', isMeta: true } as never)
+  await turnEnd($, { answer: LONG_REPLY })
+  expect(await table($)).toMatch(/1 of 1 replies over the limit/)
+})

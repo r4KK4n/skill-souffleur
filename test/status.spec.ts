@@ -274,3 +274,15 @@ test('audience hints: an always-on skill without "for" gets a hint, one with "fo
   assert.doesNotMatch(t, /^terse: always on/m)
   assert.doesNotMatch(t, /^gone: always on/m)
 })
+
+test('reply check: the chat skill row note counts violations; nothing without reply or without checked replies', () => {
+  const c: Config = { ...config, skills: { ...config.skills, 'terse:terse-mode': { always: true, for: 'chat', from: 'user', reply: { maxChars: 100 } } } }
+  const long = 'word '.repeat(60)
+  let s = fresh(c)
+  assert.doesNotMatch(renderTable(c, s, T1), /replies over the limit/)
+  for (const answer of [long, 'ok', long]) s = decide(c, s, { type: 'reply', now: T1, answer, fromCommand: false, aborted: false }).session
+  assert.match(renderTable(c, s, T1), /^- terse:terse-mode: 2 of 3 replies over the limit$/m)
+  const bare: Config = { ...c, skills: { ...c.skills, 'terse:terse-mode': { always: true, for: 'chat', from: 'user' } } }
+  assert.doesNotMatch(renderTable(bare, s, T1), /replies over the limit/)
+  assert.doesNotMatch(renderTable(config, fresh(), T1), /replies over the limit/)
+})

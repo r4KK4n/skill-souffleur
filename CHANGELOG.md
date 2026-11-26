@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-11-26
+
+- Reply check for the `chat` skill: an always-on skill with `for: "chat"` can carry `reply: { maxChars, headings }` (200 to 20000 characters, 0 to 20 headings, both optional). After each main-session answer Souffleur measures the reply without code blocks and counts heading lines, counts violations per session (kept over a resume), shows `<skill>: <v> of <t> replies over the limit` in `/souffleur`, and adds one reminder line to the next prompt's context, at most once per five prompts. Both modes only remind. Replies to typed commands, aborted turns and mostly-code replies are not checked; nothing is denied.
+
 ## [0.1.5] - 2026-11-26
 
 - A `readers` or `users` need starts from tool evidence, without a model call: a call that matches a gate of one of its skills, or for `readers` a Bash command `gh issue create|comment` or `gh pr create|edit` (also inside `cd x && gh pr create …`); a plain `git commit` does not count, because it started the writing skills in nearly every coding session. After a compaction these needs go dormant: their skills are requested again only on the next such evidence or when a prompt is classified as a text for others or a screen. In observe the request follows the first such call; in enforce the first such call is denied once with the request, so these gates are effectively always on (once per session and after each compaction). Only the skills of the started need are asked for. Excluded (`notIn`) and untrusted-project skills are never requested because of evidence. `/souffleur` shows dormant needs as `waiting since compaction`. A need that evidence started is not asked for again on a chat-reply prompt; a fresh signal for a need resets its skills' request count and brings an `unavailable` skill back. In observe the first evidence call is listed under "Would have denied". A need named `none` is rejected, a `for: "chat"` need gets a config warning, and the compaction sentence of the request appears only after a compaction.
