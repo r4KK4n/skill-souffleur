@@ -51,7 +51,7 @@ let lastPromptKind: string | undefined
 let lastPromptCommand = false
 /** The turn now running was started by a prompt of the person (typed or a command); background and agent notification turns are not counted. */
 let personTurn = false
-/** How long the dialog at a turn end may stay open before it counts as a rejection. */
+/** How long a dialog may stay open before it counts as a rejection (turn end) or the typed command returns without it. */
 const ASK_WAIT_MS = 120_000
 /** The proposals a notice showed (kept after the offer ended), so each proposal gets one notice. */
 const noticed = new Set<string>()
@@ -881,13 +881,15 @@ async function askFirst($: Dollar, atTurnEnd = false): Promise<string | undefine
   let label: unknown
   const asking = Promise.resolve().then(() => $.ui.ask(q.question, { options: q.options, header: 'Souffleur' }))
   try {
-    // At a turn end a client that shows no dialog may never answer: after two minutes this proposal falls back to the notice.
-    label = atTurnEnd ? await Promise.race([asking, $.clock.sleep(ASK_WAIT_MS).then(() => Promise.reject(new TimedOut()))]) : await asking
+    // A client that shows no dialog may never answer: after two minutes the turn end falls back to a notice and a typed command returns.
+    label = await Promise.race([asking, $.clock.sleep(ASK_WAIT_MS).then(() => Promise.reject(new TimedOut()))])
   } catch (err) {
     if (err instanceof TimedOut) {
       // Only this proposal falls back. The dialog stays open: a later tap still counts while the proposal waits.
       timedOutAsk.add(q.hash)
       asking.then((late) => lateAnswer($, q.hash, late), () => undefined).finally(() => timedOutAsk.delete(q.hash))
+      // A typed command answers for itself: no notice, no stop.
+      if (!atTurnEnd) return ASK_TIMEOUT_LINE
       noticeFirst($, l, session)
     } else if (DISMISSED.test(message(err))) {
       // The person closed the dialog: a skip. Nothing more is asked at turn end, and the model proposes no more.
@@ -913,6 +915,8 @@ async function askFirst($: Dollar, atTurnEnd = false): Promise<string | undefine
 }
 
 class TimedOut extends Error {}
+/** What a typed command returns when its dialog stayed open for `ASK_WAIT_MS`. */
+const ASK_TIMEOUT_LINE = 'Souffleur: no answer within two minutes; the proposal stays queued. A late tap in the dialog still counts.'
 /** How the mod kit words the rejection of a dialog the person closed: `$.ui.ask: no answer (the dialog was dismissed)`. */
 const DISMISSED = /dismissed/i
 /** Proposals whose turn-end dialog timed out and may still be answered. */
@@ -1150,6 +1154,7 @@ async function runReview($: Dollar): Promise<string> {
     const line = await askFirst($)
     if (line === undefined) break
     done.push(line)
+    if (line === ASK_TIMEOUT_LINE) break
   }
   const { session: rest } = await current($)
   const out = [...done]
