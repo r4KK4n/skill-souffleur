@@ -7,7 +7,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 - Proposals by the model are limited to standing instructions of the user (notes) and to rules a check can decide (a skill loaded before a call, a field a call carries, evidence after a call); the system prompt sentence and the tool description say so, and a note with source `slip` is refused (#59).
-- After you decline a proposal, skip its dialog, or let a reply notice end without an answer, the model's further proposals are refused and not queued for the rest of the session. The stop and a dismissed dialog are kept in the session, so a hot reload or a resume neither re-asks nor allows new proposals; a new session starts clean. `/souffleur rule` and `/souffleur review` still work (#59).
+- After you decline a proposal (dialog, reply word or `/souffleur decline`) or dismiss its dialog, the model's further proposals are refused and not queued for the rest of the session. A dialog that cannot open, a dialog that times out, a reply notice that a later prompt ends without an answer, a typed command and an accept do not stop proposals. The stop and a dismissed dialog are kept in the session, so a hot reload or a resume neither re-asks nor allows new proposals; a new session or `/clear` starts clean. `/souffleur rule` and `/souffleur review` still work (#59).
 
 ## [0.1.6] - 2026-11-26
 

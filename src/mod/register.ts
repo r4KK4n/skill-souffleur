@@ -128,7 +128,10 @@ async function current($: Dollar): Promise<{ l: Loaded; session: Session }> {
   if (latest && latest.id === id && (held === undefined || (isSession(held, id) && (held.rev ?? 0) < (latest.rev ?? 0)))) held = latest
   if (held && held.id === id) return { l, session: heal(l, held) }
   // A different id with no session.start in between is /clear (D6).
-  if (held) return { l, session: await freshSession($, l, id, 'clear') }
+  if (held) {
+    askStopped = false // a cleared session starts without the stop, like proposalsStopped
+    return { l, session: await freshSession($, l, id, 'clear') }
+  }
   const stored = await $.store.get(`session:${id}`)
   if (isSession(stored, id)) return { l, session: heal(l, stored) }
   return { l, session: await freshSession($, l, id, 'startup') }
@@ -801,17 +804,15 @@ function update($: Dollar, change: (l: Loaded, s: Session) => Session): Promise<
   })
 }
 
-/** The person declined or skipped a proposal, or a dialog was dismissed: kept in the session, so a reload does not forget it. */
+/** The person declined a proposal or dismissed a dialog (never a failure or a timeout): kept in the session, so a reload does not forget it. */
 async function markStopped($: Dollar, flags: { proposals?: boolean; ask?: boolean }): Promise<void> {
   if (flags.ask) askStopped = true
   await update($, (_l, s) => ({ ...s, ...(flags.proposals ? { proposalsStopped: true } : {}), ...(flags.ask ? { askStopped: true } : {}) }))
 }
 
-/** A prompt of the person ends the offer a notice made; without an answer the proposal counts as skipped. */
-async function endOffer($: Dollar): Promise<void> {
-  if (shownHash === undefined) return
+/** A prompt of the person ends the offer a notice made. Without an answer the proposal just stays queued: no stop. */
+function endOffer(): void {
   shownHash = undefined
-  await markStopped($, { proposals: true })
 }
 
 /** Applies the user's answer to one waiting proposal: writes after a yes, remembers a no, keeps the proposal when the write fails. */
@@ -888,14 +889,18 @@ async function askFirst($: Dollar, atTurnEnd = false): Promise<string | undefine
       timedOutAsk.add(q.hash)
       asking.then((late) => lateAnswer($, q.hash, late), () => undefined).finally(() => timedOutAsk.delete(q.hash))
       noticeFirst($, l, session)
+    } else if (DISMISSED.test(message(err))) {
+      // The person closed the dialog: a skip. Nothing more is asked at turn end, and the model proposes no more.
+      await markStopped($, { proposals: true, ...(atTurnEnd ? { ask: true } : {}) })
     } else if (atTurnEnd) {
       // Nobody can answer a dialog here: show the proposal once and let a one-word reply answer it.
+      // Only this process knows it: a session resumed in a client that can open a dialog asks again, and no stop is set.
       noDialog = true
-      await markStopped($, { proposals: true, ask: true })
+      askStopped = true
       noticeFirst($, l, session)
     } else {
+      // A dialog in a typed command that cannot open: the turn-end question still comes.
       askAtTurnEnd = true
-      await markStopped($, { proposals: true })
     }
     return undefined
   }
@@ -908,6 +913,8 @@ async function askFirst($: Dollar, atTurnEnd = false): Promise<string | undefine
 }
 
 class TimedOut extends Error {}
+/** How the mod kit words the rejection of a dialog the person closed: `$.ui.ask: no answer (the dialog was dismissed)`. */
+const DISMISSED = /dismissed/i
 /** Proposals whose turn-end dialog timed out and may still be answered. */
 const timedOutAsk = new Set<string>()
 
@@ -938,7 +945,6 @@ async function answerShown($: Dollar, text: string): Promise<string | undefined>
   const hash = shownHash
   shownHash = undefined
   const verdict = parseReply(text)
-  if (hash !== undefined && verdict === undefined) await markStopped($, { proposals: true })
   if (hash === undefined || verdict === undefined) return undefined
   const { l, session } = await current($)
   const p = session.paused ? undefined : session.proposals.find((x) => x.hash === hash)
@@ -1108,9 +1114,7 @@ async function runPropose($: Dollar, input: Record<string, unknown>): Promise<st
   const r = await propose($, raw, input.source === 'slip' ? 'slip' : 'user')
   if (r.status.startsWith('error: ')) return `Not queued: ${r.status.slice(7)}. Fix the call and try again.`
   if (r.status !== 'queued') return PROPOSE_REPLY[r.status] ?? 'Not queued.'
-  return !askStopped || noDialog
-    ? `Queued as ${r.id}. At the end of this turn Souffleur asks the user in a dialog, or shows a notice they answer with a reply; do not ask again.`
-    : `Queued as ${r.id}. It waits for the user's /souffleur review; do not ask again.`
+  return `Queued as ${r.id}. At the end of this turn Souffleur asks the user in a dialog, or shows a notice they answer with a reply; do not ask again.`
 }
 
 /** `/souffleur rule <text>`: the small model shapes the words into a rule or note; a failure keeps them as a note. */
@@ -1324,8 +1328,12 @@ export const register: Register = (on) => {
     lastPromptCommand = e.command !== undefined
     if (fromUser) await safe($, 'tool.reconnect', undefined, () => reconnectTool($))
     // Only a prompt of the person (composer or bridge, no command) answers; any prompt of the person ends the offer.
-    if (e.command !== undefined && isUserOrigin(e)) await safe($, 'prompt.offer', undefined, () => endOffer($))
-    const answered = !fromUser ? undefined : e.origin?.kind === 'composer' || e.origin?.kind === 'bridge' ? await safe($, 'prompt.reply', undefined as string | undefined, () => answerShown($, e.text)) : await safe($, 'prompt.offer', undefined, () => endOffer($))
+    if (e.command !== undefined && isUserOrigin(e)) endOffer()
+    let answered: string | undefined
+    if (fromUser) {
+      if (e.origin?.kind === 'composer' || e.origin?.kind === 'bridge') answered = await safe($, 'prompt.reply', undefined as string | undefined, () => answerShown($, e.text))
+      else endOffer()
+    }
     const texts = await safe($, 'prompt.submit', [] as string[], async () => {
       const { l, session } = await current($)
       const { config } = l
