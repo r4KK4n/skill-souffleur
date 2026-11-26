@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { decide, initSession } from '../src/core/decide.ts'
-import { addEntry, answer, enqueue, makeProposal, nextQuestion, parseReply, parseShaped } from '../src/core/proposals.ts'
+import { addEntry, answer, describeProposal, enqueue, makeProposal, nextQuestion, parseReply, parseShaped, proposalNotice } from '../src/core/proposals.ts'
 import type { Proposal } from '../src/core/proposals.ts'
 import type { Config, Note, Rule } from '../src/core/types.ts'
 
@@ -141,10 +141,17 @@ test('init pruning keeps a need that a note uses', async () => {
 })
 
 test('parseReply accepts the listed words', () => {
-  for (const w of ['accept', 'annehmen', 'ja', 'yes', ' Yes ', 'ACCEPT\n']) assert.equal(parseReply(w), 'accept', w)
-  for (const w of ['decline', 'ablehnen', 'nein', 'no', ' No ']) assert.equal(parseReply(w), 'decline', w)
+  for (const w of ['accept', 'annehmen', ' Accept ', 'ANNEHMEN\n']) assert.equal(parseReply(w), 'accept', w)
+  for (const w of ['decline', 'ablehnen', ' Decline ']) assert.equal(parseReply(w), 'decline', w)
 })
 
 test('parseReply ignores other text', () => {
-  for (const w of ['ja bitte', '', '  ', 'accept it', 'yes!', 'maybe', 'no way']) assert.equal(parseReply(w), undefined, w)
+  for (const w of ['ja', 'yes', 'nein', 'no', 'ja bitte', '', '  ', 'accept it', 'accept!', 'maybe']) assert.equal(parseReply(w), undefined, w)
+})
+
+test('the notice carries the reply hint and the caution for a skill text', () => {
+  const p = prop({ kind: 'note', text: 'Reply in German.' }, 'user')
+  assert.equal(proposalNotice(p), `Souffleur: proposal ${p.entry.id}: note "Reply in German.". Reply "accept" (everywhere) or "decline".`.replace('note "Reply in German."', describeProposal(p)))
+  const q = { ...p, from: 'skill:writing-guide' }
+  assert.match(proposalNotice(q), /read from a skill's text, not verified/)
 })
