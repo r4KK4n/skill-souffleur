@@ -51,7 +51,7 @@ let lastPromptKind: string | undefined
 let lastPromptCommand = false
 /** The turn now running was started by a prompt of the person (typed or a command); background and agent notification turns are not counted. */
 let personTurn = false
-/** How long the dialog at a turn end may stay open before it counts as a rejection. */
+/** How long a dialog may stay open before it counts as a rejection (turn end) or the typed command returns without it. */
 const ASK_WAIT_MS = 120_000
 /** The proposals a notice showed (kept after the offer ended), so each proposal gets one notice. */
 const noticed = new Set<string>()
@@ -874,20 +874,22 @@ function noticeFirst($: Dollar, l: Loaded, session: Session): void {
 /** One dialog about the first waiting proposal. Returns the line to show, or undefined when nothing was asked or the dialog gave no answer. */
 async function askFirst($: Dollar, atTurnEnd = false): Promise<string | undefined> {
   const { l, session } = await current($)
-  // A proposal whose dialog timed out is shown as a notice; it is not asked again while that dialog is still open.
+  // A proposal whose dialog timed out (at a turn end or in a typed command) is not asked again while that dialog is still open.
   const waiting = await withStoredDeclined($, session)
   const q = nextQuestion({ ...waiting, proposals: waiting.proposals.filter((p) => !timedOutAsk.has(p.hash)) })
   if (!q) return undefined
   let label: unknown
   const asking = Promise.resolve().then(() => $.ui.ask(q.question, { options: q.options, header: 'Souffleur' }))
   try {
-    // At a turn end a client that shows no dialog may never answer: after two minutes this proposal falls back to the notice.
-    label = atTurnEnd ? await Promise.race([asking, $.clock.sleep(ASK_WAIT_MS).then(() => Promise.reject(new TimedOut()))]) : await asking
+    // A client that shows no dialog may never answer: after two minutes the turn end falls back to a notice and a typed command returns.
+    label = await Promise.race([asking, $.clock.sleep(ASK_WAIT_MS).then(() => Promise.reject(new TimedOut()))])
   } catch (err) {
     if (err instanceof TimedOut) {
       // Only this proposal falls back. The dialog stays open: a later tap still counts while the proposal waits.
       timedOutAsk.add(q.hash)
       asking.then((late) => lateAnswer($, q.hash, late), () => undefined).finally(() => timedOutAsk.delete(q.hash))
+      // A typed command answers for itself: no notice, no stop.
+      if (!atTurnEnd) return ASK_TIMEOUT_LINE
       noticeFirst($, l, session)
     } else if (DISMISSED.test(message(err))) {
       // The person closed the dialog: a skip. Nothing more is asked at turn end, and the model proposes no more.
@@ -913,9 +915,11 @@ async function askFirst($: Dollar, atTurnEnd = false): Promise<string | undefine
 }
 
 class TimedOut extends Error {}
+/** What a typed command returns when its dialog stayed open for `ASK_WAIT_MS`. */
+const ASK_TIMEOUT_LINE = 'Souffleur: no answer within two minutes; the proposal stays queued. A late tap in the dialog still counts.'
 /** How the mod kit words the rejection of a dialog the person closed: `$.ui.ask: no answer (the dialog was dismissed)`. */
 const DISMISSED = /dismissed/i
-/** Proposals whose turn-end dialog timed out and may still be answered. */
+/** Proposals whose dialog timed out (turn end or typed command) and may still be answered. */
 const timedOutAsk = new Set<string>()
 
 /** A dialog answered after its timeout: counts only while the proposal still waits (a reply may have answered it first). */
@@ -1137,6 +1141,7 @@ async function runRule($: Dollar, text: string): Promise<string> {
   })
   if (status !== 'queued') return status === 'duplicate' ? 'Souffleur: that is already a rule or note, or already waiting.' : status === 'declined' ? 'Souffleur: you declined this before.' : 'Souffleur: twenty proposals wait already. Run /souffleur review first.'
   const asked = await askFirst($)
+  if (asked === ASK_TIMEOUT_LINE) return `${asked} Or run /souffleur accept ${p.entry.id}.`
   if (asked !== undefined) return asked
   return `Souffleur: queued ${p.kind} ${p.entry.id}: ${describeProposal(p)}. Run /souffleur review to answer, or /souffleur accept ${p.entry.id}.`
 }
@@ -1150,6 +1155,7 @@ async function runReview($: Dollar): Promise<string> {
     const line = await askFirst($)
     if (line === undefined) break
     done.push(line)
+    if (line === ASK_TIMEOUT_LINE) break
   }
   const { session: rest } = await current($)
   const out = [...done]

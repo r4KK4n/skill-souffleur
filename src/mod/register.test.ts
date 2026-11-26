@@ -2852,3 +2852,58 @@ test('a late Yes on a timed-out dialog does not stop later proposals', async ($,
   expect(userFile(w).notes.length).toBe(1)
   expect(String((await propose($, note('Keep commits small.'))).result)).not.toBe(STOPPED)
 })
+
+const NO_ANSWER = /no answer within two minutes; the proposal stays queued\. A late tap in the dialog still counts\./
+
+test('a typed review whose dialog never answers returns after the limit and still lists the proposal', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { holdAsk: true })
+  await start($)
+  await propose($, note('Reply in German.'))
+  const t = run($, 'review')
+  await idle()
+  await w.clock.advance(120_000)
+  const text = await t
+  expect(text).toMatch(NO_ANSWER)
+  expect(text).toMatch(/Reply in German/)
+  expect(w.asked.length).toBe(1)
+  expect(w.writes.length).toBe(0)
+  expect(w.logs.some((l) => /proposal note-/.test(l))).toBe(false)
+  expect(String((await propose($, note('Keep commits small.'))).result)).not.toBe(STOPPED)
+})
+
+test('a tap after a typed review timed out writes once, and a later reply word does not write again', async ($, on) => {
+  const { w, tap } = lateWorld(on)
+  await start($)
+  await propose($, note('Reply in German.'))
+  const t = run($, 'review')
+  await idle()
+  await w.clock.advance(120_000)
+  expect(await t).toMatch(NO_ANSWER)
+  tap('Yes, everywhere')
+  await idle()
+  expect(userFile(w).notes.length).toBe(1)
+  await reply($, 'accept', COMPOSER)
+  expect(userFile(w).notes.length).toBe(1)
+  expect(w.writes.length).toBe(1)
+})
+
+test('a typed rule whose dialog never answers returns after the limit and sets no stop', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { holdAsk: true, shaped: '{"kind":"note","text":"Always say hi"}' })
+  await start($)
+  const t = run($, 'rule Always say hi')
+  await idle()
+  await w.clock.advance(120_000)
+  const text = await t
+  expect(text).toMatch(NO_ANSWER)
+  expect(text).toMatch(/Or run \/souffleur accept note-[0-9a-f]+\.$/)
+  expect(await table($)).toMatch(/Open proposals \(1\)/)
+  expect(String((await propose($, note('Keep commits small.'))).result)).not.toBe(STOPPED)
+})
+
+test('a typed rule whose dialog is dismissed still stops proposals', async ($, on) => {
+  const d = world(on, { [USER_FILE]: ENFORCE }, { answers: ['__undefined__'], shaped: '{"kind":"note","text":"Always say hi"}' })
+  await start($)
+  await run($, 'rule Always say hi')
+  expect(d.asked.length).toBe(1)
+  expect(String((await propose($, note('Keep commits small.'))).result)).toBe(STOPPED)
+})

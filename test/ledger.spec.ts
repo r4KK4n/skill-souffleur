@@ -179,3 +179,9 @@ test('markInstalled also moves a skill injected at startup that the list lacks',
   const l = markInstalled(initLedger(config, 0, 'startup'), ['plain'], 5)
   assert.equal(l.inj.state, 'not installed here')
 })
+
+test('loading clears the compaction time', () => {
+  const l = compacted(skillLoaded(initLedger(config, 100, 'clear'), 'plain', 200, 'skill.prompt'), 300)
+  assert.equal(l.plain.lastCompactAt, 300)
+  assert.equal('lastCompactAt' in skillLoaded(l, 'plain', 400, 'skill.prompt').plain, false)
+})

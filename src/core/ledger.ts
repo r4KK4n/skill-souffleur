@@ -24,7 +24,9 @@ export function initLedger(config: Config, now: number, start: 'startup' | 'clea
 /** A skill's text entered the context. Names the ledger does not know are ignored. */
 export function skillLoaded(l: Ledger, skill: SkillName, now: number, reason: string): Ledger {
   if (!(skill in l)) return l
-  return { ...l, [skill]: { ...l[skill]!, state: 'loaded', since: now, reason, requests: 0 } }
+  // A load is newer than any compaction: the text is back, so the compaction origin is gone.
+  const { lastCompactAt: _cut, ...row } = l[skill]!
+  return { ...l, [skill]: { ...row, state: 'loaded', since: now, reason, requests: 0 } }
 }
 
 /** A compaction drops loaded text. Absent and unavailable skills are not affected. */

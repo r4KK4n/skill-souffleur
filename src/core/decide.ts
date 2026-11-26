@@ -317,7 +317,7 @@ function restore(config: Config, s: Session, now: number, trusted: boolean, root
   })
   const wanted = missing.filter((name) => s.ledger[name]!.requests < MAX_REQUESTS)
   const giveUp = missing.filter((name) => s.ledger[name]!.requests >= MAX_REQUESTS)
-  const why = wanted.some((name) => { const e = s.ledger[name]!; return e.state === 'stale' || (e.state === 'restoring' && e.lastCompactAt !== undefined) }) ? 'Compaction cut or dropped their text. The note that skills invoked earlier must not be run again does not apply to them: invoke them again.' : ''
+  const why = wanted.some((name) => { const e = s.ledger[name]!; return e.state === 'stale' || ((e.state === 'restoring' || e.state === 'absent') && e.lastCompactAt !== undefined) }) ? 'Compaction cut or dropped their text. The note that skills invoked earlier must not be run again does not apply to them: invoke them again.' : ''
   const chat = Object.entries(config.skills)
     .filter(([name, rule]) => rule.always === true && audienceOf(config, name) === 'chat' && s.ledger[name]?.state !== 'not installed here' && (trusted || rule.from !== 'project') && !excludedIn(rule, root))
     .map(([name]) => name)
