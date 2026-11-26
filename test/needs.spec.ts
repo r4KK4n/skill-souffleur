@@ -44,7 +44,10 @@ test('call A asks about the deliverable with the exact labels and text', async (
   await classifyDeliverable('write the docs', needs, async (text, labels) => { seen.push({ text, labels }); return 'chat-reply' }, never)
   const a = seen.find((c) => c.labels.includes('chat-reply'))!
   assert.deepEqual(a.labels, ['chat-reply', 'text-for-others', 'screen', 'code-or-repo-work'])
-  assert.equal(a.text, 'What will the agent produce in answer to this prompt?\n\nwrite the docs')
+  assert.equal(
+    a.text,
+    'What will the agent produce in answer to this prompt? Answer with one label.\nchat-reply: an answer, explanation, discussion or status in this chat.\ntext-for-others: a text other people will read, such as a README, docs, an issue, a pull request text or app copy.\nscreen: something users of a product see, such as a page, a component or a prototype.\ncode-or-repo-work: code, tests, a fix, configuration or other changes in the repository.\n\nPrompt:\nwrite the docs',
+  )
 })
 
 test('each deliverable label maps to its needs', async () => {
@@ -125,4 +128,12 @@ test('B maps by label index even when a need name is a prefix of another', async
   const two = { debug: { for: 'work', what: 'a: b' }, 'debug-more': { for: 'work', what: 'c' } } as const
   const got = await classifyDeliverable('x', two, async (text, labels) => (text.startsWith('What will') ? 'code-or-repo-work' : labels[1]!), never)
   assert.deepEqual(got.matched, ['debug-more'])
+})
+
+test('A and B have their own budgets: B outlives the A budget', async () => {
+  const waits: number[] = []
+  const sleep = (ms: number) => { waits.push(ms); return new Promise<void>(() => {}) }
+  const got = await classifyDeliverable('x', needs, async (text) => (text.startsWith('What will') ? 'code-or-repo-work' : 'debug'), sleep)
+  assert.deepEqual(waits.sort(), [2500, 4000])
+  assert.deepEqual(got.matched, ['debug'])
 })

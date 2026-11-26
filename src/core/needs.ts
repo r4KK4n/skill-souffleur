@@ -7,6 +7,13 @@ export const DELIVERABLES = ['chat-reply', 'text-for-others', 'screen', 'code-or
 export type Deliverable = (typeof DELIVERABLES)[number]
 export type ClassifyFailure = 'timeout' | 'rejected' | 'unknown-label'
 
+const A_TEXT = [
+  'What will the agent produce in answer to this prompt? Answer with one label.',
+  'chat-reply: an answer, explanation, discussion or status in this chat.',
+  'text-for-others: a text other people will read, such as a README, docs, an issue, a pull request text or app copy.',
+  'screen: something users of a product see, such as a page, a component or a prototype.',
+  'code-or-repo-work: code, tests, a fix, configuration or other changes in the repository.',
+].join('\n')
 const LATE = '\0late'
 
 /**
@@ -20,15 +27,18 @@ export async function classifyDeliverable(
   classify: Classify,
   sleep: (ms: number) => Promise<void>,
   budgetMs = 2500,
+  budgetBMs = 4000,
 ): Promise<{ matched: NeedName[]; failed: boolean; kind?: Deliverable; failure?: ClassifyFailure; bFailure?: ClassifyFailure }> {
-  const timer = sleep(budgetMs).then(() => LATE)
+  // Both budgets run from the start: A gets budgetMs, B gets budgetBMs and is awaited only after code work.
+  const timerA = sleep(budgetMs).then(() => LATE)
+  const timerB = sleep(budgetBMs).then(() => LATE)
   const entries = Object.entries(needs)
   const work = entries.filter(([, n]) => n.for === 'work')
   // The label is the bare need name: the classifier returns no label at all for a long label with a colon (verified on 2.1.332).
   const labels = [...work.map(([name]) => name), 'none']
   const options = work.map(([name, n]) => `${name}: ${n.what}`).join('\n')
   /** One call under the shared budget; never rejects. */
-  const call = async (text: string, asked: readonly string[]): Promise<{ answer: string } | { failure: ClassifyFailure }> => {
+  const call = async (text: string, asked: readonly string[], timer: Promise<string>): Promise<{ answer: string } | { failure: ClassifyFailure }> => {
     try {
       const answer = await Promise.race([classify(text, asked), timer])
       if (answer === LATE) return { failure: 'timeout' }
@@ -38,9 +48,9 @@ export async function classifyDeliverable(
       return { failure: 'rejected' }
     }
   }
-  const callA = call(`What will the agent produce in answer to this prompt?\n\n${prompt}`, DELIVERABLES)
+  const callA = call(`${A_TEXT}\n\nPrompt:\n${prompt}`, DELIVERABLES, timerA)
   // B starts at once so the two calls overlap; it is awaited only when A says code work.
-  const callB = work.length === 0 ? Promise.resolve({ answer: 'none' }) : call(`Which kind of work does this prompt start? Answer none if it starts no work.\n${options}\n\n${prompt}`, labels)
+  const callB = work.length === 0 ? Promise.resolve({ answer: 'none' }) : call(`Which kind of work does this prompt start? Answer none if it starts no work.\n${options}\n\n${prompt}`, labels, timerB)
   const a = await callA
   if ('failure' in a) return { matched: [], failed: true, failure: a.failure }
   const kind = a.answer as Deliverable

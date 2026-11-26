@@ -6,7 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
-- A prompt is classified by what the agent will produce, in two parallel calls under one 2.5 s budget: call A (`chat-reply`, `text-for-others`, `screen`, `code-or-repo-work`) starts the `readers` or `users` needs, call B picks a `work` need and counts only for code or repo work. One slow call B no longer fails the whole prompt (#52). After three failures in a row each prompt lists the `work` needs and their skills so the model can pick (needs already active and skills already loaded are left out); each failure's kind (`timeout`, `rejected`, `unknown-label`) goes to the debug log.
+- A prompt is classified by what the agent will produce, in two parallel calls (A within 2.5 s, B within 4 s): call A (`chat-reply`, `text-for-others`, `screen`, `code-or-repo-work`) starts the `readers` or `users` needs, call B picks a `work` need and counts only for code or repo work. One slow call B no longer fails the whole prompt (#52). After three failures in a row each prompt lists the `work` needs and their skills so the model can pick (needs already active and skills already loaded are left out); each failure's kind (`timeout`, `rejected`, `unknown-label`) goes to the debug log.
 
 ## [0.1.4] - 2026-11-26
 
