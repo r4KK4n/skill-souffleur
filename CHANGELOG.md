@@ -6,6 +6,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-11-26
+
+- Proposals by the model are limited to standing instructions of the user (notes) and to rules a check can decide (a skill loaded before a call, a field a call carries, evidence after a call); the system prompt sentence and the tool description say so, and a note with source `slip` is refused (#59).
+- After you decline a proposal (dialog, reply word or `/souffleur decline`) or dismiss its dialog, the model's further proposals are refused and not queued for the rest of the session. A dialog that cannot open, a dialog that times out, a reply notice that a later prompt ends without an answer, a typed command and an accept do not stop proposals. The stop and a dismissed dialog are kept in the session, so a hot reload or a resume neither re-asks nor allows new proposals; a new session or `/clear` starts clean. `/souffleur rule` and `/souffleur review` still work (#59).
+
 ## [0.1.6] - 2026-11-26
 
 - Reply check for the `chat` skill: an always-on skill with `for: "chat"` can carry `reply: { maxChars, headings }` (200 to 20000 characters, 0 to 20 headings, both optional). After each main-session answer Souffleur measures the reply without code blocks and counts heading lines, counts violations per session (kept over a resume), shows `<skill>: <v> of <t> replies over the limit` in `/souffleur`, and adds one reminder line to the next prompt's context, at most once per five prompts. Both modes only remind. Replies to typed commands, aborted turns and mostly-code replies are not checked; nothing is denied.

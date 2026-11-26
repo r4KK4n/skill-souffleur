@@ -4,7 +4,7 @@ Keeps Claude Code skills loaded and in use for the whole session, including afte
 
 In a theatre, the souffleur sits out of sight at the edge of the stage and gives an actor the line they forgot, at the moment they need it. Souffleur does the same for skills: when compaction drops a skill the current task needs, it brings the skill back.
 
-> **Status:** version 0.1.6, released as tag `v0.1.6` (see [Install](#install) and the [roadmap](#roadmap)).
+> **Status:** version 0.1.7, released as tag `v0.1.7` (see [Install](#install) and the [roadmap](#roadmap)).
 >
 > **Early access.** Souffleur is a Claude Code mod: TypeScript that runs inside Claude Code through its mod API, shipped and installed as a plugin. Anthropic still changes that API between releases, so an update of Claude Code can break Souffleur until it is adapted. It is provided as is, with no guarantee of fixes or dates. [docs/compatibility.md](docs/compatibility.md) lists the versions each behaviour was checked on.
 
@@ -81,7 +81,7 @@ An installed plugin reaches a running session only after `/reload-plugins` or a 
 
 ```
 claude plugin uninstall skill-souffleur@skill-souffleur
-git clone --branch v0.1.6 https://github.com/r4KK4n/skill-souffleur ~/.claude/skills/skill-souffleur
+git clone --branch v0.1.7 https://github.com/r4KK4n/skill-souffleur ~/.claude/skills/skill-souffleur
 ```
 
 Update to a newer release:
@@ -163,7 +163,7 @@ A rule has one of three shapes. `before` with `skill` means a matching call wait
 
 Only the user file may hold `rules` and `notes`. A project file that has them gets an error for those keys, because a cloned repository must not deny calls or write into your system prompt. `where` limits an entry to one project and names the main repository root, so a rule made in one worktree holds in the others.
 
-Proposals come from the model and from you. When something goes wrong that a rule would have caught, or when you write "remember as a rule: ...", the model calls the tool `souffleur_propose`. `/souffleur rule <text>` does the same for your own words. A proposal waits in a queue of at most 20. At the end of a turn in a session with a person at the prompt, Souffleur asks about the first one, with `Yes, everywhere`, `Yes, this project only` and `No`. Text typed under "Other" goes to the model with your next prompt as a request to revise the proposal. A declined proposal is remembered and not proposed again. The queue belongs to the session. Where no dialog opens (or nobody answers it within two minutes), Souffleur shows the first waiting proposal as a notice in the transcript instead. Reply `accept` (`annehmen`) to add it everywhere, or `decline` (`ablehnen`); the reply counts only as your very next prompt and only when it is the whole text. `/souffleur accept <id> here` stays for one project. Under `claude -p` nothing can be answered by a reply: proposals stay queued for `/souffleur review` and `/souffleur accept <id>`, and the notice names that command. The model may make five proposals per session, and a subagent may make none. Rule strings are one line without control characters, with at most 20 list items. Souffleur writes an entry to `~/.claude/souffleur.json` only after your yes, reads the file fresh first, stops when it cannot read it, and keeps every other key.
+Proposals come from the model and from you. The model calls the tool `souffleur_propose` only for a standing instruction of yours that holds beyond the current task (a note), or when something went wrong that a checkable rule would have caught (a rule); never for facts about one task, issue or file, and a note never comes from a slip. `/souffleur rule <text>` does the same for your own words. A proposal waits in a queue of at most 20. At the end of a turn in a session with a person at the prompt, Souffleur asks about the first one, with `Yes, everywhere`, `Yes, this project only` and `No`. Text typed under "Other" goes to the model with your next prompt as a request to revise the proposal. A declined proposal is remembered and not proposed again. The queue belongs to the session. Where no dialog opens (or nobody answers it within two minutes), Souffleur shows the first waiting proposal as a notice in the transcript instead. Reply `accept` (`annehmen`) to add it everywhere, or `decline` (`ablehnen`); the reply counts only as your very next prompt and only when it is the whole text. `/souffleur accept <id> here` stays for one project. Under `claude -p` nothing can be answered by a reply: proposals stay queued for `/souffleur review` and `/souffleur accept <id>`, and the notice names that command. The model may make five proposals per session, and a subagent may make none. Once you decline a proposal or dismiss its dialog, the model proposes nothing more in that session. An unanswered or unshowable offer does not stop it: a dialog that cannot open or times out, a reply notice that your next prompt ends, and an accept leave proposals open. The stop survives a reload and a resume, a new session or `/clear` starts without it, and `/souffleur rule <text>` and `/souffleur review` keep working. Rule strings are one line without control characters, with at most 20 list items. Souffleur writes an entry to `~/.claude/souffleur.json` only after your yes, reads the file fresh first, stops when it cannot read it, and keeps every other key.
 
 `/souffleur migrate` also queues the standing instructions it finds in your `CLAUDE.md` files and memory index as note proposals, with or without a dialog. The question names the file and line, and offers `Yes, this project only` first for a passage from the project's own files. The report says how many passages were skipped and why. 
 
@@ -255,7 +255,7 @@ Costs:
 - [x] Needs by deliverable
 - [x] Reply check
 - [x] Short notices in the transcript for start, compaction and problems
-- [x] Release tags `v0.1.0` to `v0.1.6`
+- [x] Release tags `v0.1.0` to `v0.1.7`
 - [x] Updates that reach running sessions (install from a folder)
 
 ## Contributing
