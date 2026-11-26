@@ -1333,8 +1333,11 @@ export const register: Register = (on) => {
       const chat = Object.entries(l.config.skills)
         .filter(([name, rule]) => rule.always === true && audienceOf(l.config, name) === 'chat' && session.ledger[name]?.state !== 'not installed here' && !excludedIn(rule, l.root) && (rule.from === 'user' || isTrustedRoot(l.config, l.root)))
         .map(([name]) => name)
+      const always = Object.entries(l.config.skills)
+        .filter(([name, rule]) => rule.always === true && audienceOf(l.config, name) !== 'chat' && session.ledger[name]?.state !== 'not installed here' && !excludedIn(rule, l.root) && (rule.from === 'user' || isTrustedRoot(l.config, l.root)))
+        .map(([name]) => name)
       const notes = sectionNotes(l.config, l.root).text
-      return `${RULE} Each skill applies only to the output named with it.${chat.length ? ` Replies in this chat follow ${chat.join(', ')}; a skill for other readers or for product users never changes how you reply here.` : ''}${proposeReady && l.setUp ? PROPOSE_SENTENCE : ''}${notes ? `\n\n${notes}` : ''}`
+      return `${RULE} Each skill applies only to the output named with it.${chat.length ? ` Replies in this chat follow ${chat.join(', ')}; a skill for other readers or for product users never changes how you reply here.` : ''}${always.length ? ` Always-on skills: ${always.join(', ')}.` : ''}${proposeReady && l.setUp ? PROPOSE_SENTENCE : ''}${notes ? `\n\n${notes}` : ''}`
     })
     return text === undefined ? r : { ...r, sections: [...r.sections, { id: 'souffleur', scope: 'session' as const, text }] }
   })

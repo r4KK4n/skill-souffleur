@@ -237,7 +237,7 @@ test('table: excluded skill shows its state text, needs without an audience get 
   const here = renderTable(c, s, T0, '/work/p/')
   assert.match(here, /\| ui-design \| excluded in this project \|/)
   assert.match(here, /\| writing-guide \| absent \|/)
-  assert.match(here, /^prose: no audience set, run \/souffleur init$/m)
+  assert.match(here, /^prose: no audience set; add "for" to it in ~\/\.claude\/souffleur\.json$/m)
   assert.doesNotMatch(here, /^ui: no audience/m)
   assert.match(renderTable(c, s, T0, '/work/q'), /\| ui-design \| absent \|/)
 })
@@ -258,7 +258,19 @@ test('needs without an audience: heading, and none for an untrusted project need
   }
   const s = initSession(c, 's', T0, 'clear')
   const t = renderTable(c, s, T0, '/work/p')
-  assert.match(t, /Needs without an audience:\nprose: no audience set, run \/souffleur init/)
+  assert.match(t, /Audience not set:\nprose: no audience set; add "for" to it in ~\/\.claude\/souffleur\.json/)
   assert.doesNotMatch(t, /pn: no audience/)
   assert.match(renderTable({ ...c, trustProjects: ['/work/p'] }, s, T0, '/work/p'), /pn: no audience/)
+})
+
+test('audience hints: an always-on skill without "for" gets a hint, one with "for" or an excluded one does not', () => {
+  const c: Config = {
+    mode: 'enforce', trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true, needs: {},
+    skills: { 'chisle:chisle': { always: true, from: 'user' }, terse: { always: true, for: 'chat', from: 'user' }, gone: { always: true, from: 'user', notIn: ['/work/p'] } },
+  }
+  const s = initSession(c, 's', T0, 'clear')
+  const t = renderTable(c, s, T0, '/work/p')
+  assert.match(t, /Audience not set:\nchisle:chisle: always on without "for"; add "for": "chat" if it shapes your replies in this chat$/m)
+  assert.doesNotMatch(t, /^terse: always on/m)
+  assert.doesNotMatch(t, /^gone: always on/m)
 })

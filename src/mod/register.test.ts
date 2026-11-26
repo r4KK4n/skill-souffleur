@@ -471,7 +471,7 @@ test('the system prompt section states the audience rule and depends on config o
   expect(section?.scope).toBe('session')
   expect(section?.text).toMatch(/invoke each one with the Skill tool/)
   expect(section?.text).toMatch(/Each skill applies only to the output named with it\./)
-  expect(section?.text).not.toMatch(/Always-on skills/)
+  expect(section?.text).toContain(' Always-on skills: writing-guide.')
   expect(section?.text).not.toMatch(/Replies in this chat/)
 })
 
@@ -483,6 +483,7 @@ test('the system section names the chat skill', async ($, on) => {
   const r = await $.prompt.compose(COMPOSE)
   const text = r.sections.find((s: { id: string }) => s.id === 'souffleur')?.text as string
   expect(text).toContain('Each skill applies only to the output named with it. Replies in this chat follow terse:terse-mode; a skill for other readers or for product users never changes how you reply here.')
+  expect(text).not.toMatch(/Always-on skills: [^.]*terse:terse-mode/)
 })
 
 

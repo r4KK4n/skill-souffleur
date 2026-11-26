@@ -229,7 +229,7 @@ const GROUP_SENTENCE: Record<Audience, string> = {
   work: 'for how you work on this task.',
 }
 
-/** The restore request for these skills: one line per audience, then the chat trailer, then `why`. */
+/** The restore request for these skills: one line per audience, then `why`, then the chat trailer. */
 function restoreText(config: Config, names: readonly SkillName[], chat: readonly SkillName[], why: string): string {
   const lines = ORDER.flatMap((a) => {
     const group = names.filter((n) => audienceOf(config, n) === a)

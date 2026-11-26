@@ -30,8 +30,11 @@ export function renderTable(config: Config, s: Session, now: number, root?: stri
   const duties = s.duties.filter((d) => s.ledger[d.skill]?.state !== 'not installed here').map((d) => `- ${d.skill} (${d.by})`)
   if (duties.length) lines.push('', 'Open duties:', ...duties)
   const trusted = isTrustedRoot(config, root)
-  const bare = Object.entries(config.needs).filter(([name, n]) => n.noAudience && (trusted || !(config.projectNeeds ?? []).includes(name))).map(([name]) => `${name}: no audience set, run /souffleur init`)
-  if (bare.length) lines.push('', 'Needs without an audience:', ...bare)
+  const bare = Object.entries(config.needs).filter(([name, n]) => n.noAudience && (trusted || !(config.projectNeeds ?? []).includes(name))).map(([name]) => `${name}: no audience set; add "for" to it in ~/.claude/souffleur.json`)
+  const bareAlways = Object.entries(config.skills)
+    .filter(([name, r]) => r.always === true && r.for === undefined && !excludedIn(r, root) && s.ledger[name]?.state !== 'not installed here' && (trusted || r.from !== 'project'))
+    .map(([name]) => `${name}: always on without "for"; add "for": "chat" if it shapes your replies in this chat`)
+  if (bare.length || bareAlways.length) lines.push('', 'Audience not set:', ...bare, ...bareAlways)
   const needs = Object.entries(s.needs).map(([name, n]) => `- ${name} (since ${clock(n.since)})`)
   if (needs.length) lines.push('', 'Active needs:', ...needs)
   // Equal first sentences (per line, sorted) form one group, so a call that broke two checks stays apart from one that broke one.
