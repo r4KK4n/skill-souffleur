@@ -1175,12 +1175,12 @@ export const register: Register = (on) => {
 
   on('session.compact', async ($, e, next) => {
     const agentId = e.agentId === undefined ? {} : { agentId: e.agentId }
-    await safe($, 'session.compact', undefined, async () => {
+    await safe($, 'session.compact.before', undefined, async () => {
       await apply($, () => ({ type: 'compact', now: now(), phase: 'before', trigger: e.trigger, ...agentId }))
     })
     // The engine always sends the messages; the test kit's compaction call sends none, and next() refuses that.
     const r = await next(Array.isArray(e.messages) ? e : { ...e, messages: [{ role: 'user' as const, text: '', toolUses: [] }] })
-    await safe($, 'session.compact', undefined, async () => {
+    await safe($, 'session.compact.after', undefined, async () => {
       const skipped = 'skip' in r && r.skip !== undefined
       await apply($, () => ({ type: 'compact', now: now(), phase: 'after', trigger: e.trigger, skipped, ...agentId }))
     })
@@ -1249,7 +1249,7 @@ export const register: Register = (on) => {
       r = await next(e)
     } finally {
       if (e.tool === 'Agent' && e.agentId === undefined) {
-        await safe($, 'tool.call', undefined, async () => {
+        await safe($, 'tool.done', undefined, async () => {
           await apply($, () => ({ type: 'agentDone', now: now() }))
         })
       }
@@ -1287,7 +1287,7 @@ export const register: Register = (on) => {
     if (e.command === 'souffleur') {
       const verb0 = (e.args ?? '').trim().split(/\s+/)[0]
       if (verb0 === 'init' || verb0 === 'migrate') {
-        const text = await safe($, 'command.run', undefined as string | undefined, async () => {
+        const text = await safe($, `command.run.${verb0}`, undefined as string | undefined, async () => {
           loaded = undefined // read the files again: another session may have changed them
           const { l } = await current($)
           return verb0 === 'init' ? runInit($, l) : runMigrate($, l)
@@ -1298,7 +1298,7 @@ export const register: Register = (on) => {
       if (verb0 === 'rule' || verb0 === 'review' || verb0 === 'accept' || verb0 === 'decline') {
         if (!isUserOrigin(e)) return { text: `Souffleur: only the user can run /souffleur ${verb0}; a plugin or the model cannot.` }
         const rest = (e.args ?? '').trim().slice(verb0.length).trim()
-        const text = await safe($, 'command.run', undefined as string | undefined, async () => {
+        const text = await safe($, `command.run.${verb0}`, undefined as string | undefined, async () => {
           loaded = undefined
           return verb0 === 'rule' ? runRule($, rest) : verb0 === 'review' ? runReview($) : verb0 === 'accept' ? runAccept($, rest.split(/\s+/).filter(Boolean)) : runDecline($, rest.split(/\s+/).filter(Boolean))
         })
@@ -1318,7 +1318,7 @@ export const register: Register = (on) => {
       if (reply !== undefined) return { text: reply }
       return next(e)
     }
-    await safe($, 'command.run', undefined, async () => {
+    await safe($, 'command.typed', undefined, async () => {
       await apply($, () => ({ type: 'typed', now: now(), name: e.command }))
     })
     return next(e)

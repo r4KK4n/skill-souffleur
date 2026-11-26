@@ -74,7 +74,7 @@ export type CoreEvent =
   /** The skill names this session lists. An empty list means unknown. */
   | { type: 'installed'; now: number; names: string[] }
   | { type: 'error'; now: number; where: string; message: string }
-  /** A hook ran without failing again: its earlier errors (`${where}: …`) are removed, nothing else. */
+  /** A hook ran without failing again: its earlier errors (`${where}: …`) are removed, nothing else. `config`, `learn` and `classify` (and `classifier`) never clear this way: they keep their own lifecycle. */
   | { type: 'recovered'; now: number; where: string }
 
 export type Action =
@@ -180,10 +180,14 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
       return { session: { ...s, errors: lastN(s.errors, `${e.where}: ${e.message}`) }, actions: [] }
     case 'recovered': {
       const prefix = `${e.where}: `
+      if (OWN_LIFECYCLE.includes(e.where)) return { session: s, actions: [] }
       return { session: s.errors.some((m) => m.startsWith(prefix)) ? { ...s, errors: s.errors.filter((m) => !m.startsWith(prefix)) } : s, actions: [] }
     }
   }
 }
+
+/** Error prefixes owned by `config` events and `track()`; a hook success must not clear them. */
+const OWN_LIFECYCLE = ['config', 'learn', 'classify', 'classifier']
 
 /** A skill a rule names, once loaded, stays needed for the session. */
 function withRuleSkill(config: Config, s: Session, skill: SkillName): SkillName[] {

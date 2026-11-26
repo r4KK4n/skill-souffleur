@@ -319,6 +319,50 @@ test('a hook that works again clears its error and logs back to normal', async (
   expect(w.logs).toContain('Souffleur: back to normal.')
 })
 
+test('hook A error survives hook B success', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  let fail = false
+  let held: unknown
+  on('state.get', () => {
+    if (fail) {
+      fail = false
+      return { value: { value: { id: 's1' }, version: 0 } }
+    }
+    return { value: { value: held, version: 0 } }
+  })
+  on('state.set', (_, e) => {
+    held = e.value
+    return { value: { isSet: true, version: 1 } }
+  })
+  await start($)
+  fail = true
+  await $.prompt.submit({ text: 'hello there' }) // prompt.submit fails
+  expect(w.statuses.at(-1)).toBe('degraded, see /souffleur')
+  await $.tool.call({ tool: 'Read', path: 'a.txt' } as never) // tool.call works
+  expect(w.statuses.at(-1)).toBe('degraded, see /souffleur')
+})
+
+test('a failed pre-step of an Agent call is not wiped by the agentDone step', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  let fail = false
+  let held: unknown
+  on('state.get', () => {
+    if (fail) {
+      fail = false
+      return { value: { value: { id: 's1' }, version: 0 } }
+    }
+    return { value: { value: held, version: 0 } }
+  })
+  on('state.set', (_, e) => {
+    held = e.value
+    return { value: { isSet: true, version: 1 } }
+  })
+  await start($)
+  fail = true
+  await $.tool.call({ tool: 'Agent', prompt: 'x', description: 'd', subagent_type: 'general-purpose' } as never)
+  expect(w.statuses.at(-1)).toBe('degraded, see /souffleur')
+})
+
 test('/souffleur prints the ledger table', async ($, on) => {
   world(on, { [USER_FILE]: ALWAYS })
   await start($)

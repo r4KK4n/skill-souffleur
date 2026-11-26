@@ -534,12 +534,25 @@ test('recovered removes errors of that hook only', () => {
   assert.deepEqual(s.errors, ['tool.call: b'])
 })
 
-test('recovered leaves config errors', () => {
-  const { s } = run(cfg({ mode: 'observe' }), [
+test('recovered leaves config, learn and classifier errors and their counters', () => {
+  const failed = (): CoreEvent => ({ type: 'prompt', now: at(), text: 'x', fromUser: true, matched: [], classifierFailed: true })
+  const events: CoreEvent[] = [
     { type: 'config', now: at(), errors: ['bad'] },
-    { type: 'recovered', now: at(), where: 'prompt.submit' },
-  ])
-  assert.deepEqual(s.errors, ['config: bad'])
+    { type: 'learned', now: at(), ok: false },
+    { type: 'learned', now: at(), ok: false },
+    { type: 'learned', now: at(), ok: false },
+    failed(),
+    failed(),
+    failed(),
+  ]
+  const before = run(cfg({ mode: 'observe' }), events).s
+  assert.equal(before.errors.length, 3)
+  for (const where of ['prompt.submit', 'config', 'learn', 'classify', 'classifier']) {
+    const after = decide(cfg({ mode: 'observe' }), before, { type: 'recovered', now: at(), where }).session
+    assert.deepEqual(after.errors, before.errors, where)
+    assert.equal(after.learnFails, 3)
+    assert.equal(after.classifyFails, 3)
+  }
 })
 
 test('recovered with no matching error returns the same errors', () => {
