@@ -55,11 +55,15 @@ export type Session = {
   rev?: number
   /** Classifier runs that failed in a row, and learn calls that failed in a row. */
   classifyFails?: number
+  /** Call B runs that failed in a row (a prompt where A said code work); prompts where B did not run neither count nor clear. */
+  workFails?: number
   learnFails?: number
   /** When this copy was stored last, so old copies in the plugin store can be removed. */
   touched?: number
   /** What notices already told the user: skills cut by compaction, and problem keys shown. */
-  noticed?: { cut: SkillName[]; problems: string[] }
+  noticed?: { cut: SkillName[]; problems: string[]; /** How often each problem key's line was told in this session (at most 2: the second after a back to normal). */ tells?: Record<string, number> }
+  /** Failures per step (`error` events by `where`) in this session, kept after the error cleared and over reload and resume. */
+  failCounts?: Record<string, number>
   /** The reply check of the chat skill: replies checked, replies over the limit, user prompts since the last reminder, and the reminder waiting for a prompt. */
   replyCheck?: { total: number; over: number; sinceReminder: number; pending?: string }
 }
@@ -68,7 +72,7 @@ export type CoreEvent =
   | { type: 'start'; now: number; start: 'startup' | 'resume' | 'reload' | 'clear'; version?: string }
   | { type: 'skill'; now: number; skill: string; text?: string; source?: string; pluginName?: string; path?: string }
   | { type: 'compact'; now: number; phase: 'before' | 'after'; trigger: string; skipped?: boolean; agentId?: string }
-  /** `classifierFailed`: call A failed (true) or answered (false); absent when the classifier did not run. `workFailed`: A said code work and call B failed, so `work` needs saw no verdict. `deliverable`: A's answer. */
+  /** `classifierFailed`: call A failed (true) or answered (false); absent when the classifier did not run. `workFailed`: call B failed (true) or answered (false) after A said code work; absent when B did not run. `deliverable`: A's answer. */
   | { type: 'prompt'; now: number; text: string; fromUser: boolean; matched: NeedName[]; root?: string; classifierFailed?: boolean; workFailed?: boolean; deliverable?: Deliverable }
   /** `present` names the arguments the call carries, for field rules. */
   | { type: 'tool'; now: number; tool: string; path?: string; command?: string; brief?: string; skill?: string; model?: string; present?: string[]; agentId?: string; root?: string; tree?: string }
@@ -149,12 +153,15 @@ export function statusText(config: Config, session: Session, now: number, root?:
 const lastN = <T>(list: T[], item: T): T[] => [...list, item].slice(-KEEP)
 
 /** Counts failures in a row. The third records an error once (the status shows degraded); a success clears both. */
-function track(s: Session, key: 'classifyFails' | 'learnFails', prefix: string, failed: boolean | undefined, message: string): Session {
+function track(s: Session, key: 'classifyFails' | 'workFails' | 'learnFails', prefix: string, failed: boolean | undefined, message: string): Session {
   if (failed === undefined) return s
   const has = s.errors.some((m) => m.startsWith(prefix))
   if (!failed) return (s[key] ?? 0) === 0 && !has ? s : { ...s, [key]: 0, errors: s.errors.filter((m) => !m.startsWith(prefix)) }
   const n = (s[key] ?? 0) + 1
-  return { ...s, [key]: n, errors: n >= FAIL_LIMIT && !has ? lastN(s.errors, `${prefix}${message}`) : s.errors }
+  if (n < FAIL_LIMIT || has) return { ...s, [key]: n }
+  // The third failure in a row records the error and counts once for the session.
+  const step = prefix.replace(/: $/, '')
+  return { ...s, [key]: n, errors: lastN(s.errors, `${prefix}${message}`), failCounts: { ...s.failCounts, [step]: (s.failCounts?.[step] ?? 0) + 1 } }
 }
 
 export function decide(config: Config, s: Session, e: CoreEvent): Result {
@@ -202,7 +209,7 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
     case 'learned':
       return { session: track(s, 'learnFails', 'learn: ', !e.ok, 'the small model failed or gave no usable answer 3 times in a row, so skill texts are not read'), actions: [] }
     case 'error':
-      return { session: { ...s, errors: lastN(s.errors, `${e.where}: ${e.message}`) }, actions: [] }
+      return { session: { ...s, errors: lastN(s.errors, `${e.where}: ${e.message}`), failCounts: { ...s.failCounts, [e.where]: (s.failCounts?.[e.where] ?? 0) + 1 } }, actions: [] }
     case 'recovered': {
       const prefix = `${e.where}: `
       if (OWN_LIFECYCLE.includes(e.where)) return { session: s, actions: [] }
@@ -212,7 +219,7 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
 }
 
 /** Error prefixes owned by `config` events and `track()`; a hook success must not clear them. */
-const OWN_LIFECYCLE = ['config', 'learn', 'classify', 'classifier']
+const OWN_LIFECYCLE = ['config', 'learn', 'classify', 'classifier', 'classifier B']
 
 /** A skill a rule names, once loaded, stays needed for the session. */
 function withRuleSkill(config: Config, s: Session, skill: SkillName): SkillName[] {
@@ -375,7 +382,8 @@ function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'pro
     const still = neededSkills(config, needs, s.ruleSkills, e.root)
     ledger = Object.fromEntries(Object.entries(ledger).map(([name, row]) => [name, row.state === 'restoring' && !still.includes(name) ? { ...row, state: 'absent' as const, requests: 0, reason: '' } : row]))
   }
-  const next: Session = track({ ...s, ledger, needs, compactedSincePrompt: false }, 'classifyFails', 'classifier: ', e.classifierFailed, 'the small model failed or timed out 3 prompts in a row, so needs are not detected')
+  const tracked = track({ ...s, ledger, needs, compactedSincePrompt: false }, 'classifyFails', 'classifier: ', e.classifierFailed, 'the small model failed or timed out 3 prompts in a row, so needs are not detected')
+  const next: Session = track(tracked, 'workFails', 'classifier B: ', e.workFailed, 'the small model failed to pick a work need 3 prompts in a row, so work needs are not detected')
   // Needs that evidence started stay quiet on a prompt that is not their deliverable (a chat reply, a failed classification).
   const quiet = new Set(Object.entries(config.skills).filter(([, rule]) => rule.need !== undefined && needs[rule.need]?.evidence === true).map(([name]) => name))
   const r = s.paused ? undefined : restore(config, next, e.now, trusted, e.root, { skip: quiet })
@@ -391,7 +399,10 @@ function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'pro
     return true
   }
   if (r?.text !== undefined) add(r.text)
-  if ((next.classifyFails ?? 0) >= FAIL_LIMIT && !s.paused) {
+  // A failed call A hides every need; a failed call B hides only the work needs, and only a prompt A called code work needs them.
+  const aDown = (next.classifyFails ?? 0) >= FAIL_LIMIT
+  const bDown = !aDown && (next.workFails ?? 0) >= FAIL_LIMIT && e.deliverable === 'code-or-repo-work'
+  if ((aDown || bDown) && !s.paused) {
     const listed = Object.entries(config.needs)
       .filter(([name, n]) => n.for === 'work' && !(name in next.needs) && (trusted || !(config.projectNeeds ?? []).includes(name)))
       .map(([name, n]) => {
@@ -401,7 +412,7 @@ function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'pro
         return skills.length ? `${name} (${n.what}): ${skills.join(', ')}` : ''
       })
       .filter(Boolean)
-    if (listed.length) add(`Souffleur cannot classify prompts right now. If this prompt starts one of these, invoke its skills first: ${listed.join('; ')}`)
+    if (listed.length) add(`Souffleur cannot ${aDown ? 'classify prompts' : 'pick a work need'} right now. If this prompt starts one of these, invoke its skills first: ${listed.join('; ')}`)
   }
   const notes = contextNotes(config, next, e.root).kept
   if (notes.length && add(`Souffleur notes from the user's config:\n${notes.map((n) => `- ${n.text}`).join('\n')}`)) {

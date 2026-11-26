@@ -64,6 +64,8 @@ export function renderTable(config: Config, s: Session, now: number, root?: stri
   const waiting = due.leftOut
   if (waiting.length) lines.push('', `Notes waiting for a later prompt (a context block holds 2,000 characters): ${waiting.map((n) => n.id).join(', ')}`)
   if (config.rules.length || config.notes.length) lines.push('', `Rules: ${config.rules.length}, notes: ${config.notes.length}`)
+  const failures = Object.entries(s.failCounts ?? {}).filter(([, n]) => n > 0).map(([where, n]) => `${where} ${n}`)
+  if (failures.length) lines.push('', `Failures this session: ${failures.join(', ')}`)
   if (s.errors.length) lines.push('', 'Errors:', ...s.errors.map((err) => `- ${err}`))
   if (s.version !== undefined) lines.push('', `Claude Code ${s.version}`)
   return lines.join('\n')

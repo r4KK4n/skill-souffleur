@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { decide, initSession } from '../src/core/decide.ts'
+import { renderTable, statusLine } from '../src/core/status.ts'
 import type { Action, CoreEvent, Session } from '../src/core/decide.ts'
 import type { Config } from '../src/core/types.ts'
 import { loadFixture, toCoreEvents } from './fixtures.ts'
@@ -860,6 +861,92 @@ test('a failed call B counts no miss for work needs but still for others', () =>
   const r = run(c, [{ ...prompt('please fix the failing test now'), classifierFailed: false, workFailed: true } as CoreEvent], start.s)
   assert.equal(r.s.needs.debug!.misses ?? 0, 0)
   assert.equal(r.s.needs.prose!.misses, 1)
+})
+
+test('three failed call B runs in a row record one classifier B error, a good B answer clears it', () => {
+  const b = (workFailed?: boolean, deliverable: 'code-or-repo-work' | 'chat-reply' = 'code-or-repo-work'): CoreEvent =>
+    ({ ...prompt('x'), classifierFailed: false, deliverable, ...(workFailed === undefined ? {} : { workFailed }) }) as CoreEvent
+  const two = run(workCfg, [b(true), b(true)]).s
+  assert.deepEqual(two.errors, [])
+  const three = run(workCfg, [b(true)], two).s
+  assert.equal(three.workFails, 3)
+  assert.equal(three.errors.filter((m) => /^classifier B: /.test(m)).length, 1)
+  assert.match(three.errors[0]!, /^classifier B: the small model failed to pick a work need 3 prompts in a row, so work needs are not detected$/)
+  assert.equal(statusLine(three, 'enforce'), 'degraded, see /souffleur')
+  assert.equal(run(workCfg, [b(true)], three).s.errors.length, 1, 'recorded once')
+  const good = run(workCfg, [b(false)], three).s
+  assert.equal(good.workFails, 0)
+  assert.deepEqual(good.errors, [])
+})
+
+test('a prompt where B did not run neither counts nor clears call B failures', () => {
+  const chat = { ...prompt('x'), classifierFailed: false, deliverable: 'chat-reply' } as CoreEvent
+  const fail = { ...prompt('x'), classifierFailed: false, deliverable: 'code-or-repo-work', workFailed: true } as CoreEvent
+  const mid = run(workCfg, [fail, chat, fail, chat]).s
+  assert.equal(mid.workFails, 2)
+  assert.deepEqual(mid.errors, [])
+  const three = run(workCfg, [fail], mid).s
+  assert.equal(three.errors.length, 1)
+  assert.equal(run(workCfg, [chat], three).s.errors.length, 1, 'chat does not clear')
+  assert.equal(run(workCfg, [chat], three).s.workFails, 3)
+})
+
+test('after three call B failures the work fallback line comes only on a prompt A called code work', () => {
+  const s = { ...initSession(workCfg, 'session-1', 0, 'clear'), workFails: 3 }
+  const code = ctx(one(workCfg, [{ ...prompt('x'), classifierFailed: false, deliverable: 'code-or-repo-work', workFailed: true } as CoreEvent], s))
+  assert.match(code, /^Souffleur cannot pick a work need right now\. If this prompt starts one of these, invoke its skills first: debug/m)
+  assert.doesNotMatch(code, /cannot classify/)
+  const chat = one(workCfg, [{ ...prompt('x'), classifierFailed: false, deliverable: 'chat-reply' } as CoreEvent], s)
+  assert.doesNotMatch(JSON.stringify(chat), /cannot (classify|pick)/)
+  const aFail = ctx(one(workCfg, [{ ...prompt('x'), classifierFailed: true } as CoreEvent], { ...s, workFails: 0, classifyFails: 3 }))
+  assert.match(aFail, /cannot classify prompts right now/)
+})
+
+test('after three call B failures the prompt context carries the fallback line', () => {
+  const s = { ...initSession(workCfg, 'session-1', 0, 'clear'), workFails: 3 }
+  const text = ctx(one(workCfg, [{ ...prompt('x'), classifierFailed: false, deliverable: 'code-or-repo-work', workFailed: true } as CoreEvent], s))
+  assert.match(text, /cannot pick a work need right now.*debug \(Debugging a failure\.\): root-cause/)
+})
+
+test('a stored session without workFails counts from zero', () => {
+  const s = initSession(workCfg, 'session-1', 0, 'clear')
+  assert.equal(s.workFails, undefined)
+  assert.equal(run(workCfg, [{ ...prompt('x'), classifierFailed: false, workFailed: true } as CoreEvent], s).s.workFails, 1)
+})
+
+test('every error event counts per step, a recovery keeps the count, clear resets it, reload and resume keep it', () => {
+  const err = (where: string): CoreEvent => ({ type: 'error', now: at(), where, message: 'boom' })
+  const s = run(base, [err('tool.call'), err('tool.call'), { type: 'recovered', now: at(), where: 'tool.call' }, err('tool.call')]).s
+  assert.deepEqual(s.failCounts, { 'tool.call': 3 })
+  assert.equal(initSession(base, 'session-2', 0, 'clear').failCounts, undefined)
+  for (const start of ['reload', 'resume'] as const) {
+    assert.deepEqual(run(base, [{ type: 'start', now: at(), start }], s).s.failCounts, { 'tool.call': 3 }, start)
+  }
+  assert.equal(run(base, [{ type: 'start', now: at(), start: 'clear' }], s).s.failCounts, undefined, 'clear')
+})
+
+test('the third failure in a row of a tracked step adds one to its count, the step name without the colon', () => {
+  const b = (workFailed: boolean): CoreEvent => ({ ...prompt('x'), classifierFailed: false, deliverable: 'code-or-repo-work', workFailed }) as CoreEvent
+  const a = (classifierFailed: boolean): CoreEvent => ({ ...prompt('x'), classifierFailed }) as CoreEvent
+  const afterB = run(workCfg, [b(true), b(true), b(true), b(true), b(false)]).s
+  assert.deepEqual(afterB.failCounts, { 'classifier B': 1 })
+  const both = run(workCfg, [a(true), a(true), a(true), b(true), b(true), b(true)]).s
+  assert.deepEqual(both.failCounts, { classifier: 1, 'classifier B': 1 })
+  assert.deepEqual(run(workCfg, [b(true), b(true)]).s.failCounts, undefined)
+  const learn = run(workCfg, Array.from({ length: 3 }, () => ({ type: 'learned', now: at(), ok: false }) as CoreEvent)).s
+  assert.deepEqual(learn.failCounts, { learn: 1 })
+  assert.match(renderTable(workCfg, afterB, 1), /^Failures this session: classifier B 1$/m)
+  assert.equal(initSession(workCfg, 'session-2', 0, 'clear').failCounts, undefined)
+  assert.deepEqual(run(workCfg, [{ type: 'start', now: at(), start: 'resume' }], afterB).s.failCounts, { 'classifier B': 1 })
+})
+
+test('the told counts of problems are kept over reload and resume and reset by clear', () => {
+  const s: Session = { ...initSession(base, 'session-1', 0, 'clear'), noticed: { cut: [], problems: ['degraded:tool.call'], tells: { 'degraded:tool.call': 2 } } }
+  for (const start of ['reload', 'resume'] as const) {
+    assert.deepEqual(run(base, [{ type: 'start', now: at(), start }], s).s.noticed?.tells, { 'degraded:tool.call': 2 }, start)
+  }
+  assert.equal(run(base, [{ type: 'start', now: at(), start: 'clear' }], s).s.noticed, undefined, 'clear')
+  assert.equal(initSession(base, 'session-2', 0, 'clear').noticed, undefined, 'new session')
 })
 
 const fallbackCfg = (patch: Partial<Config>) => cfg({ needs: { ...base.needs, debug: { for: 'work', what: 'Debugging a failure.' } }, ...patch })

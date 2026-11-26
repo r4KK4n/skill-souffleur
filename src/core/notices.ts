@@ -22,6 +22,13 @@ function plainError(text: string): string {
   return line.length > 120 ? `${line.slice(0, 117)}...` : line
 }
 
+/** The step an error belongs to: its first line up to the first `: `, else the whole line. */
+function stepOf(error: string): string {
+  const line = plainError(error)
+  const i = line.indexOf(': ')
+  return i > 0 ? line.slice(0, i) : line
+}
+
 /** The problems that hold now, key to line text. A key stays the same while the problem lasts. */
 export function problemKeys(config: Config, s: Session, root?: string): Map<string, string> {
   const out = new Map<string, string>()
@@ -29,7 +36,10 @@ export function problemKeys(config: Config, s: Session, root?: string): Map<stri
   for (const [name, e] of Object.entries(s.ledger)) {
     if (e.state === 'unavailable') out.set(`missing:${name}`, `${PREFIX}${name} did not load after two requests.`)
   }
-  if (s.errors.length > 0) out.set('degraded', `${PREFIX}degraded: ${plainError(s.errors.at(-1)!).replace(/\.$/, '')}. Details: /souffleur.`)
+  // One key per step (the text before the first ": "); the line names that step's newest error.
+  const newest = new Map<string, string>()
+  for (const err of s.errors) newest.set(stepOf(err), err)
+  for (const [step, err] of newest) out.set(`degraded:${step}`, `${PREFIX}degraded: ${plainError(err).replace(/\.$/, '')}. Details: /souffleur.`)
   const version = versionNotice(s.version)
   if (version) out.set('version', `${PREFIX}${version}`)
   if (!isTrustedRoot(config, root) && Object.values(config.skills).some((r) => r.from === 'project')) {
@@ -67,10 +77,23 @@ export function notices(config: Config, before: Session, after: Session, root?: 
     nextCut = []
   }
 
+  // A key is told at most twice a session: the second time only after a `back to normal`, with ` (again)`. A third
+  // return is silent and never counts as a told problem. `problems` holds the told keys of this round; it is
+  // emptied when nothing holds, so a step that clears while another still holds does not lose that `back to normal`.
   const now = problemKeys(config, after, root)
-  for (const [key, text] of now) if (!was.problems.includes(key)) lines.push(text)
+  const tells: Record<string, number> = { ...(was.tells ?? Object.fromEntries(was.problems.map((key) => [key, 1]))) }
+  const told: string[] = []
+  for (const [key, line] of now) {
+    const n = tells[key] ?? 0
+    if (n === 0 || (n === 1 && !was.problems.includes(key))) {
+      lines.push(n === 0 ? line : line.replace(/\.( Details: \/souffleur\.)?$/, (_, details: string | undefined) => ` (again).${details ?? ''}`))
+      tells[key] = n + 1
+      told.push(key)
+    }
+  }
+  const problems = now.size === 0 ? [] : [...new Set([...was.problems, ...told])]
   if (was.problems.length > 0 && now.size === 0) lines.push(`${PREFIX}back to normal.`)
 
-  const session: Session = { ...after, noticed: { cut: nextCut, problems: [...now.keys()] } }
+  const session: Session = { ...after, noticed: { cut: nextCut, problems, tells } }
   return { lines: config.notices === false ? [] : lines, session }
 }
