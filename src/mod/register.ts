@@ -198,7 +198,13 @@ function apply($: Dollar, make: (l: Loaded) => CoreEvent): Promise<{ actions: Ac
 /** Runs the adapter's own work. A throw becomes an `error` event and `fallback`; it never reaches the event. */
 async function safe<T>($: Dollar, where: string, fallback: T, work: () => Promise<T>): Promise<T> {
   try {
-    return await work()
+    const result = await work()
+    try {
+      if (latest?.errors.some((m) => m.startsWith(`${where}: `))) await apply($, () => ({ type: 'recovered', now: now(), where }))
+    } catch {
+      // Clearing failed; the error stays until the next success.
+    }
+    return result
   } catch (err) {
     try {
       await apply($, () => ({ type: 'error', now: now(), where, message: message(err) }))

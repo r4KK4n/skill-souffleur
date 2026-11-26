@@ -523,3 +523,28 @@ test('trustProjects with a trailing slash still trusts the root in a tool call',
   const c = cfg({ trustProjects: ['/work/p/'], skills: { 'p-gate': { always: true, from: 'project', gate: { tools: ['Write'] } } } })
   assert.equal(denies(one(c, [withRoot(prompt()), withRoot(tool('Write', { path: '/work/p/a' }))])).length, 1)
 })
+
+test('recovered removes errors of that hook only', () => {
+  const { s } = run(cfg({ mode: 'observe' }), [
+    { type: 'error', now: at(), where: 'prompt.submit', message: 'a' },
+    { type: 'error', now: at(), where: 'tool.call', message: 'b' },
+    { type: 'error', now: at(), where: 'prompt.submit', message: 'c' },
+    { type: 'recovered', now: at(), where: 'prompt.submit' },
+  ])
+  assert.deepEqual(s.errors, ['tool.call: b'])
+})
+
+test('recovered leaves config errors', () => {
+  const { s } = run(cfg({ mode: 'observe' }), [
+    { type: 'config', now: at(), errors: ['bad'] },
+    { type: 'recovered', now: at(), where: 'prompt.submit' },
+  ])
+  assert.deepEqual(s.errors, ['config: bad'])
+})
+
+test('recovered with no matching error returns the same errors', () => {
+  const before = run(cfg({ mode: 'observe' }), [{ type: 'error', now: at(), where: 'tool.call', message: 'b' }]).s
+  const after = decide(cfg({ mode: 'observe' }), before, { type: 'recovered', now: at(), where: 'prompt.submit' })
+  assert.equal(after.session.errors, before.errors)
+  assert.deepEqual(after.actions, [])
+})

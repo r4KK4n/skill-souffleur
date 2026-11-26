@@ -295,6 +295,30 @@ test('a hook error passes the event through and shows degraded', async ($, on) =
   expect(w.statuses.at(-1)).toBe('degraded, see /souffleur')
 })
 
+test('a hook that works again clears its error and logs back to normal', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  let fail = false
+  let held: unknown
+  on('state.get', () => {
+    if (fail) {
+      fail = false
+      return { value: { value: { id: 's1' }, version: 0 } }
+    }
+    return { value: { value: held, version: 0 } }
+  })
+  on('state.set', (_, e) => {
+    held = e.value
+    return { value: { isSet: true, version: 1 } }
+  })
+  await start($)
+  fail = true
+  await $.prompt.submit({ text: 'hello there' })
+  expect(w.statuses.at(-1)).toBe('degraded, see /souffleur')
+  await $.prompt.submit({ text: 'and again' })
+  expect(w.statuses.at(-1)).not.toMatch(/degraded/)
+  expect(w.logs).toContain('Souffleur: back to normal.')
+})
+
 test('/souffleur prints the ledger table', async ($, on) => {
   world(on, { [USER_FILE]: ALWAYS })
   await start($)

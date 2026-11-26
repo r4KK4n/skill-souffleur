@@ -74,6 +74,8 @@ export type CoreEvent =
   /** The skill names this session lists. An empty list means unknown. */
   | { type: 'installed'; now: number; names: string[] }
   | { type: 'error'; now: number; where: string; message: string }
+  /** A hook ran without failing again: its earlier errors (`${where}: …`) are removed, nothing else. */
+  | { type: 'recovered'; now: number; where: string }
 
 export type Action =
   | { kind: 'context'; text: string }
@@ -176,6 +178,10 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
       return { session: track(s, 'learnFails', 'learn: ', !e.ok, 'the small model failed or gave no usable answer 3 times in a row, so skill texts are not read'), actions: [] }
     case 'error':
       return { session: { ...s, errors: lastN(s.errors, `${e.where}: ${e.message}`) }, actions: [] }
+    case 'recovered': {
+      const prefix = `${e.where}: `
+      return { session: s.errors.some((m) => m.startsWith(prefix)) ? { ...s, errors: s.errors.filter((m) => !m.startsWith(prefix)) } : s, actions: [] }
+    }
   }
 }
 
