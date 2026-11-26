@@ -2104,6 +2104,23 @@ test('reply accept applies the shown proposal', async ($, on) => {
   expect(userFile(w).notes.length).toBe(1)
 })
 
+
+test('a reply accepts the shown proposal even when another waiting proposal has the same id', async ($, on) => {
+  const { config } = parseConfig(ENFORCE, undefined)
+  const shown = makeProposal(note('Reply in German.'), 'user', config).proposal!
+  const other = makeProposal(note('Reply in French.'), 'user', config).proposal!
+  // the short id is 8 hex digits of the hash; a collision is seeded directly, ahead of the shown proposal
+  const ahead = { ...other, entry: { ...other.entry, id: shown.entry.id } }
+  const stored = { ...initSession(config, 's1', 0, 'startup'), proposals: [ahead, shown] }
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', stored: { 'session:s1': stored } })
+  await start($)
+  await turnEnd($) // notice for the first proposal
+  await reply($, 'carry on', COMPOSER)
+  await turnEnd($) // notice for the second, the one the reply answers
+  await reply($, 'accept', COMPOSER)
+  expect(userFile(w).notes.map((n: { text: string }) => n.text)).toEqual(['Reply in German.'])
+  expect(await run($, 'review')).toMatch(/Reply in French/)
+})
 test('reply decline declines the shown proposal for good', async ($, on) => {
   const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
   await start($)

@@ -881,7 +881,8 @@ async function answerShown($: Dollar, text: string): Promise<string | undefined>
   const p = session.paused ? undefined : session.proposals.find((x) => x.hash === hash)
   if (!p) return undefined
   const id = p.entry.id
-  const line = await (verdict === 'accept' ? runAccept($, [id]) : runDecline($, [id]))
+  // By the full hash: the short id may name another waiting proposal.
+  const line = await commitAnswer($, hash, verdict === 'accept' ? YES_EVERYWHERE : NO)
   askAtTurnEnd = true // the next waiting proposal gets its question or notice at the next turn end
   try {
     $.ui.toast(line)

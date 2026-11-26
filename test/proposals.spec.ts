@@ -40,6 +40,17 @@ test('queue cap 20 and duplicate drop', () => {
   assert.equal(enqueue({ ...config, rules: [existing] }, fresh(), prop(ruleRaw('known'))).status, 'duplicate', 'equal to an existing rule')
 })
 
+test('enqueue rejects a proposal whose id already waits', () => {
+  const a = prop({ kind: 'note', text: 'Reply in German.' }, 'user')
+  const s = enqueue(config, fresh(), a).session
+  // a different entry whose short id collides with the waiting one (the id is 8 hex digits of the hash)
+  const b: Proposal = { ...prop({ kind: 'note', text: 'Reply in French.' }, 'user'), entry: { ...a.entry, text: 'Reply in French.' } as Note }
+  assert.notEqual(b.hash, a.hash)
+  const r = enqueue(config, s, b)
+  assert.equal(r.status, 'duplicate')
+  assert.deepEqual(r.session.proposals.map((p) => p.hash), [a.hash])
+})
+
 test('declined proposal is not asked again', () => {
   let s = enqueue(config, fresh(), prop(ruleRaw('a'))).session
   const hash = s.proposals[0]!.hash

@@ -63,11 +63,13 @@ export function makeProposal(raw: unknown, from: string, config: Pick<Config, 'u
 
 export type EnqueueStatus = 'queued' | 'duplicate' | 'declined' | 'full'
 
-/** Adds a proposal unless the queue is full, the user declined it before, or an equal rule or note exists or waits. */
+/** Adds a proposal unless the queue is full, the user declined it before, an equal rule or note exists or waits, or its id waits. */
 export function enqueue(config: Config, s: Session, p: Proposal): { session: Session; status: EnqueueStatus } {
   if (s.declined.includes(p.hash)) return { session: s, status: 'declined' }
   const known = [...config.rules.map((r) => hashEntry('rule', r)), ...config.notes.map((n) => hashEntry('note', n)), ...s.proposals.map((q) => q.hash)]
   if (known.includes(p.hash)) return { session: s, status: 'duplicate' }
+  // `accept <id>` must name one proposal: a short id that already waits makes the new one a duplicate.
+  if (s.proposals.some((q) => q.entry.id === p.entry.id)) return { session: s, status: 'duplicate' }
   if (s.proposals.length >= QUEUE_CAP) return { session: s, status: 'full' }
   const fromSkill = (q: Proposal) => q.from.startsWith('skill:')
   if (fromSkill(p)) {
