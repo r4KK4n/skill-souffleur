@@ -2550,6 +2550,13 @@ test('a failed call B writes classifier B to the debug log', async ($, on) => {
   expect(w.debugLogs.join('\n')).not.toMatch(/classifier: /)
 })
 
+test('three failed call B runs in a row show degraded in the status', async ($, on) => {
+  const w = world(on, { [USER_FILE]: JSON.stringify({ skills: { g: { need: 'n' } }, needs: { n: { for: 'work', what: 'Something.' } } }) }, { classify: (labels) => (labels?.includes('chat-reply') ? 'code-or-repo-work' : 'banana') })
+  await start($)
+  for (let i = 0; i < 3; i++) await $.prompt.submit({ text: 'one two three four' })
+  expect(w.statuses.at(-1)).toMatch(/degraded/)
+})
+
 // --- Reply check ---
 
 const REPLY_CFG = JSON.stringify({ mode: 'enforce', skills: { 'terse:terse-mode': { always: true, for: 'chat', reply: { maxChars: 200, headings: 0 } } } })
