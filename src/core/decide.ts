@@ -1,11 +1,11 @@
-import { isTrustedRoot, matches, matchesCommand } from './config.ts'
+import { excludedIn, isTrustedRoot, matches, matchesCommand } from './config.ts'
 import { compacted, initLedger, markInstalled, requested, skillLoaded, syncLedger } from './ledger.ts'
 import type { Ledger } from './ledger.ts'
-import { neededSkills } from './needs.ts'
+import { audienceOf, neededSkills } from './needs.ts'
 import type { Proposal } from './proposals.ts'
 import { checkRules, contextNotes, ruleKind, ruleSkillNames } from './rules.ts'
 import { renderTable } from './status.ts'
-import type { Config, NeedName, SkillName } from './types.ts'
+import type { Audience, Config, NeedName, SkillName } from './types.ts'
 
 /** An open duty. `denied` is set once the duty has denied a call, so the retry passes. */
 export type Duty = { skill: SkillName; openedAt: number; by: string; denied: boolean; /** Mentioned in a prompt context once per opening. */ told?: boolean }
@@ -98,6 +98,8 @@ const CONTEXT_LIMIT = 10_000
 /** The part of that block the restore request may take, so notes and reminders still fit. */
 const RESTORE_LIMIT = 5000
 const FAIL_LIMIT = 3
+/** Tools that change a file: only these arm a duty by themselves. */
+const FILE_TOOLS = ['Write', 'Edit', 'NotebookEdit', 'MultiEdit']
 const PAUSE_HINT = 'To turn checks off for this session: /souffleur pause.'
 
 export function initSession(config: Config, id: string, now: number, start: 'startup' | 'clear', version?: string): Session {
@@ -219,33 +221,51 @@ function onCompact(config: Config, s: Session, e: Extract<CoreEvent, { type: 'co
   return { ...s, ledger: compacted(s.ledger, e.now), compactedSincePrompt: true, notesSent: s.notesSent.filter((id) => !needNotes.has(id)) }
 }
 
+const ORDER: readonly Audience[] = ['readers', 'users', 'work', 'chat']
+const GROUP_SENTENCE: Record<Audience, string> = {
+  chat: 'for your replies in this chat.',
+  readers: 'for texts other people read (docs, issues, PRs, app copy). Not for your replies in this chat.',
+  users: 'for what users of the product see (screens, pages, components). Not for your replies in this chat.',
+  work: 'for how you work on this task.',
+}
+
+/** The restore request for these skills: one line per audience, then `why`, then the chat trailer. */
+function restoreText(config: Config, names: readonly SkillName[], chat: readonly SkillName[], why: string): string {
+  const lines = ORDER.flatMap((a) => {
+    const group = names.filter((n) => audienceOf(config, n) === a)
+    return group.length ? [`- ${group.join(', ')}: ${GROUP_SENTENCE[a]}`] : []
+  })
+  const outward = names.some((n) => ['readers', 'users'].includes(audienceOf(config, n)))
+  const trailer = chat.length && outward ? [`Your replies in this chat follow ${chat.join(', ')}.`] : []
+  return ['Souffleur: before anything else, invoke these skills with the Skill tool, one after another:', ...lines, ...(why ? [why] : []), ...trailer].join('\n')
+}
+
 /**
  * Asks for needed skills that are missing. Skills asked for twice without a load are not named again;
  * `requested` moves them to unavailable. Restores run in config order. The request names as many skills as fit
- * into RESTORE_LIMIT characters; the rest stay as they are (the table of /souffleur lists them) and are asked for
- * on a later prompt. Skills of a project file are asked for only when its root is trusted.
+ * into RESTORE_LIMIT characters, grouped by audience; the rest stay as they are (the table of /souffleur lists them) and are asked for
+ * on a later prompt. Skills of a project file are asked for only when its root is trusted; skills excluded in this root never.
  */
-function restore(config: Config, s: Session, now: number, trusted: boolean): { ledger: Ledger; text?: string } {
-  const missing = neededSkills(config, s.needs, s.ruleSkills).filter((name) => {
+function restore(config: Config, s: Session, now: number, trusted: boolean, root?: string): { ledger: Ledger; text?: string } {
+  const missing = neededSkills(config, s.needs, s.ruleSkills, root).filter((name) => {
     if (!trusted && config.skills[name]?.from === 'project') return false
     const st = s.ledger[name]?.state
     return st === 'absent' || st === 'stale' || st === 'restoring'
   })
   const wanted = missing.filter((name) => s.ledger[name]!.requests < MAX_REQUESTS)
   const giveUp = missing.filter((name) => s.ledger[name]!.requests >= MAX_REQUESTS)
-  const why = wanted.some((name) => s.ledger[name]!.state !== 'absent') ? ' Compaction cut or dropped their text. The note that skills invoked earlier must not be run again does not apply to them: invoke them again.' : ''
-  const head = 'Souffleur: before anything else, invoke these skills with the Skill tool, one after another: '
+  const why = wanted.some((name) => s.ledger[name]!.state !== 'absent') ? 'Compaction cut or dropped their text. The note that skills invoked earlier must not be run again does not apply to them: invoke them again.' : ''
+  const chat = Object.entries(config.skills)
+    .filter(([name, rule]) => rule.always === true && audienceOf(config, name) === 'chat' && s.ledger[name]?.state !== 'not installed here' && (trusted || rule.from !== 'project') && !excludedIn(rule, root))
+    .map(([name]) => name)
   const ask: SkillName[] = []
-  let used = head.length + why.length + 1
   for (const name of wanted) {
-    const cost = name.length + (ask.length ? 2 : 0)
-    if (ask.length > 0 && used + cost > RESTORE_LIMIT) break
+    if (ask.length > 0 && restoreText(config, [...ask, name], chat, why).length > RESTORE_LIMIT) break
     ask.push(name)
-    used += cost
   }
   const ledger = requested(s.ledger, [...ask, ...giveUp], now)
   if (ask.length === 0) return { ledger }
-  return { ledger, text: `${head}${ask.join(', ')}.${why}` }
+  return { ledger, text: restoreText(config, ask, chat, why) }
 }
 
 /** User prompts in a row that the classifier ran on without matching a need before the need ends. */
@@ -286,11 +306,11 @@ function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'pro
   }
   if (ended) {
     // Skills that were only being restored for the ended need are not stuck in the status.
-    const still = neededSkills(config, needs, s.ruleSkills)
+    const still = neededSkills(config, needs, s.ruleSkills, e.root)
     ledger = Object.fromEntries(Object.entries(ledger).map(([name, row]) => [name, row.state === 'restoring' && !still.includes(name) ? { ...row, state: 'absent' as const, requests: 0, reason: '' } : row]))
   }
   const next: Session = track({ ...s, ledger, needs, compactedSincePrompt: false }, 'classifyFails', 'classifier: ', e.classifierFailed, 'the small model failed or timed out 3 prompts in a row, so needs are not detected')
-  const r = s.paused ? undefined : restore(config, next, e.now, trusted)
+  const r = s.paused ? undefined : restore(config, next, e.now, trusted, e.root)
   if (r) next.ledger = r.ledger
   // One block, at most CONTEXT_LIMIT characters. What does not fit waits: it stays in the session and /souffleur lists it.
   const lines: string[] = []
@@ -335,7 +355,7 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
   const trustedRoot = isTrustedRoot(config, e.root)
   if (s.compactedSincePrompt && !s.paused) {
     next.compactedSincePrompt = false
-    const r = restore(config, next, e.now, trustedRoot)
+    const r = restore(config, next, e.now, trustedRoot, e.root)
     next.ledger = r.ledger
     if (r.text !== undefined) actions.push({ kind: 'toolContext', text: r.text })
   }
@@ -357,19 +377,19 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
       else {
         next.agentDenied = true
         found.push({
-          text: `Souffleur: add a line "skills: <names>" (or "skills: none" for mechanical work) to the brief, then retry. Configured skills: ${Object.keys(config.skills).filter((n) => next.ledger[n]?.state !== 'not installed here' && (trustedRoot || config.skills[n]!.from !== 'project')).join(', ') || 'none'}. Active needs: ${active.join(', ')}. ${PAUSE_HINT}`,
+          text: `Souffleur: add a line "skills: <names>" (or "skills: none" for mechanical work) to the brief, then retry. Configured skills: ${Object.keys(config.skills).filter((n) => next.ledger[n]?.state !== 'not installed here' && !excludedIn(config.skills[n]!, e.root) && (trustedRoot || config.skills[n]!.from !== 'project')).join(', ') || 'none'}. Active needs: ${active.join(', ')}. ${PAUSE_HINT}`,
           trusted: true,
         })
       }
     }
 
-    const needed = neededSkills(config, next.needs, next.ruleSkills)
+    const needed = neededSkills(config, next.needs, next.ruleSkills, e.root)
     for (const [name, rule] of Object.entries(config.skills)) {
-      if (!rule.gate || next.ledger[name]?.state === 'not installed here' || (e.tool === 'Skill' && e.skill === name) || !matches(rule.gate, e.tool, e.path, e.tree ?? e.root)) continue
+      if (!rule.gate || next.ledger[name]?.state === 'not installed here' || excludedIn(rule, e.root) || (e.tool === 'Skill' && e.skill === name) || !matches(rule.gate, e.tool, e.path, e.tree ?? e.root)) continue
       const trusted = rule.from === 'user' || trustedRoot
       const state = next.ledger[name]?.state
       if (needed.includes(name) && state !== undefined && state !== 'loaded' && state !== 'unavailable') {
-        found.push({ text: `Souffleur: load ${name} with the Skill tool first, then retry. ${PAUSE_HINT}`, trusted })
+        found.push({ text: `Souffleur: load ${name} with the Skill tool first, then retry. ${name} is ${GROUP_SENTENCE[audienceOf(config, name)]} ${PAUSE_HINT}`, trusted })
       }
       const duty = next.duties.find((d) => d.skill === name)
       if (duty && !duty.denied && rule.duty) {
@@ -413,7 +433,8 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
     const by = e.path === undefined ? e.tool : `${e.tool} ${e.path}`
     next.openRules = [...next.openRules, ...rr.opened.map((id) => ({ id, by, denied: false, told: false }))]
     for (const [name, rule] of Object.entries(config.skills)) {
-      if (!rule.duty || next.ledger[name]?.state === 'not installed here' || !matches(rule.duty.after, e.tool, e.path, e.tree ?? e.root)) continue
+      if (!rule.duty || next.ledger[name]?.state === 'not installed here' || excludedIn(rule, e.root) || !matches(rule.duty.after, e.tool, e.path, e.tree ?? e.root)) continue
+      if (!FILE_TOOLS.includes(e.tool)) continue
       if (next.duties.some((d) => d.skill === name)) continue
       next.duties = [...next.duties, { skill: name, openedAt: e.now, by: e.path === undefined ? e.tool : `${e.tool} ${e.path}`, denied: false, told: false }]
     }

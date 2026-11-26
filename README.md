@@ -4,7 +4,7 @@ Keeps Claude Code skills loaded and in use for the whole session, including afte
 
 In a theatre, the souffleur sits out of sight at the edge of the stage and gives an actor the line they forgot, at the moment they need it. Souffleur does the same for skills: when compaction drops a skill the current task needs, it brings the skill back.
 
-> **Status:** version 0.1.3, released as tag `v0.1.3` (see [Install](#install) and the [roadmap](#roadmap)).
+> **Status:** version 0.1.4, released as tag `v0.1.4` (see [Install](#install) and the [roadmap](#roadmap)).
 >
 > **Early access.** Souffleur is a Claude Code mod: TypeScript that runs inside Claude Code through its mod API, shipped and installed as a plugin. Anthropic still changes that API between releases, so an update of Claude Code can break Souffleur until it is adapted. It is provided as is, with no guarantee of fixes or dates. [docs/compatibility.md](docs/compatibility.md) lists the versions each behaviour was checked on.
 
@@ -81,7 +81,7 @@ An installed plugin reaches a running session only after `/reload-plugins` or a 
 
 ```
 claude plugin uninstall skill-souffleur@skill-souffleur
-git clone --branch v0.1.3 https://github.com/r4KK4n/skill-souffleur ~/.claude/skills/skill-souffleur
+git clone --branch v0.1.4 https://github.com/r4KK4n/skill-souffleur ~/.claude/skills/skill-souffleur
 ```
 
 Update to a newer release:
@@ -102,16 +102,18 @@ Create `~/.claude/souffleur.json`, or let `/souffleur init` write it for you:
 {
   "mode": "observe",
   "skills": {
-    "terse:terse-mode": { "always": true },
+    "terse:terse-mode": { "always": true, "for": "chat" },
     "writing-guide": { "need": "prose" },
     "ui-checklist": { "need": "ui" }
   },
   "needs": {
-    "prose": "Writing text people read: docs, specs, plans, issues.",
-    "ui": "Designing or building something a user sees."
+    "prose": { "for": "readers", "what": "Writing text people read: docs, specs, plans, issues." },
+    "ui": { "for": "users", "what": "Designing or building something a user sees." }
   }
 }
 ```
+
+Each need names who receives the output its skills shape, in `for`: `chat` (your replies in the session), `readers` (texts other people read), `users` (what users of a product see) or `work` (how the agent works, nobody reads it). `what` is the description of 1 to 200 characters that the classifier matches against your prompt. The old form, a plain string, still works and counts as `work`. An always-on skill carries `for` itself; `for` on any other skill is an error and ignored. An object need with an invalid or missing `for` counts as `work` and reports an error. A skill in the user file can list `"notIn": ["/path/to/repo"]`: in those project roots it is excluded. `notIn` is compared without trailing slashes and is only read from the user file. The request to load skills names each skill with its audience, so a writing skill for docs does not change your replies in the chat; a skill excluded by `notIn` is not requested or gated there, and `/souffleur` shows it as `excluded in this project`. `/souffleur` lists under "Audience not set:" a need written as a plain string (`<need>: no audience set; add "for" to it in ~/.claude/souffleur.json`) and an always-on skill without `for` (`<skill>: always on without "for"; add "for": "chat" if it shapes your replies in this chat`).
 
 A skill with `"always": true` is needed from the first turn. A skill with `"need"` is needed once a prompt matches that need's description. After a compaction or a resume, Souffleur asks the model to load the skills it needs again. A project can add its own `.claude/souffleur.json`, but it cannot change your entries or your mode. Its skills and needs are report only until you list the project root in `trustProjects` in your user file: for any other project Souffleur neither asks the model to load them nor names them in the system prompt, and they cannot deny a call. `/souffleur` still lists them. A project file may define 20 skills and 10 needs at most; more get an error that names the cap. Roots in `trustProjects` are compared without trailing slashes.
 
@@ -247,8 +249,10 @@ Costs:
 - [x] Learn rules from the text of the user's skills
 - [x] `/souffleur init` per skill and `/souffleur migrate` for old hooks
 - [x] Install guide
+- [x] Skill audiences (`for`, `notIn`)
+- [ ] Needs by deliverable and reply check
 - [x] Short notices in the transcript for start, compaction and problems
-- [x] Release tags `v0.1.0` to `v0.1.3`
+- [x] Release tags `v0.1.0` to `v0.1.4`
 - [x] Updates that reach running sessions (install from a folder)
 
 ## Contributing

@@ -1,7 +1,7 @@
 import { checkEntry, normRoot } from './config.ts'
 import type { Session } from './decide.ts'
 import { describeNote, describeRule } from './rules.ts'
-import type { Config, Note, Rule } from './types.ts'
+import type { Config, Need, Note, Rule } from './types.ts'
 
 /** A rule or note that waits for the user's answer. `from` is the entry's source: `user`, `slip` or `skill:<name>`. */
 export type Proposal = {
@@ -139,8 +139,8 @@ export function addEntry(doc: unknown, kind: 'rule' | 'note', entry: Rule | Note
 }
 
 /** The prompt the small model shapes a user's words with. */
-export function shapePrompt(text: string, needs: Record<string, string>): string {
-  const needList = Object.entries(needs).map(([k, v]) => `${k}: ${v}`).join('\n') || 'none'
+export function shapePrompt(text: string, needs: Record<string, Need>): string {
+  const needList = Object.entries(needs).map(([k, v]) => `${k}: ${v.what}`).join('\n') || 'none'
   return [
     'Turn the user instruction into one JSON object, nothing else.',
     'A checkable rule has one of three shapes: {"kind":"rule","before":{"tools":["Agent"]},"skill":"<skill name>"}, {"kind":"rule","before":{"tools":["Agent"]},"field":"model"}, {"kind":"rule","after":{"tools":["Edit"],"paths":["src/**"]},"evidence":{"tool":"Bash","command":"npm test"}}.',

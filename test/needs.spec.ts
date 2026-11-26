@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { classifyPrompt, neededSkills } from '../src/core/needs.ts'
 import type { Config } from '../src/core/types.ts'
 
-const needs = { prose: 'Writing text people read.', ui: 'Building a screen.' }
+const needs = { prose: { for: 'readers', what: 'Writing text people read.' }, ui: { for: 'users', what: 'Building a screen.' } } as const
 
 test('returns needs answered match', async () => {
   const seen: { text: string; labels: readonly string[] }[] = []
@@ -84,4 +84,14 @@ test('classifyPromptChecked reports a failed, empty or unfinished call', async (
   assert.equal((await classifyPromptChecked('x', needs, async () => '', never)).failed, true, 'no answer')
   const late = await classifyPromptChecked('x', needs, () => new Promise<string>(() => {}), () => Promise.resolve(), 1)
   assert.equal(late.failed, true, 'a call still running at the end of the budget')
+})
+
+test('neededSkills leaves out skills excluded in the root, extras included', () => {
+  const config: Config = {
+    mode: 'observe', needs, trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true,
+    skills: { a: { always: true, from: 'user', notIn: ['/work/p'] }, b: { need: 'ui', from: 'user' }, c: { from: 'user', notIn: ['/work/p'] } },
+  }
+  assert.deepEqual(neededSkills(config, { ui: 1 }, ['c'], '/work/p/'), ['b'])
+  assert.deepEqual(neededSkills(config, { ui: 1 }, ['c'], '/work/q'), ['a', 'b', 'c'])
+  assert.deepEqual(neededSkills(config, { ui: 1 }, ['c']), ['a', 'b', 'c'])
 })

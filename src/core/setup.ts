@@ -152,6 +152,10 @@ export function applyChoice(
   const needs: Record<string, unknown> = isObject(doc.needs) ? { ...doc.needs } : {}
   const old = isObject(skills[skill]) ? skills[skill] : {}
   const { always: _a, startup: _s, need: oldNeed, ...rest } = old
+  const { for: _f, ...restNoFor } = rest
+  // A need may be a string (old form) or { for, what }; read the text from either.
+  const needWhat = (n: unknown): string | undefined => (typeof n === 'string' ? n : isObject(n) && typeof n.what === 'string' ? n.what : undefined)
+  const needFor = (n: unknown): unknown => (isObject(n) ? n.for : undefined)
 
   if (choice === 'none') {
     if ('gate' in old || 'duty' in old) {
@@ -163,15 +167,19 @@ export function applyChoice(
   else {
     const want: NeedText = need ?? {
       key: typeof oldNeed === 'string' ? oldNeed : needKeyFor(skill),
-      text: typeof oldNeed === 'string' && typeof needs[oldNeed] === 'string' ? (needs[oldNeed] as string) : `The task calls for ${skill}.`,
+      text: (typeof oldNeed === 'string' ? needWhat(needs[oldNeed]) : undefined) ?? `The task calls for ${skill}.`,
     }
     let key = want.key
-    if (key in needs && needs[key] !== want.text) {
+    const existing = needs[key]
+    const unchanged = existing !== undefined && needWhat(existing) === want.text
+    if (key in needs && !unchanged) {
       const uses = (all: Record<string, unknown>) => Object.entries(all).some(([name, r]) => name !== skill && isObject(r) && r.need === key)
       if (uses(skills) || uses(projectSkills)) key = forkKey(needs, key, skill)
     }
-    needs[key] = want.text
-    skills[skill] = { need: key, ...rest }
+    const prior = needs[key] ?? existing
+    // Keep an object need (and its audience) when the text is unchanged; write the object form when the old one was an object.
+    if (!(key in needs && unchanged)) needs[key] = isObject(prior) ? { for: needFor(prior) ?? 'work', what: want.text } : want.text
+    skills[skill] = { need: key, ...restNoFor }
   }
 
   const notes = Array.isArray(doc.notes) ? doc.notes : []

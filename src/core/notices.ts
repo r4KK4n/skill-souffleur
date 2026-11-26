@@ -49,7 +49,7 @@ export function notices(config: Config, before: Session, after: Session, root?: 
 
   // Only names the restore step will ask for count as cut: needed, trusted, session not paused. Others would never come back.
   const trusted = isTrustedRoot(config, root)
-  const asked = new Set(after.paused ? [] : neededSkills(config, after.needs, after.ruleSkills).filter((name) => trusted || config.skills[name]?.from !== 'project'))
+  const asked = new Set(after.paused ? [] : neededSkills(config, after.needs, after.ruleSkills, root).filter((name) => trusted || config.skills[name]?.from !== 'project'))
   // Names still cut stay; one that became unavailable, left the config, is not installed here or is no longer asked for cannot come back.
   const cut: SkillName[] = was.cut.filter((name) => asked.has(name) && ['stale', 'restoring', 'loaded'].includes(state(after, name) ?? ''))
   let newlyCut = false

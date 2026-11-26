@@ -12,7 +12,7 @@ const T1 = Date.UTC(2026, 10, 25, 9, 5)
 
 const config: Config = {
   mode: 'enforce',
-  needs: { prose: 'Writing text people read.', ui: 'Building a screen.' },
+  needs: { prose: { for: 'readers', what: 'Writing text people read.' }, ui: { for: 'users', what: 'Building a screen.' } },
   trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true,
   skills: {
     'writing-guide': { need: 'prose', from: 'user' },
@@ -225,4 +225,52 @@ test('a multi-violation reason stays apart from a single one and prints all its 
   assert.match(out, /^- 09:50 Souffleur: load ui-checklist/m)
   assert.match(out, /^- 2× Souffleur: load ui-checklist with the Skill tool first, then retry; Souffleur: open duty for ui-checklist \(Write x\.html\) \(09:51–09:52\)$/m)
   assert.ok(out.includes(`\n  ${a}\n  Souffleur: open duty`))
+})
+
+test('table: excluded skill shows its state text, needs without an audience get the init hint', () => {
+  const c: Config = {
+    mode: 'enforce', trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true,
+    needs: { prose: { for: 'work', what: 'Text.', noAudience: true }, ui: { for: 'users', what: 'Screens.' } },
+    skills: { 'ui-design': { need: 'ui', from: 'user', notIn: ['/work/p'] }, 'writing-guide': { need: 'prose', from: 'user' } },
+  }
+  const s = initSession(c, 's', T0, 'clear')
+  const here = renderTable(c, s, T0, '/work/p/')
+  assert.match(here, /\| ui-design \| excluded in this project \|/)
+  assert.match(here, /\| writing-guide \| absent \|/)
+  assert.match(here, /^prose: no audience set; add "for" to it in ~\/\.claude\/souffleur\.json$/m)
+  assert.doesNotMatch(here, /^ui: no audience/m)
+  assert.match(renderTable(c, s, T0, '/work/q'), /\| ui-design \| absent \|/)
+})
+
+test('status line leaves excluded skills out of the counts', () => {
+  const c: Config = { mode: 'enforce', trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true, needs: {}, skills: { a: { always: true, from: 'user', notIn: ['/work/p'] }, b: { always: true, from: 'user' } } }
+  let s = initSession(c, 's', T0, 'clear')
+  s = { ...s, ledger: skillLoaded(skillLoaded(s.ledger, 'a', T0, 'x'), 'b', T0, 'x') }
+  assert.equal(statusLine(s, 'enforce', 0, c, '/work/p/'), '1 loaded')
+  assert.equal(statusLine(s, 'enforce', 0, c, '/work/q'), '2 loaded')
+})
+
+test('needs without an audience: heading, and none for an untrusted project need', () => {
+  const c: Config = {
+    mode: 'enforce', trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true,
+    needs: { prose: { for: 'work', what: 'Text.', noAudience: true }, pn: { for: 'work', what: 'P.', noAudience: true } },
+    projectNeeds: ['pn'], skills: {},
+  }
+  const s = initSession(c, 's', T0, 'clear')
+  const t = renderTable(c, s, T0, '/work/p')
+  assert.match(t, /Audience not set:\nprose: no audience set; add "for" to it in ~\/\.claude\/souffleur\.json/)
+  assert.doesNotMatch(t, /pn: no audience/)
+  assert.match(renderTable({ ...c, trustProjects: ['/work/p'] }, s, T0, '/work/p'), /pn: no audience/)
+})
+
+test('audience hints: an always-on skill without "for" gets a hint, one with "for" or an excluded one does not', () => {
+  const c: Config = {
+    mode: 'enforce', trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true, needs: {},
+    skills: { 'chisle:chisle': { always: true, from: 'user' }, terse: { always: true, for: 'chat', from: 'user' }, gone: { always: true, from: 'user', notIn: ['/work/p'] } },
+  }
+  const s = initSession(c, 's', T0, 'clear')
+  const t = renderTable(c, s, T0, '/work/p')
+  assert.match(t, /Audience not set:\nchisle:chisle: always on without "for"; add "for": "chat" if it shapes your replies in this chat$/m)
+  assert.doesNotMatch(t, /^terse: always on/m)
+  assert.doesNotMatch(t, /^gone: always on/m)
 })

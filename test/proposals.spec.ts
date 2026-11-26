@@ -1,11 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { decide, initSession } from '../src/core/decide.ts'
-import { addEntry, answer, describeProposal, enqueue, makeProposal, nextQuestion, parseReply, parseShaped, proposalNotice } from '../src/core/proposals.ts'
+import { addEntry, answer, describeProposal, enqueue, makeProposal, nextQuestion, parseReply, parseShaped, proposalNotice, shapePrompt } from '../src/core/proposals.ts'
 import type { Proposal } from '../src/core/proposals.ts'
 import type { Config, Note, Rule } from '../src/core/types.ts'
 
-const config: Config = { mode: 'observe', skills: {}, needs: { ui: 'Building a screen.' }, trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true }
+const config: Config = { mode: 'observe', skills: {}, needs: { ui: { for: 'users', what: 'Building a screen.' } }, trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true }
 const fresh = () => initSession(config, 's1', 0, 'clear')
 const ruleRaw = (skill: string) => ({ kind: 'rule', before: { tools: ['Agent'] }, skill })
 const prop = (raw: unknown, from = 'slip'): Proposal => {
@@ -137,7 +137,7 @@ test('a passage proposal shows its file and line, and a project passage offers t
 })
 
 test('a note needing a project-file need is refused when the user file lacks it', () => {
-  const mixed: Config = { ...config, needs: { ui: 'x', extra: 'y' }, userNeeds: ['ui'] }
+  const mixed: Config = { ...config, needs: { ui: { for: 'work', what: 'x' }, extra: { for: 'work', what: 'y' } }, userNeeds: ['ui'] }
   assert.match(makeProposal({ kind: 'note', text: 'hi there', need: 'extra' }, 'user', mixed).error ?? '', /need/)
   assert.ok(makeProposal({ kind: 'note', text: 'hi there', need: 'ui' }, 'user', mixed).proposal)
 })
@@ -167,4 +167,10 @@ test('the notice carries the reply hint and the caution for a skill text', () =>
   assert.equal(proposalNotice(p, 'command'), `Souffleur: proposal ${p.entry.id}: ${describeProposal(p).replace(/\.$/, '')}. Run /souffleur accept ${p.entry.id} or /souffleur decline ${p.entry.id}.`)
   const q = { ...p, from: 'skill:writing-guide' }
   assert.match(proposalNotice(q), /read from a skill's text, not verified/)
+})
+
+test('shapePrompt lists needs by their text', () => {
+  const prompt = shapePrompt('x', { ui: { for: 'users', what: 'Building a screen.' } })
+  assert.match(prompt, /ui: Building a screen\./)
+  assert.doesNotMatch(prompt, /\[object Object\]/)
 })

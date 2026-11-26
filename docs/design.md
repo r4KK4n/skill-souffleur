@@ -159,14 +159,15 @@ Souffleur replaces the user's earlier preload and reload hooks. Removing those i
 
 A short, stable section added through `prompt.compose`:
 
-> Souffleur keeps track of skills in this session. If a message from Souffleur asks you to load skills, invoke each one with the Skill tool before you continue. Always-on skills: terse:terse-mode.
+> Souffleur keeps track of skills in this session. If a message from Souffleur asks you to load skills, invoke each one with the Skill tool before you continue. Each skill applies only to the output named with it. Replies in this chat follow terse:terse-mode; a skill for other readers or for product users never changes how you reply here.
 
-It holds the rule and the `always` skills from the config, never the changing ledger, because sections are cached per thread and must not break the prompt cache. It also carries the notes without `need`, and one sentence asking the model to call `souffleur_propose` when a slip happened that a rule would have caught or the user asks it to remember a rule. Notes in the section are capped at 2,000 characters; above that the status line says so and `/souffleur` lists the notes that were left out.
+It holds the rule and the `chat` skill that is always on (if any), never the changing ledger, because sections are cached per thread and must not break the prompt cache. It also carries the notes without `need`, and one sentence asking the model to call `souffleur_propose` when a slip happened that a rule would have caught or the user asks it to remember a rule. Notes in the section are capped at 2,000 characters; above that the status line says so and `/souffleur` lists the notes that were left out.
 
 ### Gates and duties
 
 - Gate: on `tool.call` for a configured tool and path, if a skill whose gate matches is needed and not `loaded`, deny with a reason that names the skill and says how to proceed. The model then loads it and retries. `/souffleur pause` turns every denial off for the session: gates, duties, rules and the subagent brief check. It also stops restore requests, need detection (no classifier calls), the turn-end questions and the reading of skill texts. `/souffleur resume` undoes it, and a pause is not carried over when a session is resumed. A gate cannot name the `Skill` tool (the entry is dropped with an error), and the `Skill` call that loads a gated skill is never denied.
 - Duty: when a call matches `after`, Souffleur records an open duty. A later tool call matching `evidence` closes it. While a duty is open, the next call that matches the skill's gate (writing or publishing the next prototype file, for example) is denied once with the duty named; the retry passes, so a wrong evidence pattern cannot trap the session. This enforces it in the same turn without a paid turn of its own. An open duty is also mentioned once, with the next user prompt's context, and not again until it closes and opens anew.
+- A duty arms only on a file-changing call (`Write`, `Edit`, `NotebookEdit`, `MultiEdit`) that matches `after`; any other tool in `after.tools` (a publish, for example) never arms it, so publishing a file after its check opens no new duty (#51). A file changed outside the file tools (a Bash redirect or `sed -i`) opens no duty either, and a later publish does not. A duty whose `after.tools` names none of the file tools is kept, with a config error, because it never opens.
 
 ### Rules and notes
 
@@ -264,6 +265,35 @@ At the end `init` says whether it found hooks or notes that overlap with the new
 `migrate` reads `~/.claude/settings.json` (hooks), the user and project `CLAUDE.md` and the current project's memory index. It flags a hook when its command or matcher names a configured skill. For an installed skill that is not configured, only the full `plugin:skill` name or the name inside a script file name counts, and the dialog marks it as a guess. A hook that runs a script (`.sh`, `.js`, `.mjs`, `.ts`, `.py`, or a file under `hooks/`) with `preload`, `reload` or `inject` in its name is flagged as a guess too. For each flagged hook it asks `Turn off`, `Keep` or `Show me what to do`. A hook counts as naming a skill firmly when a script file name or the full `plugin:skill` name contains it; a bare word in the command is only a guess. The hook lists every skill it names. When any of them is not in the user file, when the match is a guess, or when the hook names no skill at all, so that it may serve a skill of another project or a rules file, the question says that turning it off leaves that without reminders, and `Keep` comes first. Only skills of the user file count as watched. When a watched skill is `not installed here` in the current session, the report adds a note. `migrate` reads the config files again when it starts. `Turn off` copies `settings.json` to `settings.json.bak-souffleur-<date>-<time>` first (a name that is already taken gets a counter, so an older copy is never overwritten; one copy per run) and removes only that hook entry, and only when the file still holds what the edit was based on; settings hooks reload live. `Show me what to do` changes nothing and adds the manual steps to the closing report. Hook scripts and `CLAUDE.md` or memory text are never edited. It lists only passages that name a configured skill and read like a loading or reminding instruction (load, invoke, preload, reload, remind, hook), with file and line.
 
 Without a dialog (`claude -p`), both commands print what they would ask, the config entries as JSON and the steps, and change nothing. Once rules and notes exist, `migrate` also queues the standing instructions it found as note proposals, with or without a dialog; they are asked at turn end or by `/souffleur review`. The queue lives in the session and does not survive it, except that a declined hash is kept in the plugin store.
+
+### Audience
+
+Every skill shapes output for someone. Souffleur records who, and says it whenever it asks for a skill, so a skill for one audience does not shape output for another (for example a writing-style skill for documentation does not change the replies in the chat).
+
+| `for` | Who receives the output | Examples |
+|---|---|---|
+| `chat` | the person in this session | the agent's replies in the conversation |
+| `readers` | people outside the chat who read a text | docs, specs, issue and PR texts, commit bodies, app copy |
+| `users` | people who use the product | screens, pages, components, prototypes |
+| `work` | nobody reads it; it shapes how the agent works | debugging, test-first, planning, review steps |
+
+`for` sits on a need (`"prose": { "for": "readers", "what": "A text people outside this chat will read …" }`), because the skills of one need share its deliverable. An `always` skill has no need and carries `for` itself. The old string form of a need still works and counts as `work`. `/souffleur` lists needs and always-on skills without `for` under "Audience not set:" and names the config file to edit. Planned: `init` proposes `for` from the skill's description and warns when an always-on skill is `readers` or `users`; until then `for` is set by hand.
+
+The load request groups skills by audience with a fixed sentence per value, for example: `writing-guide, writing-check: for texts other people read (docs, issues, PRs, app copy). Not for your replies in this chat.` Groups come in the order readers, users, work, chat, then the compaction sentence when it applies. When a `chat` skill is always on and the request holds a `readers` or `users` group, the last line is `Your replies in this chat follow <chat skill>.` The system prompt section says that each skill applies only to the output named with it, names the `chat` skill, and lists the other always-on skills as `Always-on skills: <names>.`
+
+Needs start from the deliverable, not the topic. Planned (not built yet): the rest of this list and the reply check below. Today a need starts from the prompt classifier, one call per need.
+
+
+- Planned: a `readers` or `users` need starts from tool evidence: a call its skills' gates match, or `gh issue create|comment`, `gh pr create|edit`, `git commit` for `readers`. No model call.
+- Planned: per prompt, two classifier calls run in parallel instead of one per need. Call A asks what the agent will produce: `chat-reply`, `text-for-others`, `screen`, `code-or-repo-work`. Call B picks one `work` need or `none`, and counts only when A says `code-or-repo-work`. `chat-reply` starts nothing.
+- Planned: a failed call counts as `chat-reply`. After three failures in a row the status shows `needs: degraded`, and each prompt carries one line listing the `work` needs so the main model can pick; the line stops with the first good answer. Each failure goes to the debug log with its kind.
+- Planned: after a compaction, `chat` and `work` skills are requested on the next prompt; `readers` and `users` skills wait for the next deliverable signal.
+
+Planned: adherence is checked for the `chat` skill only, without a model: on `turn.complete` with reason `answer`, the answer's length without code blocks and its count of heading lines are compared with `"reply": { "maxChars": …, "headings": … }` on that skill. A violation is counted in `/souffleur` and adds one line to the next prompt's context (at most once per five prompts). In `enforce`, two violations in a row mark the skill `stale`, so it is requested again. Nothing is denied; the answer is already shown.
+
+A user-file skill can carry `"notIn": [<main repository root>, …]`: in those roots it is not needed, requested or gated, and `/souffleur` shows `excluded in this project`. A project file cannot switch off a user's skill.
+
+A duty arms only on a call that changes a file (`Write`, `Edit`, `MultiEdit`, `NotebookEdit`). A publish never opens a duty.
 
 ### Status
 

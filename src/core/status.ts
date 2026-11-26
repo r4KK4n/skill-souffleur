@@ -1,6 +1,6 @@
 import type { Session } from './decide.ts'
 import { contextNotes, sectionNotes } from './rules.ts'
-import { isTrustedRoot } from './config.ts'
+import { excludedIn, isTrustedRoot } from './config.ts'
 import type { Config, Mode } from './types.ts'
 import { versionNotice } from './version.ts'
 
@@ -21,13 +21,20 @@ export function renderTable(config: Config, s: Session, now: number, root?: stri
   lines.push('')
   lines.push('| Skill | State | Since | Reason |', '| --- | --- | --- | --- |')
   for (const [name, e] of Object.entries(s.ledger)) {
-    lines.push(`| ${cell(name)} | ${e.state} | ${clock(e.since)} | ${cell(e.reason)} |`)
+    const state = config.skills[name] !== undefined && excludedIn(config.skills[name]!, root) ? 'excluded in this project' : e.state
+    lines.push(`| ${cell(name)} | ${state} | ${clock(e.since)} | ${cell(e.reason)} |`)
   }
   if (!isTrustedRoot(config, root) && Object.values(config.skills).some((r) => r.from === 'project')) {
     lines.push('', 'The project file defines skills, but this project is not trusted (trustProjects in the user file): they are listed here and neither requested nor allowed to deny a call.')
   }
   const duties = s.duties.filter((d) => s.ledger[d.skill]?.state !== 'not installed here').map((d) => `- ${d.skill} (${d.by})`)
   if (duties.length) lines.push('', 'Open duties:', ...duties)
+  const trusted = isTrustedRoot(config, root)
+  const bare = Object.entries(config.needs).filter(([name, n]) => n.noAudience && (trusted || !(config.projectNeeds ?? []).includes(name))).map(([name]) => `${name}: no audience set; add "for" to it in ~/.claude/souffleur.json`)
+  const bareAlways = Object.entries(config.skills)
+    .filter(([name, r]) => r.always === true && r.for === undefined && !excludedIn(r, root) && s.ledger[name]?.state !== 'not installed here' && (trusted || r.from !== 'project'))
+    .map(([name]) => `${name}: always on without "for"; add "for": "chat" if it shapes your replies in this chat`)
+  if (bare.length || bareAlways.length) lines.push('', 'Audience not set:', ...bare, ...bareAlways)
   const needs = Object.entries(s.needs).map(([name, n]) => `- ${name} (since ${clock(n.since)})`)
   if (needs.length) lines.push('', 'Active needs:', ...needs)
   // Equal first sentences (per line, sorted) form one group, so a call that broke two checks stays apart from one that broke one.
@@ -60,10 +67,11 @@ export function renderTable(config: Config, s: Session, now: number, root?: stri
 }
 
 /** Short summary for the status line; undefined when no skill is configured. */
-export function statusLine(s: Session, mode: Mode, notesLeftOut = 0): string | undefined {
+export function statusLine(s: Session, mode: Mode, notesLeftOut = 0, config?: Config, root?: string): string | undefined {
   if (s.errors.length) return 'degraded, see /souffleur'
   const counts = { loaded: 0, restoring: 0, stale: 0, unavailable: 0, 'not installed here': 0 }
-  for (const e of Object.values(s.ledger)) {
+  for (const [name, e] of Object.entries(s.ledger)) {
+    if (config?.skills[name] !== undefined && excludedIn(config.skills[name]!, root)) continue
     if (e.state in counts) counts[e.state as keyof typeof counts] += 1
   }
   if (Object.keys(s.ledger).length === 0 && s.proposals.length === 0 && notesLeftOut === 0) return undefined

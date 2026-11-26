@@ -1,12 +1,12 @@
 import type { Register } from 'claude-code'
-import { isTrustedRoot, parseConfig } from '../core/config.ts'
+import { excludedIn, isTrustedRoot, parseConfig } from '../core/config.ts'
 import { decide, initSession, normalizeSession } from '../core/decide.ts'
 import { MIGRATE_INTRO, describeHook, findHookOverlaps, findPassages, hookQuestion, hookSteps, isGuess, migrateSteps, passageLines, removeHook } from '../core/migrate.ts'
 import type { HookOverlap, Passage } from '../core/migrate.ts'
 import { CHOICE_LABEL, INJECTED_HELP, NOT_SET_UP, SETUP_INTRO, applyChoice, candidates, choiceOf, cleanNeedText, configProblem, currentChoice, describePlan, explicitOnly, injectedWarning, needKeyFor, options, parsePicks, parseSkips, picksPrompt, setupSteps } from '../core/setup.ts'
 import type { LoadChoice, NeedText, Plan, StartHooks, Suggestion } from '../core/setup.ts'
 import type { Action, CoreEvent, Session } from '../core/decide.ts'
-import { classifyPromptChecked } from '../core/needs.ts'
+import { audienceOf, classifyPromptChecked, needTexts } from '../core/needs.ts'
 import { EXTRACT_SYSTEM, MAX_SKILL_TEXT, extractPrompt, hashKey, parseAnswer, shouldRead, skillHash, trusted } from '../core/learn.ts'
 import type { Proposal } from '../core/proposals.ts'
 import { NO, YES_EVERYWHERE, YES_PROJECT, addEntry, answer, describeProposal, enqueue, findProposal, makeProposal, nextQuestion, parseReply, parseShaped, proposalLines, proposalNotice, shapePrompt } from '../core/proposals.ts'
@@ -160,7 +160,7 @@ async function persist($: Dollar, l: Loaded, s0: Session, quiet = false): Promis
   latest = s
   for (const line of lines) say($, l, line)
   // A broken file shows as degraded; only a clean start without a user file says "not set up".
-  $.ui.status(!l.setUp && !s.errors.length ? NOT_SET_UP : statusLine(s, l.config.mode, sectionNotes(l.config, l.root).leftOut.length))
+  $.ui.status(!l.setUp && !s.errors.length ? NOT_SET_UP : statusLine(s, l.config.mode, sectionNotes(l.config, l.root).leftOut.length, l.config, l.root))
   await $.state.set(REF, s)
   await $.store.set(`session:${s.id}`, s)
 }
@@ -453,9 +453,9 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
   let picks: Suggestion[] = []
   if (pool.length) {
     try {
-      const r = await $.model.complete({ model: 'haiku', prompt: picksPrompt(pool, config.needs) })
+      const r = await $.model.complete({ model: 'haiku', prompt: picksPrompt(pool, needTexts(config.needs)) })
       if (r.isAnswered) {
-        picks = parsePicks(r.text, pool.map((x) => x.name), config.needs)
+        picks = parsePicks(r.text, pool.map((x) => x.name), needTexts(config.needs))
         for (const name of parseSkips(r.text, pool.map((x) => x.name))) skips.add(name)
       }
       else notes.push('The small model gave no answer, so no descriptions are proposed.')
@@ -493,7 +493,7 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
   const proposal = (p: Plan): { need: NeedText; fallback: boolean } => {
     if (p.need) return { need: p.need, fallback: false }
     const key = config.skills[p.skill]?.need
-    const text = key === undefined ? undefined : config.needs[key]
+    const text = key === undefined ? undefined : config.needs[key]?.what
     if (key !== undefined && text !== undefined) return { need: { key, text }, fallback: false }
     return { need: { key: needKeyFor(p.skill), text: `The task calls for ${p.skill}.` }, fallback: true }
   }
@@ -1330,11 +1330,14 @@ export const register: Register = (on) => {
     const r = await next(e)
     const text = await safe($, 'prompt.compose', undefined as string | undefined, async () => {
       const { l, session } = await current($)
+      const chat = Object.entries(l.config.skills)
+        .filter(([name, rule]) => rule.always === true && audienceOf(l.config, name) === 'chat' && session.ledger[name]?.state !== 'not installed here' && !excludedIn(rule, l.root) && (rule.from === 'user' || isTrustedRoot(l.config, l.root)))
+        .map(([name]) => name)
       const always = Object.entries(l.config.skills)
-        .filter(([name, rule]) => rule.always === true && session.ledger[name]?.state !== 'not installed here' && (rule.from === 'user' || isTrustedRoot(l.config, l.root)))
+        .filter(([name, rule]) => rule.always === true && audienceOf(l.config, name) !== 'chat' && session.ledger[name]?.state !== 'not installed here' && !excludedIn(rule, l.root) && (rule.from === 'user' || isTrustedRoot(l.config, l.root)))
         .map(([name]) => name)
       const notes = sectionNotes(l.config, l.root).text
-      return `${RULE}${always.length ? ` Always-on skills: ${always.join(', ')}.` : ''}${proposeReady && l.setUp ? PROPOSE_SENTENCE : ''}${notes ? `\n\n${notes}` : ''}`
+      return `${RULE} Each skill applies only to the output named with it.${chat.length ? ` Replies in this chat follow ${chat.join(', ')}; a skill for other readers or for product users never changes how you reply here.` : ''}${always.length ? ` Always-on skills: ${always.join(', ')}.` : ''}${proposeReady && l.setUp ? PROPOSE_SENTENCE : ''}${notes ? `\n\n${notes}` : ''}`
     })
     return text === undefined ? r : { ...r, sections: [...r.sections, { id: 'souffleur', scope: 'session' as const, text }] }
   })

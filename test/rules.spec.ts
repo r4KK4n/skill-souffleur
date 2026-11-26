@@ -6,7 +6,7 @@ import type { Action, CoreEvent, Session } from '../src/core/decide.ts'
 import { NOTE_CAP, sectionNotes } from '../src/core/rules.ts'
 import type { Config, Note, Rule } from '../src/core/types.ts'
 
-const empty: Config = { mode: 'enforce', skills: {}, needs: { ui: 'Building a screen.' }, trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true }
+const empty: Config = { mode: 'enforce', skills: {}, needs: { ui: { for: 'users', what: 'Building a screen.' } }, trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true }
 const cfg = (patch: Partial<Config>): Config => ({ ...empty, ...patch })
 
 let t = 0
@@ -53,7 +53,7 @@ test('skill rule denies until loaded, then skill is needed after compaction', ()
   assert.match(denial(out[0]!), /dev-workflow/)
   assert.equal(denial(out[2]!), '')
   assert.equal(s.ledger['dev-workflow']?.state, 'restoring')
-  assert.match(ctx(out[4]!), /invoke these skills[^\n]*dev-workflow/)
+  assert.match(ctx(out[4]!), /invoke these skills[\s\S]*dev-workflow/)
 })
 
 test('a rule that fired makes its skill needed even without a load', () => {
@@ -120,7 +120,7 @@ test('a subagent call is never checked by a rule', () => {
 
 test('user file rules and notes parse; project file rules are an error', () => {
   const user = JSON.stringify({
-    needs: { ui: 'Building a screen.' },
+    needs: { ui: { for: 'users', what: 'Building a screen.' } },
     rules: [fieldRule, skillRule, afterRule],
     notes: [{ id: 'reply-language', text: 'Reply in German.', source: 'user' }, { id: 'ui-copy', text: 'Show copy first.', need: 'ui', source: 'user' }],
     learn: { skills: false },
@@ -283,4 +283,12 @@ test('the need-note block is capped and the rest follows on the next prompt', as
   assert.doesNotMatch(renderTable(c, s, 0, '/work/a'), /Notes waiting/, 'e and f fit the next block, so they are not held back')
   const next = run(c, [prompt()], s)
   assert.match(ctx(next.out[0]!), /y{50}/, 'the rest follows on the next prompt')
+})
+
+test('a skill rule does not deny where its skill is excluded', () => {
+  const c = cfg({ rules: [skillRule], skills: { 'dev-workflow': { always: true, from: 'user', notIn: ['/work/a'] } } })
+  const here = decide(c, initSession(c, 's', 0, 'clear'), { ...tool('Agent'), root: '/work/a/' } as CoreEvent)
+  assert.equal(denial(here.actions), '')
+  const elsewhere = decide(c, initSession(c, 's', 0, 'clear'), { ...tool('Agent'), root: '/work/b' } as CoreEvent)
+  assert.match(denial(elsewhere.actions), /dev-workflow/)
 })

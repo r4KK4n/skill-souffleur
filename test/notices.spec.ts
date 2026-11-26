@@ -9,7 +9,7 @@ import type { Config } from '../src/core/types.ts'
 const T = Date.UTC(2026, 10, 26, 8, 0)
 const config: Config = {
   mode: 'enforce',
-  needs: { prose: 'Writing text people read.' },
+  needs: { prose: { for: 'readers', what: 'Writing text people read.' } },
   trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true,
   skills: {
     'terse:terse-mode': { always: true, from: 'user' },
@@ -185,4 +185,11 @@ test('degraded line uses the first line, ASCII only, at most 120 characters', ()
   assert.match(line, /^[\x20-\x7e]+$/)
   assert.match(line, /^Souffleur: degraded: read failed: caf\? x+\.\.\. Details: \/souffleur\.$/)
   assert.ok(line.length <= 'Souffleur: degraded: '.length + 120 + ' Details: /souffleur.'.length)
+})
+
+test('a skill excluded in this root is not counted as cut', () => {
+  const c: Config = { ...config, skills: { ...config.skills, 'writing-guide': { need: 'prose', from: 'user', notIn: ['/work/p'] } } }
+  const s = { ...initSession(c, 's1', T, 'clear'), needs: { prose: { since: T, reason: 'test' } } }
+  const before = withLedger(s, skillLoaded(skillLoaded(s.ledger, 'writing-guide', T, 'x'), 'writing-check', T, 'x'))
+  assert.deepEqual(notices(c, before, cutOf(before), '/work/p').lines, ['Souffleur: cut by compaction: writing-check; will ask the model to reload them.'])
 })

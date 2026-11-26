@@ -225,7 +225,7 @@ test('project file adds new skills and needs, marked from "project"', () => {
   assert.deepEqual(errors, [])
   assert.equal(config.skills['ui-extra']!.from, 'project')
   assert.equal(config.skills['writing-guide']!.from, 'user')
-  assert.equal(config.needs.extra, 'Extra work.')
+  assert.equal(config.needs.extra?.what, 'Extra work.')
 })
 
 test('project skill with a user name is an error: user entry stays, project entry ignored', () => {
@@ -241,7 +241,7 @@ test('project need with a user name is an error: user text stays', () => {
   const project = { needs: { prose: 'Hijacked.' } }
   const { config, errors } = parseConfig(json(fullExample), json(project))
   assert.equal(errors.length, 1)
-  assert.equal(config.needs.prose, fullExample.needs.prose)
+  assert.equal(config.needs.prose?.what, fullExample.needs.prose)
 })
 
 test('a clash with an invalid user entry still blocks the project entry', () => {
@@ -299,7 +299,11 @@ test('need texts are one line of 1 to 200 characters', () => {
     const { config, errors } = parseConfig(json({ needs: { prose: text } }), undefined)
     assert.equal(errors.length, 1, JSON.stringify(text))
     assert.deepEqual(config.needs, {})
+    const o = parseConfig(json({ needs: { prose: { for: 'work', what: text } } }), undefined)
+    assert.equal(o.errors.length, 1, JSON.stringify(text))
+    assert.deepEqual(o.config.needs, {})
   }
+  assert.deepEqual(parseConfig(json({ needs: { prose: { for: 'work', what: 'x'.repeat(200) } } }), undefined).errors, [])
   assert.deepEqual(parseConfig(json({ needs: { prose: 'x'.repeat(200) } }), undefined).errors, [])
 })
 
@@ -396,4 +400,88 @@ test('notices "no" → error text above', () => {
   const r = parseConfig(JSON.stringify({ notices: 'no' }), undefined)
   assert.equal(r.config.notices, true)
   assert.equal(r.errors.filter((e) => /notices: must be true or false; ignored/.test(e)).length, 1)
+})
+
+test('a string need counts as work and is marked as having no audience', () => {
+  const { config, errors } = parseConfig(json({ needs: { prose: 'Writing.' } }), undefined)
+  assert.deepEqual(errors, [])
+  assert.deepEqual(config.needs.prose, { for: 'work', what: 'Writing.', noAudience: true })
+})
+
+test('an object need is parsed with its audience', () => {
+  const { config, errors } = parseConfig(json({ needs: { prose: { for: 'readers', what: 'A text others read.' } } }), undefined)
+  assert.deepEqual(errors, [])
+  assert.deepEqual(config.needs.prose, { for: 'readers', what: 'A text others read.' })
+})
+
+test('an object need with a bad or missing for is kept as work, with the error', () => {
+  for (const need of [{ for: 'everyone', what: 'x' }, { what: 'x' }]) {
+    const { config, errors } = parseConfig(json({ needs: { prose: need } }), undefined)
+    assert.equal(errors.length, 1, JSON.stringify(need))
+    assert.match(errors[0]!, /prose\.for: must be one of chat, readers, users, work; counted as work/)
+    assert.deepEqual(config.needs.prose, { for: 'work', what: 'x' })
+  }
+})
+
+test('an object need with an unknown key, no what, or a bad what is dropped', () => {
+  for (const need of [{ for: 'work' }, { for: 'work', what: 'x', extra: 1 }, { what: '' }]) {
+    const { config, errors } = parseConfig(json({ needs: { prose: need } }), undefined)
+    assert.ok(errors.length >= 1, JSON.stringify(need))
+    assert.deepEqual(config.needs, {})
+  }
+})
+
+test('for on an always-on skill is read; elsewhere it is an error and ignored', () => {
+  const ok = parseConfig(json({ skills: { 'terse:terse-mode': { always: true, for: 'chat' } } }), undefined)
+  assert.deepEqual(ok.errors, [])
+  assert.equal(ok.config.skills['terse:terse-mode']?.for, 'chat')
+  const bad = parseConfig(json({ skills: { g: { need: 'n', for: 'chat' } }, needs: { n: 'x' } }), undefined)
+  assert.equal(bad.errors.length, 1)
+  assert.match(bad.errors[0]!, /g\.for: only for always-on skills; ignored/)
+  assert.equal(bad.config.skills.g?.for, undefined)
+  assert.equal(bad.config.skills.g?.need, 'n')
+  const worse = parseConfig(json({ skills: { g: { always: true, for: 'nobody' } } }), undefined)
+  assert.match(worse.errors[0]!, /g\.for: must be one of chat, readers, users, work; ignored/)
+  assert.equal(worse.config.skills.g?.always, true)
+  assert.equal(worse.config.skills.g?.for, undefined)
+})
+
+test('notIn is read from the user file, normalised without trailing slash', () => {
+  const { config, errors } = parseConfig(json({ skills: { g: { always: true, notIn: ['/home/a/repo/', '/x'] } } }), undefined)
+  assert.deepEqual(errors, [])
+  assert.deepEqual(config.skills.g?.notIn, ['/home/a/repo', '/x'])
+  for (const bad of ['/x', ['relative'], [5]]) {
+    const r = parseConfig(json({ skills: { g: { always: true, notIn: bad } } }), undefined)
+    assert.equal(r.errors.length, 1, JSON.stringify(bad))
+    assert.equal(r.config.skills.g?.notIn, undefined)
+  }
+})
+
+test('notIn in the project file is an error and ignored; it cannot switch off a user skill', () => {
+  const user = { skills: { g: { always: true } } }
+  const project = { skills: { g: { always: true, notIn: ['/p'] }, h: { always: true, notIn: ['/p'] } } }
+  const { config, errors } = parseConfig(json(user), json(project))
+  assert.ok(errors.some((e) => /notIn is only allowed in the user config; ignored/.test(e)))
+  assert.equal(config.skills.g?.notIn, undefined)
+  assert.equal(config.skills.h?.notIn, undefined)
+  assert.equal(config.skills.h?.always, true)
+})
+
+test('notIn holds at most 20 paths; for on a startup-injected skill without always is an error', () => {
+  const many = Array.from({ length: 21 }, (_, i) => `/r${i}`)
+  const r = parseConfig(json({ skills: { g: { always: true, notIn: many } } }), undefined)
+  assert.equal(r.errors.length, 1)
+  assert.equal(r.config.skills.g?.notIn, undefined)
+  assert.deepEqual(parseConfig(json({ skills: { g: { always: true, notIn: many.slice(0, 20) } } }), undefined).errors, [])
+  const s = parseConfig(json({ skills: { g: { startup: 'injected', for: 'chat' } } }), undefined)
+  assert.match(s.errors[0]!, /g\.for: only for always-on skills; ignored/)
+  assert.equal(s.config.skills.g?.for, undefined)
+})
+
+test('a duty whose after.tools has no file-changing tool is kept with an error', () => {
+  const cfg = { skills: { x: { need: 'n', duty: { after: { tools: ['Artifact'] }, evidence: { tool: 'Bash' } } } }, needs: { n: 'Something.' } }
+  const { config, errors } = parseConfig(json(cfg), undefined)
+  assert.ok(config.skills.x?.duty)
+  assert.equal(errors.length, 1)
+  assert.match(errors[0]!, /x\.duty\.after\.tools: needs Write, Edit, MultiEdit or NotebookEdit; the duty never opens/)
 })
