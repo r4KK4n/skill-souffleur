@@ -935,7 +935,7 @@ async function answerShown($: Dollar, text: string): Promise<string | undefined>
     return `Souffleur: the user ${verdict === 'accept' ? 'accepted' : 'declined'} proposal ${id}; nothing else to do for it.`
   } catch {
     // The answer was committed; the model must not think nothing happened.
-    return `Souffleur: the user answered proposal ${id} with ${verdict}, and the answer was handled, but Souffleur could not check the result. Do not retry it; tell the user to check ~/.claude/souffleur.json.`
+    return `Souffleur: the answer may not have been written; check ~/.claude/souffleur.json or /souffleur.`
   }
 }
 
@@ -1123,7 +1123,7 @@ async function runReview($: Dollar): Promise<string> {
   const { session: rest } = await current($)
   const out = [...done]
   if (rest.proposals.length) {
-    out.push(done.length ? 'Still waiting:' : 'Waiting for your answer, and no dialog can open here:', ...proposalLines(rest), 'Add one with /souffleur accept <id> (everywhere) or /souffleur accept <id> here (this project only).')
+    out.push(done.length ? 'Still waiting:' : rest.proposals.some((p) => timedOutAsk.has(p.hash)) ? 'Waiting for your answer; a dialog for it is still open:' : 'Waiting for your answer, and no dialog can open here:', ...proposalLines(rest), 'Add one with /souffleur accept <id> (everywhere) or /souffleur accept <id> here (this project only).')
   }
   return out.join('\n')
 }
@@ -1382,11 +1382,12 @@ export const register: Register = (on) => {
     if (e.agentId === undefined && e.reason === 'answer' && (!askStopped || askAtTurnEnd || noDialog)) {
       await safe($, 'turn.complete', undefined, async () => {
         if ((await current($)).session.paused) return
+        // While an offer is armed no person prompt has ended it yet: a new notice would redirect the reply, and a new
+        // dialog would add one more open question. The offer stays until a prompt of the person ends it.
+        if (shownHash !== undefined) return
         askAtTurnEnd = false
         if (noDialog) {
           // A dialog was tried and nobody can answer: no new attempt, only a notice for a proposal not shown yet.
-          // While an offer is armed no person prompt has ended it yet: a new notice would redirect the reply.
-          if (shownHash !== undefined) return
           const { l, session } = await current($)
           noticeFirst($, l, session)
           return

@@ -2450,6 +2450,7 @@ test('after a timeout the next proposal still gets a dialog attempt', async ($, 
   await propose($, note('First note here.'))
   await timedOut($, w)
   await propose($, note('Second note here.'))
+  await reply($, 'hello', COMPOSER) // a prompt of the person ends the armed offer
   const t = turnEnd($)
   await idle()
   expect(w.asked.length).toBe(2)
@@ -2466,4 +2467,19 @@ test('a failure inside the commit after the write still tells the model', async 
   w.stored['declined'] = 'junk'
   await reply($, 'accept', COMPOSER)
   expect(hasLine(w, `proposal ${id}`)).toBe(true)
+})
+
+test('while a reply offer is armed no new dialog and no new notice open', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { holdAsk: true })
+  await start($)
+  await propose($, note('First note here.'))
+  await propose($, note('Second note here.'))
+  await timedOut($, w)
+  expect(w.asked.length).toBe(1)
+  await reply($, 'hello', { kind: 'peer' })
+  await turnEnd($)
+  expect(w.asked.length).toBe(1)
+  expect(w.logs.filter((l) => l.includes('Second note here')).length).toBe(0)
+  await reply($, 'accept', COMPOSER)
+  expect(userFile(w).notes.map((n: { text: string }) => n.text)).toEqual(['First note here.'])
 })
