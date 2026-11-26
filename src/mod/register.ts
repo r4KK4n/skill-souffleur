@@ -1,5 +1,5 @@
 import type { Register } from 'claude-code'
-import { excludedIn, isTrustedRoot, parseConfig } from '../core/config.ts'
+import { excludedIn, isTrustedRoot, normRoot, parseConfig } from '../core/config.ts'
 import { decide, initSession, normalizeSession } from '../core/decide.ts'
 import { MIGRATE_INTRO, describeHook, findHookOverlaps, findPassages, hookQuestion, hookSteps, isGuess, migrateSteps, passageLines, removeHook } from '../core/migrate.ts'
 import type { HookOverlap, Passage } from '../core/migrate.ts'
@@ -443,7 +443,13 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
   const config = parseConfig(userSrc, projectSrc).config
   const here = parseConfig(userSrc, projectSrc, l0.root)
   notes.push(...here.errors)
-  const skip = [...(here.config.project?.blocked ?? []), ...(here.config.project?.own ?? [])]
+  // Raw keys, so an entry that failed validation is skipped as well.
+  const rawBlock = isRecord(userDoc) && isRecord(userDoc.projects) ? userDoc.projects[normRoot(l0.root)] : undefined
+  const rawNames = (v: unknown): string[] => (isRecord(v) ? Object.keys(v) : [])
+  const rawIds = (v: unknown): string[] => (Array.isArray(v) ? v.flatMap((x) => (isRecord(x) && typeof x.id === 'string' ? [x.id] : [])) : [])
+  const skip = isRecord(rawBlock)
+    ? [...(Array.isArray(rawBlock.block) ? rawBlock.block.filter((n): n is string => typeof n === 'string') : []), ...rawNames(rawBlock.skills), ...rawIds(rawBlock.notes), ...rawIds(rawBlock.rules)]
+    : []
   const projectSkills: Record<string, unknown> = Object.fromEntries(Object.entries(config.skills).filter(([, r]) => r.from === 'project'))
 
   const settings = await readSettings($, settingsPath, home)
@@ -487,7 +493,7 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
     return { skill, source, ...(current === undefined ? {} : { current }), recommended: current ?? (skips.has(skill) ? 'none' : 'need'), ...need }
   })
   const watched = new Set(plans.map((p) => p.skill))
-  const unwatched = installed.filter((name) => !watched.has(name))
+  const unwatched = installed.filter((name) => !watched.has(name) && !skip.includes(name))
   const toAsk = plans.filter((p) => p.source !== 'project')
 
   /** The line for an injected result: the plugin's SessionStart hooks decide which one. */
@@ -767,6 +773,106 @@ async function withStoredDeclined($: Dollar, s: Session): Promise<Session> {
   } catch {
     return s
   }
+}
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
+const BLOCK_NAME = /^[A-Za-z0-9:_-]{1,64}$/
+let backedUp = false
+
+/**
+ * `/souffleur block <name>` and `unblock <name>`: edits `projects[<this root>].block` in the user file.
+ * Reads fresh, stops on a read error or a file that cannot be edited, keeps every other key, and saves
+ * `souffleur.json.bak-<epoch ms>` before the first write of this process.
+ */
+async function runBlock($: Dollar, l0: Loaded, verb: 'block' | 'unblock', name: string): Promise<string> {
+  const home: string | undefined = await $.env.get('HOME')
+  if (!home) return 'Souffleur: the home folder is unknown, so nothing was written.'
+  if (name === '') return `Souffleur: usage /souffleur ${verb} <skill, note or rule name>.`
+  if (!BLOCK_NAME.test(name) || name === '__proto__') return `Souffleur: ${JSON.stringify(name.slice(0, 80))} is not a valid name.`
+  const path = `${home}/.claude/souffleur.json`
+  const st = await readState($, path, home)
+  if (st.kind === 'error') return `Souffleur: could not read ${shownPath(home, path)} (${st.why}), so nothing was written.`
+  if (st.kind === 'missing') return 'Souffleur: there is no ~/.claude/souffleur.json yet, so there is no standard to block in. Run /souffleur init.'
+  let doc: unknown
+  try {
+    doc = parseJson(st.text)
+  } catch (err) {
+    return `Souffleur: ${shownPath(home, path)} is not valid JSON (${scrub(home, message(err))}), so nothing was written.`
+  }
+  const problem = configProblem(doc)
+  if (problem) return `Souffleur: ${shownPath(home, path)} cannot be edited because ${problem}, so nothing was written.`
+  const root = normRoot(l0.root)
+  if (!/^(\/|[A-Za-z]:[\\/])/.test(root)) return 'Souffleur: the project root is unknown, so nothing was written.'
+  const base = doc as Record<string, unknown>
+  if (base.projects !== undefined && !isRecord(base.projects)) return `Souffleur: "projects" in ${shownPath(home, path)} is not an object, so nothing was written.`
+  const projects: Record<string, unknown> = { ...(base.projects as Record<string, unknown> | undefined) }
+  const key = Object.keys(projects).find((k) => normRoot(k) === root) ?? root
+  if (projects[key] !== undefined && !isRecord(projects[key])) return `Souffleur: the block for ${root} in ${shownPath(home, path)} is not an object, so nothing was written.`
+  const block: Record<string, unknown> = { ...(projects[key] as Record<string, unknown> | undefined) }
+  if (block.block !== undefined && !(Array.isArray(block.block) && block.block.every((n) => typeof n === 'string'))) return `Souffleur: "block" for ${root} is not a list of names, so nothing was written.`
+  const names: string[] = [...((block.block as string[] | undefined) ?? [])]
+  const std = standardNames(parseConfig(st.text, undefined).config)
+  if (!std.has(name) && !names.includes(name)) return `Souffleur: ${name} is not in your standard or this project's block.`
+  if (verb === 'block') {
+    if (names.includes(name)) return `Souffleur: ${name} is already blocked in ${root}.`
+    if (names.length >= 20) return `Souffleur: the block of ${root} already has 20 names, so nothing was written.`
+    if (!(key in projects) && Object.keys(projects).length >= 50) return 'Souffleur: at most 50 project blocks are read, so nothing was written.'
+    names.push(name)
+    block.block = names
+  } else {
+    if (!names.includes(name)) return `Souffleur: ${name} is not blocked in ${root}.`
+    const left = names.filter((n) => n !== name)
+    if (left.length) block.block = left
+    else delete block.block
+  }
+  if (Object.keys(block).length) projects[key] = block
+  else delete projects[key]
+  const next: Record<string, unknown> = { ...base }
+  if (Object.keys(projects).length) next.projects = projects
+  else delete next.projects
+  // Read once more right before the write: another session or the user may have saved the file since.
+  const again = await readState($, path, home)
+  if (again.kind !== 'ok' || again.text !== st.text) return `Souffleur: ${shownPath(home, path)} changed since it was read, so nothing was written.`
+  try {
+    if (!backedUp) {
+      await $.fs.write(`${path}.bak-${Date.now()}`, st.text)
+      backedUp = true
+    }
+    await $.fs.write(path, `${JSON.stringify(next, null, 2)}\n`)
+  } catch (err) {
+    return `Souffleur: could not write ${shownPath(home, path)} (${scrub(home, message(err))}).`
+  }
+  loaded = undefined // the next event reads the new block
+  await apply($, (l) => ({ type: 'config', now: now(), errors: l.errors }))
+  return verb === 'block' ? `Souffleur: ${name} blocked in ${root}; other projects keep it.` : `Souffleur: ${name} unblocked in ${root}; the standard applies here again.`
+}
+
+/** Every skill name, note id and rule id of a config (the standard when it was read without a root). */
+function standardNames(c: Config): Set<string> {
+  return new Set([...Object.keys(c.skills), ...c.notes.map((n) => n.id), ...c.rules.map((r) => r.id)])
+}
+
+/** `/souffleur project`: the effective set here, one line per skill, note and rule id. */
+async function runProject($: Dollar, l: Loaded): Promise<string> {
+  const home: string | undefined = await $.env.get('HOME')
+  const st = home ? await readState($, `${home}/.claude/souffleur.json`, home) : ({ kind: 'missing' } as FileState)
+  const std = parseConfig(st.kind === 'ok' ? stripBom(st.text) : undefined, undefined).config
+  const p = l.config.project
+  const blocked = new Set(p?.blocked ?? [])
+  const own = new Set(p?.own ?? [])
+  const lines = [`Project: ${normRoot(l.root)}${p ? ` (block: ${p.blocked.length} blocked, ${p.own.length} own)` : ' (no block, the standard applies)'}`]
+  const row = (kind: string, id: string) => lines.push(`- ${kind} ${id}: ${blocked.has(id) ? 'blocked here' : 'standard'}`)
+  for (const name of Object.keys(std.skills)) row('skill', name)
+  for (const n of std.notes) row('note', n.id)
+  for (const r of std.rules) {
+    if (blocked.has(r.id)) row('rule', r.id)
+    else if (r.skill !== undefined && blocked.has(r.skill)) lines.push(`- rule ${r.id}: blocked here (its skill ${r.skill} is blocked)`)
+    else row('rule', r.id)
+  }
+  const known = standardNames(std)
+  for (const name of p?.blocked ?? []) if (!known.has(name)) lines.push(`- ${name}: blocked here (not in standard)`)
+  for (const name of own) lines.push(`- ${name}: this project only`)
+  return lines.join('\n')
 }
 
 /**
@@ -1482,6 +1588,17 @@ export const register: Register = (on) => {
           loaded = undefined // read the files again: another session may have changed them
           const { l } = await current($)
           return verb0 === 'init' ? runInit($, l) : runMigrate($, l)
+        })
+        if (text !== undefined) return { text }
+        return next(e)
+      }
+      if (verb0 === 'block' || verb0 === 'unblock' || verb0 === 'project') {
+        if (!isUserOrigin(e)) return { text: `Souffleur: only the user can run /souffleur ${verb0}; a plugin or the model cannot.` }
+        const rest = (e.args ?? '').trim().slice(verb0.length).trim()
+        const text = await safe($, `command.run.${verb0}`, undefined as string | undefined, async () => {
+          loaded = undefined
+          const { l } = await current($)
+          return verb0 === 'project' ? runProject($, l) : runBlock($, l, verb0, rest)
         })
         if (text !== undefined) return { text }
         return next(e)

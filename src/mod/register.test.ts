@@ -2942,3 +2942,108 @@ test('init works on the standard: names in this root block or own are neither as
   expect(written.projects['/work/proj'].skills.o).toEqual({ always: true })
   expect(written.projects['/work/proj'].block).toEqual(['x'])
 })
+
+// --- /souffleur block, unblock, project ---
+
+const BLOCKABLE = JSON.stringify({
+  mode: 'enforce',
+  skills: { 'terse:terse-mode': { always: true, for: 'chat' }, 'writing-guide': { always: true } },
+  rules: [{ id: 'r-wg', before: { tools: ['Write'] }, skill: 'writing-guide', source: 'user' }],
+  notes: [{ id: 'n-one', text: 'Keep it short.' }],
+})
+const userWrites = (w: World) => w.writes.filter((x) => x.path === USER_FILE)
+const sectionText = async ($: any) => {
+  const r = await $.prompt.compose(COMPOSE)
+  return r.sections.find((s: { id: string }) => s.id === 'souffleur')?.text as string
+}
+
+test('block writes the block, backs the file up once and applies at once', async ($, on) => {
+  const w = world(on, { [USER_FILE]: BLOCKABLE })
+  on('prompt.compose', () => ({ sections: [] }))
+  await start($)
+  expect(await sectionText($)).toMatch(/terse:terse-mode/)
+  expect(await run($, 'block terse:terse-mode')).toBe('Souffleur: terse:terse-mode blocked in /work/proj; other projects keep it.')
+  const backups = w.writes.filter((x) => /souffleur\.json\.bak-\d+$/.test(x.path))
+  expect(backups.length).toBe(1)
+  expect(backups[0]!.text).toBe(BLOCKABLE)
+  const written = JSON.parse(userWrites(w).at(-1)!.text)
+  expect(written.projects['/work/proj'].block).toEqual(['terse:terse-mode'])
+  expect(written.skills['terse:terse-mode']).toEqual({ always: true, for: 'chat' })
+  expect(await sectionText($)).not.toMatch(/terse:terse-mode/)
+  expect(await table($)).toMatch(/\| terse:terse-mode \| blocked here \|/)
+  await run($, 'block writing-guide')
+  expect(w.writes.filter((x) => /\.bak-/.test(x.path)).length).toBe(1)
+})
+
+test('unblock restores the standard entry and its always-on line without a restart', async ($, on) => {
+  const w = world(on, { [USER_FILE]: JSON.stringify({ ...JSON.parse(BLOCKABLE), projects: { '/work/proj': { block: ['terse:terse-mode'], skills: { own: { always: true } } } } }) })
+  on('prompt.compose', () => ({ sections: [] }))
+  await start($)
+  expect(await sectionText($)).not.toMatch(/terse:terse-mode/)
+  expect(await run($, 'unblock terse:terse-mode')).toBe('Souffleur: terse:terse-mode unblocked in /work/proj; the standard applies here again.')
+  expect(await sectionText($)).toMatch(/terse:terse-mode/)
+  const written = JSON.parse(userWrites(w).at(-1)!.text)
+  expect(written.projects['/work/proj']).toEqual({ skills: { own: { always: true } } })
+  expect(await table($)).not.toMatch(/blocked here/)
+})
+
+test('unblock of the last name removes the whole empty block', async ($, on) => {
+  const w = world(on, { [USER_FILE]: JSON.stringify({ ...JSON.parse(BLOCKABLE), projects: { '/work/proj': { block: ['writing-guide'] }, '/work/other': { block: ['n-one'] } } }) })
+  await start($)
+  await run($, 'unblock writing-guide')
+  expect(JSON.parse(userWrites(w).at(-1)!.text).projects).toEqual({ '/work/other': { block: ['n-one'] } })
+})
+
+test('block and unblock answer for unknown names, and write nothing', async ($, on) => {
+  const w = world(on, { [USER_FILE]: BLOCKABLE })
+  await start($)
+  expect(await run($, 'unblock nothing-here')).toBe("Souffleur: nothing-here is not in your standard or this project's block.")
+  expect(await run($, 'block nothing-here')).toBe("Souffleur: nothing-here is not in your standard or this project's block.")
+  expect(await run($, 'block bad name!')).toMatch(/not a valid name/)
+  expect(await run($, 'block')).toMatch(/usage/i)
+  expect(w.writes.length).toBe(0)
+})
+
+test('block and unblock only act when the user typed them', async ($, on) => {
+  const w = world(on, { [USER_FILE]: BLOCKABLE })
+  await start($)
+  for (const args of ['block writing-guide', 'unblock writing-guide', 'project']) {
+    const r = await $.command.run({ command: 'souffleur', args, origin: { kind: 'plugin', name: 'other' } } as never)
+    expect(String(r.text)).toMatch(/only the user can run/i)
+  }
+  expect(w.writes.length).toBe(0)
+})
+
+test('block stops when the file cannot be edited', async ($, on) => {
+  const w = world(on, { [USER_FILE]: '{ nope' })
+  await start($)
+  expect(await run($, 'block writing-guide')).toMatch(/nothing was written/)
+  expect(w.writes.length).toBe(0)
+})
+
+test('project lists the effective set, names not in the standard and rules dropped with their skill', async ($, on) => {
+  const user = JSON.stringify({ ...JSON.parse(BLOCKABLE), projects: { '/work/proj': { block: ['writing-guide', 'later-skill'], skills: { own: { always: true } }, notes: [{ id: 'n-own', text: 'Only here.' }] } } })
+  world(on, { [USER_FILE]: user })
+  await start($)
+  const t = await run($, 'project')
+  expect(t).toMatch(/terse:terse-mode: standard/)
+  expect(t).toMatch(/writing-guide: blocked here/)
+  expect(t).toMatch(/later-skill: blocked here \(not in standard\)/)
+  expect(t).toMatch(/own: this project only/)
+  expect(t).toMatch(/n-own: this project only/)
+  expect(t).toMatch(/n-one: standard/)
+  expect(t).toMatch(/r-wg: blocked here \(its skill writing-guide is blocked\)/)
+})
+
+test('init leaves names of this root block out of its not-watched summary and skips raw block keys', async ($, on) => {
+  const user = JSON.stringify({
+    skills: { 'writing-guide': { always: true } },
+    projects: { '/work/proj': { block: ['blocked-one'], skills: { 'bad skill name': { always: true }, 'own-ok': { always: true } } } },
+  })
+  const w = world(on, { [USER_FILE]: user }, { skills: ['writing-guide', 'blocked-one', 'own-ok', 'bad skill name', 'other-skill'], answers: ['From the start'] })
+  await start($)
+  const text = await run($, 'init')
+  expect(w.asked.length).toBe(1)
+  expect(text).toMatch(/other-skill/)
+  expect(text).not.toMatch(/blocked-one|own-ok/)
+})

@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- `/souffleur block <name>`, `unblock <name>` and `project` change and show the per-project block of the open repository.
+
 - The user file can hold per-project blocks (`projects`) that block named skills, notes and rules in one repository and add entries for it only, while everything else stays the shared standard. `/souffleur` names the project, shows blocked skills as `blocked here` and reads `absent` as `not needed yet`.
 
 ## [0.1.9] - 2026-11-26
