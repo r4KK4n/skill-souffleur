@@ -1402,6 +1402,8 @@ export const register: Register = (on) => {
       await safe($, 'turn.reply', undefined, async () => {
         await apply($, (l) => ({ type: 'reply', now: now(), answer: e.answer, fromCommand: lastPromptCommand, aborted: e.isAborted, root: l.root }))
       })
+      // One check per person prompt: a later turn without its own prompt (a background completion) is not the person's.
+      personTurn = false
     }
     if (e.agentId === undefined && e.reason === 'answer' && (!askStopped || askAtTurnEnd || noDialog)) {
       await safe($, 'turn.complete', undefined, async () => {
