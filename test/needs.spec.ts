@@ -85,3 +85,13 @@ test('classifyPromptChecked reports a failed, empty or unfinished call', async (
   const late = await classifyPromptChecked('x', needs, () => new Promise<string>(() => {}), () => Promise.resolve(), 1)
   assert.equal(late.failed, true, 'a call still running at the end of the budget')
 })
+
+test('neededSkills leaves out skills excluded in the root, extras included', () => {
+  const config: Config = {
+    mode: 'observe', needs, trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true,
+    skills: { a: { always: true, from: 'user', notIn: ['/work/p'] }, b: { need: 'ui', from: 'user' }, c: { from: 'user', notIn: ['/work/p'] } },
+  }
+  assert.deepEqual(neededSkills(config, { ui: 1 }, ['c'], '/work/p/'), ['b'])
+  assert.deepEqual(neededSkills(config, { ui: 1 }, ['c'], '/work/q'), ['a', 'b', 'c'])
+  assert.deepEqual(neededSkills(config, { ui: 1 }, ['c']), ['a', 'b', 'c'])
+})

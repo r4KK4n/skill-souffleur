@@ -6,7 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
-- Config: a need can be `{ "for": "chat|readers|users|work", "what": "..." }` and an always-on skill can carry `for`; the old string need still works and counts as `work`. A user-file skill can list `notIn` project roots. The wording that uses them follows in the next change.
+- Config: a need can be `{ "for": "chat|readers|users|work", "what": "..." }` and an always-on skill can carry `for`; the old string need still works and counts as `work`. A user-file skill can list `notIn` project roots. 
+- Souffleur says each skill's audience when it asks for it: the load request has one line per audience (`for texts other people read ...`, `for your replies in this chat.`, `for how you work on this task.`), the system prompt section says each skill applies only to the output named with it and names the `chat` skill, and a skill listed in `notIn` for the project root is not requested, gated, named in the Agent brief check or counted as cut (`/souffleur` shows `excluded in this project`). `/souffleur` also hints at needs that have no audience yet: `<need>: no audience set, run /souffleur init`.
 
 ## [0.1.3] - 2026-11-26
 

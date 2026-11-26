@@ -159,9 +159,9 @@ Souffleur replaces the user's earlier preload and reload hooks. Removing those i
 
 A short, stable section added through `prompt.compose`:
 
-> Souffleur keeps track of skills in this session. If a message from Souffleur asks you to load skills, invoke each one with the Skill tool before you continue. Always-on skills: terse:terse-mode.
+> Souffleur keeps track of skills in this session. If a message from Souffleur asks you to load skills, invoke each one with the Skill tool before you continue. Each skill applies only to the output named with it. Replies in this chat follow terse:terse-mode; a skill for other readers or for product users never changes how you reply here.
 
-It holds the rule and the `always` skills from the config, never the changing ledger, because sections are cached per thread and must not break the prompt cache. It also carries the notes without `need`, and one sentence asking the model to call `souffleur_propose` when a slip happened that a rule would have caught or the user asks it to remember a rule. Notes in the section are capped at 2,000 characters; above that the status line says so and `/souffleur` lists the notes that were left out.
+It holds the rule and the `chat` skill that is always on (if any), never the changing ledger, because sections are cached per thread and must not break the prompt cache. It also carries the notes without `need`, and one sentence asking the model to call `souffleur_propose` when a slip happened that a rule would have caught or the user asks it to remember a rule. Notes in the section are capped at 2,000 characters; above that the status line says so and `/souffleur` lists the notes that were left out.
 
 ### Gates and duties
 

@@ -71,7 +71,7 @@ test('prompt not from user gives no actions', () => {
 
 test('matched need adds its skills to the request', () => {
   const { s, out } = run(withAlways, [prompt('write the docs and a guide for people who read them later', ['prose'])])
-  assert.match(ctx(out[0]!), /terse:terse-mode, writing-guide, writing-check\./)
+  assert.match(ctx(out[0]!), /- writing-guide, writing-check: for texts other people read.*\n- terse:terse-mode: for how you work on this task\./)
   assert.equal(s.needs.prose!.reason, 'need:prose from "write the docs and a guide for people wh"')
 })
 
@@ -123,7 +123,7 @@ test('compaction mid-turn: next tool call gets toolContext once', () => {
   const r1 = run(withAlways, [compact(), tool('Read', { path: 'a.ts' }), tool('Read', { path: 'b.ts' })], s)
   assert.equal(r1.out[0]!.length, 0)
   assert.equal(r1.out[1]![0]!.kind, 'toolContext')
-  assert.match((r1.out[1]![0] as { text: string }).text, /terse:terse-mode, writing-guide, writing-check/)
+  assert.match((r1.out[1]![0] as { text: string }).text, /- writing-guide, writing-check: for texts other people read.*\n- terse:terse-mode: for how you work on this task\./)
   assert.deepEqual(r1.out[2], [])
 })
 
@@ -276,7 +276,7 @@ test('replay resume-then-compact ends with bigtest requested on the next prompt'
   const cut = events.findIndex((e) => e.type === 'typed' && e.name === 'clear')
   const r = run(config, events.slice(0, cut))
   assert.equal(r.s.ledger.bigtest!.state, 'restoring')
-  assert.match(ctx(r.out.at(-1)!), /invoke these skills .*: bigtest\./)
+  assert.match(ctx(r.out.at(-1)!), /invoke these skills.*\n- bigtest: for how you work on this task\./)
   const afterLoad = r.out.findIndex((_, i) => events[i]!.type === 'skill')
   assert.ok(afterLoad > 0)
 })
@@ -398,7 +398,7 @@ test('session survives JSON round trip', () => {
 test('a restore after compaction says the engine note about earlier skills does not apply', () => {
   const config = cfg({ skills: { bigtest: { always: true, from: 'user' } } })
   const r = run(config, [loadSkill('bigtest'), compact(), prompt('next')])
-  assert.match(ctx(r.out.at(-1)!), /invoke these skills .*: bigtest\. .*must not be run again does not apply/)
+  assert.match(ctx(r.out.at(-1)!), /- bigtest: for how you work on this task\.\n.*must not be run again does not apply/)
   const first = run(config, [prompt('first')])
   assert.doesNotMatch(ctx(first.out.at(-1)!), /does not apply/)
 })
@@ -683,4 +683,92 @@ test('an ended need frees skills that were only restoring for it', () => {
   assert.equal(s.ledger['ui-checklist']!.requests, 0)
   assert.equal(s.ledger['shared']!.state, 'absent')
   assert.equal(s.ledger['other']!.state, 'restoring', 'still needed by prose')
+})
+
+// Audiences: the restore request says what each skill is for.
+const audienceConfig = (): Config => cfg({
+  needs: {
+    prose: { for: 'readers', what: 'Writing text people read.' },
+    ui: { for: 'users', what: 'Building a screen.' },
+    old: { for: 'work', what: 'Old need.', noAudience: true },
+  },
+  skills: {
+    'terse:terse-mode': { always: true, for: 'chat', from: 'user' },
+    'writing-guide': { need: 'prose', from: 'user' },
+    'writing-check': { need: 'prose', from: 'user' },
+    'ui-design': { need: 'ui', from: 'user' },
+    plain: { always: true, from: 'user' },
+  },
+})
+const needsOn = (...names: string[]): Session => ({ ...initSession(audienceConfig(), 's', 0, 'clear'), needs: Object.fromEntries(names.map((n) => [n, { since: 0, reason: 'test' }])) })
+
+test('restore request: one line per audience, fixed sentences, chat trailer', () => {
+  const c = audienceConfig()
+  const text = ctx(decide(c, needsOn('prose', 'ui'), prompt('go on please now')).actions)
+  assert.equal(text, [
+    'Souffleur: before anything else, invoke these skills with the Skill tool, one after another:',
+    '- terse:terse-mode: for your replies in this chat.',
+    '- writing-guide, writing-check: for texts other people read (docs, issues, PRs, app copy). Not for your replies in this chat.',
+    '- ui-design: for what users of the product see (screens, pages, components). Not for your replies in this chat.',
+    '- plain: for how you work on this task.',
+    'Your replies in this chat follow terse:terse-mode.',
+  ].join('\n'))
+})
+
+test('restore request: no trailer without a readers or users group, no group line for nothing', () => {
+  const c = audienceConfig()
+  const text = ctx(decide(c, needsOn(), prompt('go on please now')).actions)
+  assert.equal(text, [
+    'Souffleur: before anything else, invoke these skills with the Skill tool, one after another:',
+    '- terse:terse-mode: for your replies in this chat.',
+    '- plain: for how you work on this task.',
+  ].join('\n'))
+})
+
+test('restore after compaction keeps the compaction sentence after the groups', () => {
+  const c = audienceConfig()
+  const r = run(c, [loadSkill('plain'), compact(), prompt('next one please now')])
+  assert.match(ctx(r.out.at(-1)!), /\n- plain: for how you work on this task\.\n.*must not be run again does not apply/)
+})
+
+test('restore request stays under RESTORE_LIMIT with groups and never splits a name', () => {
+  const names = Array.from({ length: 400 }, (_, i) => `a-long-skill-name-number-${i}`)
+  const skills = Object.fromEntries(names.map((n, i) => [n, { need: i % 2 ? 'prose' : 'ui', from: 'user' as const }]))
+  const c = cfg({ needs: audienceConfig().needs, skills })
+  const s = { ...initSession(c, 's', 0, 'clear'), needs: { prose: { since: 0, reason: 't' }, ui: { since: 0, reason: 't' } } }
+  const r = decide(c, s, prompt('go on please now'))
+  const text = ctx(r.actions)
+  assert.ok(text.length <= 5000, `length ${text.length}`)
+  const asked = text.match(/a-long-skill-name-number-\d+/g)!
+  assert.ok(asked.length > 10 && asked.length < 400)
+  for (const n of asked) assert.ok(names.includes(n), n)
+  const left = Object.entries(r.session.ledger).filter(([, row]) => row.state === 'absent').length
+  assert.equal(left, 400 - asked.length)
+})
+
+test('notIn: a skill excluded in this root is not requested, gated, or listed in the brief check', () => {
+  const c = cfg({
+    needs: { ui: { for: 'users', what: 'Building a screen.' } },
+    skills: {
+      'ui-design': { need: 'ui', from: 'user', notIn: ['/work/p'], gate: { tools: ['Write'], paths: ['**/*.html'] }, duty: { after: { tools: ['Write'], paths: ['**/*.html'] }, evidence: { tool: 'Bash' } } },
+      other: { need: 'ui', from: 'user' },
+      mine: { always: true, from: 'user', notIn: ['/work/p'] },
+    },
+  })
+  const s0 = { ...initSession(c, 's', 0, 'clear'), needs: { ui: { since: 0, reason: 't' } } }
+  const p = decide(c, s0, { ...prompt('go on please now'), root: '/work/p/' } as CoreEvent)
+  const text = ctx(p.actions)
+  assert.match(text, /other/)
+  assert.doesNotMatch(text, /ui-design|mine/)
+  assert.equal(p.session.ledger['ui-design']!.state, 'absent')
+  assert.equal(p.session.ledger['ui-design']!.requests, 0)
+  const w = decide(c, p.session, { ...tool('Write', { path: 'x.html' }), root: '/work/p' } as CoreEvent)
+  assert.deepEqual(w.actions.filter((a) => a.kind === 'deny'), [])
+  assert.deepEqual(w.session.duties, [])
+  const a = decide(c, w.session, { ...tool('Agent', { brief: 'do it' }), root: '/work/p' } as CoreEvent)
+  const reason = (a.actions.find((x) => x.kind === 'deny') as { reason: string }).reason
+  assert.match(reason, /Configured skills: other\./)
+  // Elsewhere the skill counts as before.
+  const e = decide(c, s0, { ...prompt('go on please now'), root: '/work/q' } as CoreEvent)
+  assert.match(ctx(e.actions), /ui-design/)
 })

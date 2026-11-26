@@ -57,6 +57,10 @@ const MAX_GLOB = 200
 export const MAX_PROJECT_SKILLS = 20
 export const MAX_PROJECT_NEEDS = 10
 
+/** True when the skill is switched off in this main repository root (`notIn`, compared without trailing slashes like `where`). */
+export const excludedIn = (rule: Pick<SkillRule, 'notIn'>, root: string | undefined): boolean =>
+  root !== undefined && (rule.notIn ?? []).some((p) => normRoot(p) === normRoot(root))
+
 /** True when `root` is one of the trusted project roots, compared without trailing slashes like `where`. */
 export const isTrustedRoot = (config: Pick<Config, 'trustProjects'>, root: string | undefined): boolean =>
   root !== undefined && config.trustProjects.some((p) => normRoot(p) === normRoot(root))

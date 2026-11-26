@@ -186,3 +186,10 @@ test('degraded line uses the first line, ASCII only, at most 120 characters', ()
   assert.match(line, /^Souffleur: degraded: read failed: caf\? x+\.\.\. Details: \/souffleur\.$/)
   assert.ok(line.length <= 'Souffleur: degraded: '.length + 120 + ' Details: /souffleur.'.length)
 })
+
+test('a skill excluded in this root is not counted as cut', () => {
+  const c: Config = { ...config, skills: { ...config.skills, 'writing-guide': { need: 'prose', from: 'user', notIn: ['/work/p'] } } }
+  const s = { ...initSession(c, 's1', T, 'clear'), needs: { prose: { since: T, reason: 'test' } } }
+  const before = withLedger(s, skillLoaded(skillLoaded(s.ledger, 'writing-guide', T, 'x'), 'writing-check', T, 'x'))
+  assert.deepEqual(notices(c, before, cutOf(before), '/work/p').lines, ['Souffleur: cut by compaction: writing-check; will ask the model to reload them.'])
+})

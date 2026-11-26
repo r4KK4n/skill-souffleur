@@ -1,4 +1,5 @@
-import type { Config, Need, NeedName, SkillName } from './types.ts'
+import { excludedIn } from './config.ts'
+import type { Audience, Config, Need, NeedName, SkillName } from './types.ts'
 
 export type Classify = (text: string, labels: readonly string[]) => Promise<string>
 
@@ -37,11 +38,19 @@ export async function classifyPrompt(prompt: string, needs: Record<NeedName, Nee
 }
 
 /** Skills with `always`, plus skills whose `need` is active, in config order, then `extra` (skills a rule fired or saw loaded). */
-export function neededSkills(config: Config, active: Record<NeedName, unknown>, extra: readonly SkillName[] = []): SkillName[] {
+export function neededSkills(config: Config, active: Record<NeedName, unknown>, extra: readonly SkillName[] = [], root?: string): SkillName[] {
+  const here = (name: string) => config.skills[name] === undefined || !excludedIn(config.skills[name]!, root)
   const named = Object.entries(config.skills)
     .filter(([, rule]) => rule.always === true || (rule.need !== undefined && rule.need in active))
     .map(([name]) => name)
-  return [...named, ...extra.filter((name) => !named.includes(name))]
+    .filter(here)
+  return [...named, ...extra.filter((name) => !named.includes(name) && here(name))]
+}
+
+/** Who a skill's output is for: the audience of its need, or its own `for` when always-on; otherwise `work`. */
+export const audienceOf = (config: Config, name: SkillName): Audience => {
+  const rule = config.skills[name]
+  return rule?.for ?? (rule?.need === undefined ? undefined : config.needs[rule.need]?.for) ?? 'work'
 }
 
 /** The classifier text of each need, for code that still works with plain strings. */

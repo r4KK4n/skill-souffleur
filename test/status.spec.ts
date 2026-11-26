@@ -226,3 +226,18 @@ test('a multi-violation reason stays apart from a single one and prints all its 
   assert.match(out, /^- 2× Souffleur: load ui-checklist with the Skill tool first, then retry; Souffleur: open duty for ui-checklist \(Write x\.html\) \(09:51–09:52\)$/m)
   assert.ok(out.includes(`\n  ${a}\n  Souffleur: open duty`))
 })
+
+test('table: excluded skill shows its state text, needs without an audience get the init hint', () => {
+  const c: Config = {
+    mode: 'enforce', trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true,
+    needs: { prose: { for: 'work', what: 'Text.', noAudience: true }, ui: { for: 'users', what: 'Screens.' } },
+    skills: { 'ui-design': { need: 'ui', from: 'user', notIn: ['/work/p'] }, 'writing-guide': { need: 'prose', from: 'user' } },
+  }
+  const s = initSession(c, 's', T0, 'clear')
+  const here = renderTable(c, s, T0, '/work/p/')
+  assert.match(here, /\| ui-design \| excluded in this project \|/)
+  assert.match(here, /\| writing-guide \| absent \|/)
+  assert.match(here, /^prose: no audience set, run \/souffleur init$/m)
+  assert.doesNotMatch(here, /^ui: no audience/m)
+  assert.match(renderTable(c, s, T0, '/work/q'), /\| ui-design \| absent \|/)
+})

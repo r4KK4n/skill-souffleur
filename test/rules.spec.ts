@@ -53,7 +53,7 @@ test('skill rule denies until loaded, then skill is needed after compaction', ()
   assert.match(denial(out[0]!), /dev-workflow/)
   assert.equal(denial(out[2]!), '')
   assert.equal(s.ledger['dev-workflow']?.state, 'restoring')
-  assert.match(ctx(out[4]!), /invoke these skills[^\n]*dev-workflow/)
+  assert.match(ctx(out[4]!), /invoke these skills[\s\S]*dev-workflow/)
 })
 
 test('a rule that fired makes its skill needed even without a load', () => {

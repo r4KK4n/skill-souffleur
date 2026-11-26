@@ -470,7 +470,19 @@ test('the system prompt section names the always-on skills and depends on config
   const section = r.sections.find((s: { id: string }) => s.id === 'souffleur')
   expect(section?.scope).toBe('session')
   expect(section?.text).toMatch(/invoke each one with the Skill tool/)
-  expect(section?.text).toMatch(/Always-on skills: writing-guide\./)
+  expect(section?.text).toMatch(/Each skill applies only to the output named with it\./)
+  expect(section?.text).not.toMatch(/Always-on skills/)
+  expect(section?.text).not.toMatch(/Replies in this chat/)
+})
+
+test('the system section names the chat skill, and leaves out one excluded in this project', async ($, on) => {
+  const chat = JSON.stringify({ mode: 'enforce', skills: { 'terse:terse-mode': { always: true, for: 'chat' }, 'ui-design': { always: true, for: 'users', notIn: ['/work/proj'] } } })
+  world(on, { [USER_FILE]: chat })
+  on('prompt.compose', () => ({ sections: [] }))
+  await start($)
+  const r = await $.prompt.compose(COMPOSE)
+  const text = r.sections.find((s: { id: string }) => s.id === 'souffleur')?.text as string
+  expect(text).toContain('Each skill applies only to the output named with it. Replies in this chat follow terse:terse-mode; a skill for other readers or for product users never changes how you reply here.')
 })
 
 
@@ -1734,12 +1746,12 @@ test('untrusted project file: no restore text and no system prompt mention for i
 })
 
 test('trusted project file (with a trailing slash in trustProjects): restore text and system prompt name its skills', async ($, on) => {
-  world(on, { [USER_FILE]: JSON.stringify({ mode: 'enforce', trustProjects: ['/work/proj/'] }), [PROJECT_FILE]: PROJECT_ALWAYS }, { repoRoot: '/work/proj' })
+  world(on, { [USER_FILE]: JSON.stringify({ mode: 'enforce', trustProjects: ['/work/proj/'] }), [PROJECT_FILE]: JSON.stringify({ skills: { 'proj-skill': { always: true, for: 'chat' } } }) }, { repoRoot: '/work/proj' })
   on('prompt.compose', () => ({ sections: [] }))
   await start($)
   const r = await $.prompt.submit({ text: 'hello' })
   expect(r.context?.join('\n')).toMatch(/proj-skill/)
-  expect(await systemSection($)).toMatch(/proj-skill/)
+  expect(await systemSection($)).toMatch(/follow proj-skill;/)
 })
 
 test('untrusted project file: a project need is not classified and its brief check does not deny', async ($, on) => {
@@ -2482,4 +2494,13 @@ test('while a reply offer is armed no new dialog and no new notice open', async 
   expect(w.logs.filter((l) => l.includes('Second note here')).length).toBe(0)
   await reply($, 'accept', COMPOSER)
   expect(userFile(w).notes.map((n: { text: string }) => n.text)).toEqual(['First note here.'])
+})
+
+test('the Agent brief check leaves out a skill excluded in this project', async ($, on) => {
+  const cfg = JSON.stringify({ mode: 'enforce', skills: { 'ui-design': { need: 'ui', notIn: ['/work/proj'] }, 'writing-guide': { need: 'ui' } }, needs: { ui: 'Designing something a user sees.' } })
+  world(on, { [USER_FILE]: cfg })
+  await start($)
+  await $.command.run({ command: 'souffleur', args: 'need ui' })
+  const r = await $.tool.call({ tool: 'Agent', prompt: 'do it', description: 'd', subagent_type: 'general-purpose' } as never)
+  expect(JSON.stringify(r)).toMatch(/Configured skills: writing-guide\./)
 })
