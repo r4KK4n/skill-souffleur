@@ -1815,7 +1815,7 @@ test('a subagent compaction writes no line', async ($, on) => {
   expect(w.logs).toEqual([])
 })
 
-test('after /clear the new session logs its start line and no diff against the old one', async ($, on) => {
+test('a new session id logs its start line and no diff against the old session', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS })
   await start($)
   await skillLoaded($, 'writing-guide')
@@ -1893,7 +1893,7 @@ test('resume after a cut repeats no cut line', async ($, on) => {
   expect(w.logs.filter((l) => /cut by compaction/.test(l))).toHaveLength(1)
 })
 
-test('a skill that stays unavailable writes a problem line, and loading it later writes reloaded', async ($, on) => {
+test('loading a cut skill again writes the reloaded line', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS })
   await start($)
   await skillLoaded($, 'writing-guide')

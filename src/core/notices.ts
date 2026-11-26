@@ -1,5 +1,6 @@
 import { isTrustedRoot } from './config.ts'
 import type { Session } from './decide.ts'
+import { neededSkills } from './needs.ts'
 import type { Config, SkillName } from './types.ts'
 import { versionNotice } from './version.ts'
 
@@ -15,6 +16,12 @@ export function startNotice(config: Config, s: Session, setUp: boolean, pluginVe
   return `${PREFIX}${pluginVersion} · ${config.mode} · ${always} always-on, ${onDemand} on demand${p ? ` · ${p} proposal(s) waiting` : ''}.`
 }
 
+/** First line of an error, ASCII only, at most 120 characters. */
+function plainError(text: string): string {
+  const line = (text.split(/\r?\n/)[0] ?? '').replace(/[^\x20-\x7e]/g, '?').trim()
+  return line.length > 120 ? `${line.slice(0, 117)}...` : line
+}
+
 /** The problems that hold now, key to line text. A key stays the same while the problem lasts. */
 export function problemKeys(config: Config, s: Session, root?: string): Map<string, string> {
   const out = new Map<string, string>()
@@ -22,7 +29,7 @@ export function problemKeys(config: Config, s: Session, root?: string): Map<stri
   for (const [name, e] of Object.entries(s.ledger)) {
     if (e.state === 'unavailable') out.set(`missing:${name}`, `${PREFIX}${name} did not load after two requests.`)
   }
-  if (s.errors.length > 0) out.set('degraded', `${PREFIX}degraded: ${s.errors.at(-1)!.replace(/\.$/, '')}. Details: /souffleur.`)
+  if (s.errors.length > 0) out.set('degraded', `${PREFIX}degraded: ${plainError(s.errors.at(-1)!).replace(/\.$/, '')}. Details: /souffleur.`)
   const version = versionNotice(s.version)
   if (version) out.set('version', `${PREFIX}${version}`)
   if (!isTrustedRoot(config, root) && Object.values(config.skills).some((r) => r.from === 'project')) {
@@ -40,18 +47,21 @@ export function notices(config: Config, before: Session, after: Session, root?: 
   const was = before.noticed ?? { cut: [], problems: [] }
   const state = (s: Session, name: SkillName) => s.ledger[name]?.state
 
-  // Names still cut stay; one that became unavailable, left the config or is not installed here cannot come back.
-  const cut: SkillName[] = was.cut.filter((name) => ['stale', 'restoring', 'loaded'].includes(state(after, name) ?? ''))
+  // Only names the restore step will ask for count as cut: needed, trusted, session not paused. Others would never come back.
+  const trusted = isTrustedRoot(config, root)
+  const asked = new Set(after.paused ? [] : neededSkills(config, after.needs, after.ruleSkills).filter((name) => trusted || config.skills[name]?.from !== 'project'))
+  // Names still cut stay; one that became unavailable, left the config, is not installed here or is no longer asked for cannot come back.
+  const cut: SkillName[] = was.cut.filter((name) => asked.has(name) && ['stale', 'restoring', 'loaded'].includes(state(after, name) ?? ''))
   let newlyCut = false
   for (const name of Object.keys(before.ledger)) {
-    if (state(before, name) === 'loaded' && state(after, name) === 'stale') {
+    if (asked.has(name) && state(before, name) === 'loaded' && state(after, name) === 'stale') {
       newlyCut = true
       if (!cut.includes(name)) cut.push(name)
     }
   }
   let nextCut = cut
   if (newlyCut) {
-    lines.push(`${PREFIX}cut by compaction: ${cut.join(', ')}; asked the model to reload them.`)
+    lines.push(`${PREFIX}cut by compaction: ${cut.join(', ')}; will ask the model to reload them.`)
   } else if (cut.length > 0 && cut.every((name) => state(after, name) === 'loaded')) {
     lines.push(`${PREFIX}reloaded: ${cut.join(', ')}.`)
     nextCut = []

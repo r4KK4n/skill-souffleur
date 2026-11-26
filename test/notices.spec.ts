@@ -17,7 +17,7 @@ const config: Config = {
     'writing-check': { need: 'prose', from: 'user' },
   },
 }
-const fresh = (c: Config = config): Session => initSession(c, 's1', T, 'clear')
+const fresh = (c: Config = config): Session => ({ ...initSession(c, 's1', T, 'clear'), needs: { prose: { since: T, reason: 'test' } } })
 const withLedger = (s: Session, ledger: Session['ledger']): Session => ({ ...s, ledger })
 const loadedBoth = (): Session => {
   const s = fresh()
@@ -38,7 +38,7 @@ test('start line not set up', () => {
 test('cut after compaction', () => {
   const before = loadedBoth()
   const r = notices(config, before, cutOf(before))
-  assert.deepEqual(r.lines, ['Souffleur: cut by compaction: writing-guide, writing-check; asked the model to reload them.'])
+  assert.deepEqual(r.lines, ['Souffleur: cut by compaction: writing-guide, writing-check; will ask the model to reload them.'])
   assert.deepEqual(r.session.noticed?.cut, ['writing-guide', 'writing-check'])
 })
 
@@ -53,7 +53,7 @@ test('second compaction unions', () => {
   const r1 = notices(config, first, cutOf(first))
   const reloaded = withLedger(r1.session, skillLoaded(r1.session.ledger, 'writing-check', T + 2, 'x'))
   const r2 = notices(config, reloaded, cutOf(reloaded))
-  assert.deepEqual(r2.lines, ['Souffleur: cut by compaction: writing-guide, writing-check; asked the model to reload them.'])
+  assert.deepEqual(r2.lines, ['Souffleur: cut by compaction: writing-guide, writing-check; will ask the model to reload them.'])
   const both = withLedger(r2.session, skillLoaded(skillLoaded(r2.session.ledger, 'writing-guide', T + 3, 'x'), 'writing-check', T + 3, 'x'))
   const r3 = notices(config, r2.session, both)
   assert.deepEqual(r3.lines, ['Souffleur: reloaded: writing-guide, writing-check.'])
@@ -87,7 +87,7 @@ test('a cut again while another is pending names the whole union once', () => {
   const r2 = notices(config, r1.session, aBack)
   assert.deepEqual(r2.lines, [])
   const r3 = notices(config, r2.session, cutOf(r2.session))
-  assert.deepEqual(r3.lines, ['Souffleur: cut by compaction: writing-guide, writing-check; asked the model to reload them.'])
+  assert.deepEqual(r3.lines, ['Souffleur: cut by compaction: writing-guide, writing-check; will ask the model to reload them.'])
 })
 
 test('degraded line drops one trailing period of the error', () => {
@@ -144,4 +144,45 @@ test('notices false gives no lines', () => {
   const r = notices(off, before, { ...cutOf(before), errors: ['boom'] })
   assert.deepEqual(r.lines, [])
   assert.deepEqual(r.session.noticed, { cut: ['writing-guide', 'writing-check'], problems: ['degraded'] })
+})
+
+test('a loaded skill that is not needed is not named in the cut line and does not stick', () => {
+  const s = { ...fresh(), needs: {} }
+  const before = withLedger(s, skillLoaded(skillLoaded(s.ledger, 'terse:terse-mode', T, 'x'), 'writing-guide', T, 'x'))
+  const r1 = notices(config, before, cutOf(before))
+  assert.deepEqual(r1.lines, ['Souffleur: cut by compaction: terse:terse-mode; will ask the model to reload them.'])
+  assert.deepEqual(r1.session.noticed?.cut, ['terse:terse-mode'])
+  const back = withLedger(r1.session, skillLoaded(r1.session.ledger, 'terse:terse-mode', T + 2, 'x'))
+  assert.deepEqual(notices(config, r1.session, back).lines, ['Souffleur: reloaded: terse:terse-mode.'])
+})
+
+test('a name whose need ended leaves the stored cut', () => {
+  const before = loadedBoth()
+  const r1 = notices(config, before, cutOf(before))
+  const gone = { ...r1.session, needs: {} }
+  const loadedAlways = withLedger(gone, skillLoaded(gone.ledger, 'terse:terse-mode', T + 2, 'x'))
+  const r2 = notices(config, r1.session, loadedAlways)
+  assert.deepEqual(r2.session.noticed?.cut, [])
+})
+
+test('a paused session has no cut line', () => {
+  const before = { ...loadedBoth(), paused: true }
+  const r = notices(config, before, cutOf(before))
+  assert.deepEqual(r.lines, [])
+  assert.deepEqual(r.session.noticed?.cut, [])
+})
+
+test('an untrusted project skill is not named in the cut line', () => {
+  const c: Config = { ...config, skills: { ...config.skills, 'writing-guide': { need: 'prose', from: 'project' } } }
+  const before = loadedBoth()
+  assert.equal(notices(c, before, cutOf(before), '/not/trusted').lines[0], 'Souffleur: cut by compaction: writing-check; will ask the model to reload them.')
+})
+
+test('degraded line uses the first line, ASCII only, at most 120 characters', () => {
+  const err = `read failed: caf\u00e9 ${'x'.repeat(200)}\nsecond line /home/bob/secret`
+  const line = problemKeys(config, { ...fresh(), errors: [err] }).get('degraded')!
+  assert.ok(!line.includes('second line'))
+  assert.match(line, /^[\x20-\x7e]+$/)
+  assert.match(line, /^Souffleur: degraded: read failed: caf\? x+\.\.\. Details: \/souffleur\.$/)
+  assert.ok(line.length <= 'Souffleur: degraded: '.length + 120 + ' Details: /souffleur.'.length)
 })
