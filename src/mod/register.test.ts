@@ -3294,7 +3294,7 @@ test('init saves one backup per session like the other writers', async ($, on) =
 })
 
 test('block works on a user file that starts with a byte order mark', async ($, on) => {
-  const w = world(on, { [USER_FILE]: `﻿${BLOCKABLE}` })
+  const w = world(on, { [USER_FILE]: `\ufeff${BLOCKABLE}` })
   await start($)
   expect(await run($, 'block writing-guide')).toMatch(/blocked in/)
   expect(JSON.parse(userWrites(w).at(-1)!.text).projects['/work/proj'].block).toEqual(['writing-guide'])

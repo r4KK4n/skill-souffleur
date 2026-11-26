@@ -620,7 +620,7 @@ async function runInit($: Dollar, l0: Loaded, only?: string[]): Promise<string> 
       await $.fs.write(configPath, `${JSON.stringify(r.config, null, 2)}\n`)
       wrote = true
       const need2 = choice === 'need' ? `for ${need?.text ?? 'its description'}` : choice === 'start' ? 'from the start' : choice === 'injected' ? 'as its plugin injects it' : ''
-      setUp.push(choice === 'none' ? `${p.skill}: ${scope === 'project' ? 'ignored here' : 'not watched'}` : `${p.skill}: watched ${need2} ${scope === 'project' ? 'in this project' : 'everywhere'}`)
+      setUp.push(choice === 'none' ? `${p.skill}: ${scope === 'project' ? 'ignored here' : 'not watched'}` : `${p.skill}: watched ${need2.replace(/\.$/, '')} ${scope === 'project' ? 'in this project' : 'everywhere'}`)
       loaded = undefined // the session reads the new file on its next event
       done.push(`${p.skill}: ${label}.`)
       if (choice === 'injected') {
