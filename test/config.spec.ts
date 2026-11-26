@@ -52,7 +52,7 @@ test('unknown need on a skill is an error and drops the skill', () => {
 test('missing files give an empty config without errors', () => {
   const { config, errors } = parseConfig(undefined, undefined)
   assert.deepEqual(errors, [])
-  assert.deepEqual(config, { mode: 'observe', skills: {}, needs: {}, trustProjects: [], rules: [], notes: [], learn: { skills: true } })
+  assert.deepEqual(config, { mode: 'observe', skills: {}, needs: {}, trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true })
 })
 
 test('mode defaults to observe', () => {
@@ -378,4 +378,22 @@ test('trustProjects compares with the same root normalisation as where', async (
 test('project needs are named in the config', () => {
   const { config } = parseConfig(json({ needs: { a: 'A.' } }), json({ needs: { b: 'B.' } }))
   assert.deepEqual(config.projectNeeds, ['b'])
+})
+
+test('notices false read from user file', () => {
+  const r = parseConfig(JSON.stringify({ notices: false }), undefined)
+  assert.deepEqual(r.errors, [])
+  assert.equal(r.config.notices, false)
+})
+
+test('notices in project file → error text above', () => {
+  const r = parseConfig(undefined, JSON.stringify({ notices: false }))
+  assert.equal(r.config.notices, true)
+  assert.equal(r.errors.filter((e) => /notices is only allowed in the user config; ignored/.test(e)).length, 1)
+})
+
+test('notices "no" → error text above', () => {
+  const r = parseConfig(JSON.stringify({ notices: 'no' }), undefined)
+  assert.equal(r.config.notices, true)
+  assert.equal(r.errors.filter((e) => /notices: must be true or false; ignored/.test(e)).length, 1)
 })

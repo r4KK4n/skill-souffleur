@@ -4,7 +4,7 @@ Keeps Claude Code skills loaded and in use for the whole session, including afte
 
 In a theatre, the souffleur sits out of sight at the edge of the stage and gives an actor the line they forgot, at the moment they need it. Souffleur does the same for skills: when compaction drops a skill the current task needs, it brings the skill back.
 
-> **Status:** version 0.1.0 is ready and installable from this repository (see [Install](#install)). The release tag is pending. See the [roadmap](#roadmap).
+> **Status:** version 0.1.1 is ready and installable from this repository (see [Install](#install)). The release tag is pending. See the [roadmap](#roadmap).
 >
 > **Early access.** Souffleur is a Claude Code mod: TypeScript that runs inside Claude Code through its mod API, shipped and installed as a plugin. Anthropic still changes that API between releases, so an update of Claude Code can break Souffleur until it is adapted. It is provided as is, with no guarantee of fixes or dates. [docs/compatibility.md](docs/compatibility.md) lists the versions each behaviour was checked on.
 
@@ -116,6 +116,10 @@ If you edit a config file by hand, new entries apply after `/souffleur` (it read
 
 `enforce` lets gates and duties deny a tool call until the skill it names is loaded. Only your user file `~/.claude/souffleur.json` can set it, with `"mode": "enforce"`. A project file that sets a mode gets an error and is ignored, so a cloned repository can neither switch gates on nor off.
 
+## Notices
+
+Souffleur writes short lines that start with `Souffleur:` into the transcript, so you see what it did in the desktop and mobile apps too: a summary at session start, what a compaction cut and when the skills are back, and a problem once until it clears. The model does not see them. `"notices": false` in your user file turns them off; a project file cannot change it.
+
 ## Rules and notes
 
 Some instructions have a trace Souffleur can see, and others are standing wishes. Souffleur keeps both in the user file, next to the skills, and asks you before it keeps anything.
@@ -224,7 +228,8 @@ Costs:
 - [x] Learn rules from the text of the user's skills
 - [x] `/souffleur init` per skill and `/souffleur migrate` for old hooks
 - [x] Install guide
-- [ ] Release tag `v0.1.0` (the code is ready and installable from the repository; the maintainer tags it)
+- [x] Short notices in the transcript for start, compaction and problems
+- [ ] Release tag `v0.1.1` (version 0.1.1 is ready and installable from the repository; no tag exists yet, the maintainer tags it)
 
 ## Contributing
 

@@ -13,6 +13,8 @@ import { NO, YES_EVERYWHERE, YES_PROJECT, addEntry, answer, describeProposal, en
 import { ruleSkillNames, sectionNotes } from '../core/rules.ts'
 import { statusLine } from '../core/status.ts'
 import type { Config, Note, Rule } from '../core/types.ts'
+import { notices, startNotice } from '../core/notices.ts'
+import { PLUGIN_VERSION } from './version.ts'
 import { isFromUser, isUserOrigin, toolFields } from './map.ts'
 
 // The hooks' `$` is the engine interface; the adapter calls only documented members.
@@ -122,9 +124,27 @@ function heal(l: Loaded, held: Session): Session {
   return decide(l.config, s, { type: 'config', now: now(), errors: l.errors }).session
 }
 
-async function persist($: Dollar, l: Loaded, s0: Session): Promise<void> {
-  const s: Session = { ...s0, rev: (s0.rev ?? 0) + 1, touched: now() }
+/** One line in the transcript, unless the user switched notices off. A surface without a transcript must not break the hook. */
+function say($: Dollar, l: Loaded, line: string): void {
+  if (l.config.notices === false) return
+  try {
+    $.ui.log(line)
+  } catch {
+    // The line is a courtesy; the work goes on.
+  }
+}
+
+/**
+ * Stores `s0` and writes the notices for what changed since the copy this process stored last. `quiet` skips the
+ * comparison (a subagent's change, a session start): another session id has no relation to the last copy either.
+ */
+async function persist($: Dollar, l: Loaded, s0: Session, quiet = false): Promise<void> {
+  let next = s0
+  let lines: string[] = []
+  if (!quiet && latest && latest.id === s0.id) ({ lines, session: next } = notices(l.config, latest, s0, l.root))
+  const s: Session = { ...next, rev: (next.rev ?? 0) + 1, touched: now() }
   latest = s
+  for (const line of lines) say($, l, line)
   // A broken file shows as degraded; only a clean start without a user file says "not set up".
   $.ui.status(!l.setUp && !s.errors.length ? NOT_SET_UP : statusLine(s, l.config.mode, sectionNotes(l.config, l.root).leftOut.length))
   await $.state.set(REF, s)
@@ -167,8 +187,10 @@ function serial<T>(work: () => Promise<T>): Promise<T> {
 function apply($: Dollar, make: (l: Loaded) => CoreEvent): Promise<{ actions: Action[]; l: Loaded }> {
   return serial(async () => {
     const { l, session } = await current($)
-    const r = decide(l.config, session, make(l))
-    await persist($, l, r.session)
+    const event = make(l)
+    const r = decide(l.config, session, event)
+    // What a subagent does is not the main session's news.
+    await persist($, l, r.session, 'agentId' in event && event.agentId !== undefined)
     return { actions: r.actions, l }
   })
 }
@@ -1060,6 +1082,41 @@ async function queuePassages($: Dollar, passages: Passage[], projectFiles: Set<s
   return { queued, skipped }
 }
 
+/** The own tool showed in `$.tool.list()` at least once in this process (the list may never show it). */
+let toolSeen = false
+/** The silent retry for a tool the list never showed has been spent. */
+let silentRetried = false
+
+/**
+ * The propose tool's server can drop between turns while the hooks go on. Missing after it was seen: register again and
+ * say so. Missing and never seen: the list may not show our own tool, so try once, silently.
+ */
+async function reconnectTool($: Dollar): Promise<void> {
+  let listed: unknown
+  try {
+    listed = await Promise.race([$.tool.list(), $.clock.sleep(LIST_BUDGET_MS).then(() => undefined)])
+  } catch {
+    return
+  }
+  if (!Array.isArray(listed)) return
+  if (listed.some((t) => t?.name === PROPOSE_TOOL)) {
+    toolSeen = true
+    return
+  }
+  if (!toolSeen && silentRetried) return
+  const announce = toolSeen
+  toolSeen = false
+  silentRetried = true
+  try {
+    await $.tool.register(REGISTER_PROPOSE)
+  } catch {
+    proposeReady = false
+    return
+  }
+  proposeReady = true
+  if (announce) say($, await getLoaded($), 'Souffleur: tool reconnected.')
+}
+
 export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
     await safe($, 'session.start', undefined, async () => {
@@ -1076,7 +1133,12 @@ export const register: Register = (on) => {
         s = decide(l.config, { ...before, errors: [] }, { type: 'start', now: now(), start: 'resume', version }).session
         s = decide(l.config, s, { type: 'config', now: now(), errors: l.errors }).session
       } else s = await freshSession($, l, id, 'startup')
-      await persist($, l, s)
+      // Problems that hold at the start are news once; a resumed session's stored `noticed` keeps them from repeating.
+      const first = notices(l.config, s, s, l.root)
+      s = first.session
+      await persist($, l, s, true)
+      say($, l, startNotice(l.config, s, l.setUp, PLUGIN_VERSION))
+      for (const line of first.lines) say($, l, line)
     })
     await pruneStore($, await $.session.id())
     await safe($, 'installed', undefined, () => refreshInstalled($))
@@ -1086,6 +1148,8 @@ export const register: Register = (on) => {
     interactive = e.isInteractive === true
     askStopped = false
     proposeReady = false
+    toolSeen = false
+    silentRetried = false
     try {
       await $.tool.register(REGISTER_PROPOSE)
       proposeReady = true
@@ -1119,6 +1183,7 @@ export const register: Register = (on) => {
 
   on('prompt.submit', async ($, e, next) => {
     const fromUser = isFromUser(e)
+    if (fromUser) await safe($, 'tool.reconnect', undefined, () => reconnectTool($))
     const texts = await safe($, 'prompt.submit', [] as string[], async () => {
       const { l, session } = await current($)
       const { config } = l

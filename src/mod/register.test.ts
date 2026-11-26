@@ -1,4 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
+import { PLUGIN_VERSION } from './version.ts'
 import type { On } from 'claude-code'
 import { decide, initSession } from '../core/decide.ts'
 import { parseConfig } from '../core/config.ts'
@@ -29,6 +30,10 @@ type World = {
   stored: Record<string, unknown>
   /** How many classifier calls the mod made. */
   classifyCalls: () => number
+  /** The lines written with `$.ui.log` (transcript). */
+  logs: string[]
+  /** From now on `$.tool.list` does not show the propose tool, as after a disconnect. */
+  dropTool: () => void
 }
 
 type Opts = {
@@ -68,6 +73,10 @@ type Opts = {
   skillCalls?: string[]
   /** The whole request of every skill read. */
   skillRequests?: Record<string, unknown>[]
+  /** `$.tool.list` never shows the tool, throws, answers a non-array, or never answers. */
+  listMode?: 'hidden' | 'throws' | 'junk' | 'hangs'
+  /** `$.ui.log` throws. */
+  failLog?: boolean
   /** An Agent tool call stays open until this resolves, as a running subagent keeps it open. */
   holdAgent?: Promise<void>
 }
@@ -105,8 +114,23 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   const toasts: string[] = []
   on('tool.register', (_, e) => {
     if (opts.failToolRegister) throw new Error('refused')
+    toolGone = false
     tools.push(e as { name: string })
     return { value: { tool: `mcp__skill-souffleur__${e.name}` } } as never
+  })
+  let toolGone = false
+  const logs: string[] = []
+  on('tool.list', () => {
+    if (opts.listMode === 'throws') throw new Error('list failed')
+    if (opts.listMode === 'junk') return { value: 'nope' } as never
+    if (opts.listMode === 'hangs') return new Promise(() => {}) as never
+    if (opts.listMode === 'hidden') return { value: [] } as never
+    return { value: toolGone ? [] : tools.map((t) => ({ name: `mcp__skill-souffleur__${t.name}`, description: '', mcp: true })) } as never
+  })
+  on('ui.log', (_, e) => {
+    if (opts.failLog) throw new Error('no transcript here')
+    logs.push(e.text)
+    return { value: undefined } as never
   })
   on('ui.toast', (_, e) => {
     toasts.push(e.text)
@@ -184,7 +208,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   on('turn.complete', (_, e) => ({ text: e.answer }))
   on('session.compact', () => (opts.skipCompact ? { skip: 'vetoed' } : { messages: [{ role: 'user', text: 'summary', toolUses: [] }] }))
   on('command.run', () => ({}))
-  return { statuses, setId: (next) => { id = next }, seen, writes, asked, options, clock, hide: (path) => void hidden.add(path), files, tools, toasts, failRead, answers, driftAfter: (path, n) => { drift.path = path; drift.left = n }, stored: storeData, classifyCalls: () => classifyCalls }
+  return { statuses, setId: (next) => { id = next }, seen, writes, asked, options, clock, hide: (path) => void hidden.add(path), files, tools, toasts, failRead, answers, driftAfter: (path, n) => { drift.path = path; drift.left = n }, stored: storeData, classifyCalls: () => classifyCalls, logs, dropTool: () => { toolGone = true } }
 }
 
 const COMPOSE = { model: 'm', promptModel: 'm', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] } as never
@@ -1757,4 +1781,180 @@ test('proposals that are all known already mark the version done at once', async
   await start($)
   await mainLoad($, 'writing-guide')
   expect(stored[hashKey(hashOf('writing-guide'))]).toEqual({ done: true })
+})
+
+test('start writes one summary line with the plugin version', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  expect(w.logs).toEqual([`Souffleur: ${PLUGIN_VERSION} · observe · 1 always-on, 0 on demand.`])
+})
+
+test('start without a user file says it is not set up', async ($, on) => {
+  const w = world(on, {})
+  await start($)
+  expect(w.logs).toEqual([`Souffleur: ${PLUGIN_VERSION} · not set up, run /souffleur init.`])
+})
+
+test('compaction then prompt writes the cut line once', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  await skillLoaded($, 'writing-guide')
+  w.logs.length = 0
+  await $.session.compact({ trigger: 'manual' })
+  await $.prompt.submit({ text: 'after compact' })
+  await $.prompt.submit({ text: 'and again' })
+  expect(w.logs.filter((l) => /cut by compaction: writing-guide/.test(l))).toHaveLength(1)
+})
+
+test('a subagent compaction writes no line', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  await skillLoaded($, 'writing-guide')
+  w.logs.length = 0
+  await $.session.compact({ trigger: 'manual', agentId: 'a1' } as never)
+  expect(w.logs).toEqual([])
+})
+
+test('a new session id logs its start line and no diff against the old session', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  await skillLoaded($, 'writing-guide')
+  w.logs.length = 0
+  w.setId('s2')
+  await start($)
+  expect(w.logs).toHaveLength(1)
+  expect(w.logs[0]).toMatch(/^Souffleur: .* · observe/)
+})
+
+test('a missing propose tool is registered again and announced once', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  await $.prompt.submit({ text: 'first' })
+  w.logs.length = 0
+  w.dropTool()
+  await $.prompt.submit({ text: 'hello' })
+  expect(w.tools.map((t) => t.name)).toEqual(['souffleur_propose', 'souffleur_propose'])
+  expect(w.logs).toEqual(['Souffleur: tool reconnected.'])
+})
+
+test('a present propose tool is left alone', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  w.logs.length = 0
+  await $.prompt.submit({ text: 'hello' })
+  expect(w.tools).toHaveLength(1)
+  expect(w.logs).toEqual([])
+})
+
+test('notices false writes no line and still reconnects the tool', async ($, on) => {
+  const w = world(on, { [USER_FILE]: JSON.stringify({ notices: false, skills: { 'writing-guide': { always: true } } }) })
+  await start($)
+  await skillLoaded($, 'writing-guide')
+  await $.session.compact({ trigger: 'manual' })
+  await $.prompt.submit({ text: 'first' })
+  w.dropTool()
+  await $.prompt.submit({ text: 'hello' })
+  expect(w.logs).toEqual([])
+  expect(w.tools).toHaveLength(2)
+})
+
+test('a throwing ui.log does not break session start or the prompt', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS }, { failLog: true })
+  await start($)
+  await $.prompt.submit({ text: 'first' })
+  w.dropTool()
+  const r = await $.prompt.submit({ text: 'hello' })
+  expect(r.context?.join('\n')).toMatch(/writing-guide/)
+  expect(w.tools).toHaveLength(2)
+  expect(w.statuses.at(-1)).not.toMatch(/degraded/)
+})
+
+test('start with a broken user file logs the degraded line once', async ($, on) => {
+  const w = world(on, { [USER_FILE]: '{bad' })
+  await start($)
+  await $.prompt.submit({ text: 'hello' })
+  expect(w.logs.filter((l) => /degraded/.test(l))).toHaveLength(1)
+})
+
+test('resume repeats neither the degraded line nor a cut line', async ($, on) => {
+  const w = world(on, { [USER_FILE]: '{bad', 'x': '' })
+  await start($)
+  await start($)
+  expect(w.logs.filter((l) => /degraded/.test(l))).toHaveLength(1)
+})
+
+test('resume after a cut repeats no cut line', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  await skillLoaded($, 'writing-guide')
+  await $.session.compact({ trigger: 'manual' })
+  expect(w.logs.filter((l) => /cut by compaction/.test(l))).toHaveLength(1)
+  await start($)
+  expect(w.logs.filter((l) => /cut by compaction/.test(l))).toHaveLength(1)
+})
+
+test('loading a cut skill again writes the reloaded line', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  await skillLoaded($, 'writing-guide')
+  await $.session.compact({ trigger: 'manual' })
+  w.logs.length = 0
+  await skillLoaded($, 'writing-guide')
+  expect(w.logs).toEqual(['Souffleur: reloaded: writing-guide.'])
+})
+
+test('a skill that did not load after two requests writes one problem line', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  for (let i = 0; i < 6; i++) await $.prompt.submit({ text: `p${i}` })
+  expect(w.logs.filter((l) => /did not load after two requests/.test(l))).toHaveLength(1)
+})
+
+test('a tool the list never shows is registered once, silently', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS }, { listMode: 'hidden' })
+  await start($)
+  w.logs.length = 0
+  await $.prompt.submit({ text: 'one' })
+  await $.prompt.submit({ text: 'two' })
+  expect(w.tools).toHaveLength(2)
+  expect(w.logs).toEqual([])
+})
+
+test('a tool seen once and then missing is announced each time it comes back', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  await $.prompt.submit({ text: 'one' })
+  w.logs.length = 0
+  w.dropTool()
+  await $.prompt.submit({ text: 'two' })
+  await $.prompt.submit({ text: 'three' })
+  expect(w.logs.filter((l) => /reconnected/.test(l))).toEqual(['Souffleur: tool reconnected.'])
+  expect(w.tools).toHaveLength(2)
+})
+
+test('a throwing tool list does not break the prompt or record an error', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS }, { listMode: 'throws' })
+  await start($)
+  const r = await $.prompt.submit({ text: 'hello' })
+  expect(r.context?.join('\n')).toMatch(/writing-guide/)
+  expect(w.statuses.at(-1)).not.toMatch(/degraded/)
+  expect(w.tools).toHaveLength(1)
+})
+
+test('a non-array tool list is skipped without an error', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS }, { listMode: 'junk' })
+  await start($)
+  await $.prompt.submit({ text: 'hello' })
+  expect(w.statuses.at(-1)).not.toMatch(/degraded/)
+  expect(w.tools).toHaveLength(1)
+})
+
+test('a tool list that never answers does not hold the prompt back', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS }, { listMode: 'hangs' })
+  await start($)
+  const p = $.prompt.submit({ text: 'hello' })
+  await w.clock.advance(300)
+  const r = await p
+  expect(r.context?.join('\n')).toMatch(/writing-guide/)
+  expect(w.tools).toHaveLength(1)
 })

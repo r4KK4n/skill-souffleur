@@ -62,7 +62,7 @@ test('neededSkills keeps config order and includes always skills', () => {
   const config: Config = {
     mode: 'observe',
     needs,
-    trustProjects: [], rules: [], notes: [], learn: { skills: true },
+    trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true,
     skills: {
       a: { need: 'ui', from: 'user' },
       b: { always: true, from: 'user' },

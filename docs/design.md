@@ -267,6 +267,20 @@ Without a dialog (`claude -p`), both commands print what they would ask, the con
 - The status line shows a short summary, for example `observe · 4 loaded, 1 restoring`. Claude Code puts the plugin name in front of it.
 - When the mod cannot read an event it expects (a renamed field, a missing event), the status line says `degraded, see /souffleur` and the command lists what failed.
 
+### Notices
+
+The status line shows only in the terminal. Users of the desktop and mobile apps, and anyone not watching it, learn what Souffleur did from short lines in the transcript. The core compares the session before and after each change (`src/core/notices.ts`); the adapter writes the lines with `$.ui.log`, which the user sees as a dim line and the model does not.
+
+- Each notice starts with `Souffleur:`, is English, has at most two sentences, and fires once per event.
+- Session start (fresh or resumed): version, mode, how many skills are always on and on demand, waiting proposals. Without a user file: `not set up, run /souffleur init`.
+- After a compaction that cut or dropped tracked skills: `cut by compaction: <names>; will ask the model to reload them`. The line names only the skills Souffleur will ask for: needed, from a trusted file, and not paused. When every one of them is loaded again: `reloaded: <names>`.
+- Problems, each once until it clears: a skill that did not load after two requests (not one that is only "not installed here": a project skill outside its project is normal), `degraded` with the reason (first line of the error, ASCII only, at most 120 characters), Claude Code newer than the verified version, an untrusted project file. When the last problem clears: `back to normal`.
+- No notice for a denial: the denial already shows in the transcript.
+- Only the main session gets notices, not subagents.
+- `"notices": false` in the user file turns them off. A project file cannot change it.
+
+The propose tool's server can disconnect between turns while the hooks keep running. On each user prompt the adapter checks `$.tool.list()`; when `souffleur_propose` is missing it registers the tool again. The line `Souffleur: tool reconnected` appears only when the tool was seen in the list and then went missing; a tool the list never showed is registered again silently, once per process. A failed registration leaves the system prompt sentence out, as at start.
+
 ### Failure handling
 
 - A hook that throws passes the event through unchanged (the engine's default) and records the error for `/souffleur`.

@@ -22,6 +22,8 @@ export type Config = {
   rules: Rule[]
   notes: Note[]
   learn: { skills: boolean }
+  /** Session notices in the transcript. Only the user file sets it. */
+  notices: boolean
   /** The need names the user file defines: proposals may name only these. */
   userNeeds?: string[]
   /** The need names only the project file defines: they count only for a trusted root. */
