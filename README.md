@@ -102,16 +102,18 @@ Create `~/.claude/souffleur.json`, or let `/souffleur init` write it for you:
 {
   "mode": "observe",
   "skills": {
-    "terse:terse-mode": { "always": true },
+    "terse:terse-mode": { "always": true, "for": "chat" },
     "writing-guide": { "need": "prose" },
     "ui-checklist": { "need": "ui" }
   },
   "needs": {
-    "prose": "Writing text people read: docs, specs, plans, issues.",
-    "ui": "Designing or building something a user sees."
+    "prose": { "for": "readers", "what": "Writing text people read: docs, specs, plans, issues." },
+    "ui": { "for": "users", "what": "Designing or building something a user sees." }
   }
 }
 ```
+
+Each need names who receives the output its skills shape, in `for`: `chat` (your replies in the session), `readers` (texts other people read), `users` (what users of a product see) or `work` (how the agent works, nobody reads it). `what` is the description of 1 to 200 characters that the classifier matches against your prompt. The old form, a plain string, still works and counts as `work`. An always-on skill carries `for` itself; `for` on any other skill is an error and ignored. A skill in the user file can list `"notIn": ["/path/to/repo"]`: in those project roots it is excluded. `notIn` is compared without trailing slashes and is only read from the user file.
 
 A skill with `"always": true` is needed from the first turn. A skill with `"need"` is needed once a prompt matches that need's description. After a compaction or a resume, Souffleur asks the model to load the skills it needs again. A project can add its own `.claude/souffleur.json`, but it cannot change your entries or your mode. Its skills and needs are report only until you list the project root in `trustProjects` in your user file: for any other project Souffleur neither asks the model to load them nor names them in the system prompt, and they cannot deny a call. `/souffleur` still lists them. A project file may define 20 skills and 10 needs at most; more get an error that names the cap. Roots in `trustProjects` are compared without trailing slashes.
 

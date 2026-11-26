@@ -6,7 +6,7 @@ import type { Action, CoreEvent, Session } from '../src/core/decide.ts'
 import { NOTE_CAP, sectionNotes } from '../src/core/rules.ts'
 import type { Config, Note, Rule } from '../src/core/types.ts'
 
-const empty: Config = { mode: 'enforce', skills: {}, needs: { ui: 'Building a screen.' }, trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true }
+const empty: Config = { mode: 'enforce', skills: {}, needs: { ui: { for: 'users', what: 'Building a screen.' } }, trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true }
 const cfg = (patch: Partial<Config>): Config => ({ ...empty, ...patch })
 
 let t = 0
@@ -120,7 +120,7 @@ test('a subagent call is never checked by a rule', () => {
 
 test('user file rules and notes parse; project file rules are an error', () => {
   const user = JSON.stringify({
-    needs: { ui: 'Building a screen.' },
+    needs: { ui: { for: 'users', what: 'Building a screen.' } },
     rules: [fieldRule, skillRule, afterRule],
     notes: [{ id: 'reply-language', text: 'Reply in German.', source: 'user' }, { id: 'ui-copy', text: 'Show copy first.', need: 'ui', source: 'user' }],
     learn: { skills: false },

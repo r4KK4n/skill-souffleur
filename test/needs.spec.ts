@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { classifyPrompt, neededSkills } from '../src/core/needs.ts'
 import type { Config } from '../src/core/types.ts'
 
-const needs = { prose: 'Writing text people read.', ui: 'Building a screen.' }
+const needs = { prose: { for: 'readers', what: 'Writing text people read.' }, ui: { for: 'users', what: 'Building a screen.' } } as const
 
 test('returns needs answered match', async () => {
   const seen: { text: string; labels: readonly string[] }[] = []

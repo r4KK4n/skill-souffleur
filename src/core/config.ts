@@ -1,10 +1,11 @@
-import type { Config, Match, Mode, NeedName, Note, Origin, Rule, SkillName, SkillRule } from './types.ts'
+import { AUDIENCES } from './types.ts'
+import type { Audience, Config, Need, Match, Mode, NeedName, Note, Origin, Rule, SkillName, SkillRule } from './types.ts'
 
 type FileConfig = {
   mode?: Mode
   trustProjects?: string[]
   skills: Record<SkillName, SkillRule>
-  needs: Record<NeedName, string>
+  needs: Record<NeedName, Need>
   rules: Rule[]
   notes: Note[]
   learn?: { skills: boolean }
@@ -174,10 +175,33 @@ function parseName(name: string, kind: 'skill' | 'need'): void {
   check(NAME.test(name) && name !== '__proto__', `${kind} ${show(name)}`, 'name must match [A-Za-z0-9:_-] and be 1 to 64 characters')
 }
 
-function parseRule(v: unknown, where: string): Omit<SkillRule, 'from'> {
+const FOR_ERROR = 'must be one of chat, readers, users, work; ignored'
+const isAudience = (v: unknown): v is Audience => typeof v === 'string' && (AUDIENCES as readonly string[]).includes(v)
+
+/** Parses one need: the old string form (counts as `work`) or `{ for, what }`. */
+function parseNeed(value: unknown, name: string, soft: (m: string) => void): Need | undefined {
+  const where = `need ${show(name)}`
+  let what: unknown = value
+  let audience: Audience = 'work'
+  if (isObject(value)) {
+    onlyKeys(value, ['for', 'what'], where)
+    if (!isAudience(value.for)) {
+      soft(`${name}.for: ${FOR_ERROR}`)
+      return undefined
+    }
+    audience = value.for
+    what = value.what
+  }
+  check(typeof what === 'string', where, isObject(value) ? '"what" must be a string' : 'must be a string or { "for", "what" }')
+  const text = what as string
+  check(text.length >= 1 && text.length <= 200 && !hasLineBreak(text), where, 'text must be one line of 1 to 200 characters')
+  return isObject(value) ? { for: audience, what: text } : { for: 'work', what: text, noAudience: true }
+}
+
+function parseRule(v: unknown, where: string, source: Origin, soft: (m: string) => void, name: string): Omit<SkillRule, 'from'> {
   check(isObject(v), where, 'must be an object')
   const obj = v as Record<string, unknown>
-  onlyKeys(obj, ['always', 'startup', 'need', 'gate', 'duty'], where)
+  onlyKeys(obj, ['always', 'startup', 'need', 'gate', 'duty', 'for', 'notIn'], where)
   const rule: Omit<SkillRule, 'from'> = {}
   if (obj.always !== undefined) {
     check(typeof obj.always === 'boolean', `${where}.always`, 'must be true or false')
@@ -193,6 +217,17 @@ function parseRule(v: unknown, where: string): Omit<SkillRule, 'from'> {
   }
   check(!(rule.always === true && rule.need !== undefined), where, '"always" and "need" cannot be combined')
   check(rule.always === true || rule.need !== undefined || rule.startup !== undefined, where, 'needs one of "always", "need" or "startup"')
+  if (obj.for !== undefined) {
+    if (!isAudience(obj.for)) soft(`${name}.for: ${FOR_ERROR}`)
+    else if (rule.always !== true) soft(`${name}.for: only for always-on skills; ignored`)
+    else rule.for = obj.for
+  }
+  if (obj.notIn !== undefined) {
+    const list = obj.notIn
+    if (source === 'project') soft(`${name}.notIn is only allowed in the user config; ignored`)
+    else if (Array.isArray(list) && list.length <= MAX_LIST && list.every((p) => typeof p === 'string' && /^(\/|[A-Za-z]:[\\/])/.test(p) && !hasControl(p) && p.length <= MAX_GLOB)) rule.notIn = (list as string[]).map(normRoot)
+    else soft(`${name}.notIn: must be a list of at most ${MAX_LIST} absolute paths; ignored`)
+  }
   if (obj.gate !== undefined) {
     rule.gate = parseMatch(obj.gate, `${where}.gate`)
     check(!rule.gate.tools.includes('Skill'), `${where}.gate`, 'a gate cannot name the Skill tool: it would block loading its own skill')
@@ -278,12 +313,10 @@ function parseFile(text: string, source: Origin, errors: string[]): FileConfig {
       try {
         parseName(name, kind)
         if (kind === 'skill') {
-          file.skills[name] = { from: source, ...parseRule(value, `skill ${show(name)}`) }
+          file.skills[name] = { from: source, ...parseRule(value, `skill ${show(name)}`, source, fail, name) }
         } else {
-          check(typeof value === 'string', `need ${show(name)}`, 'must be a string')
-          const needText = value as string
-          check(needText.length >= 1 && needText.length <= 200 && !hasLineBreak(needText), `need ${show(name)}`, 'text must be one line of 1 to 200 characters')
-          file.needs[name] = needText
+          const need = parseNeed(value, name, fail)
+          if (need) file.needs[name] = need
         }
       } catch (e) {
         if (!(e instanceof SchemaError)) throw e

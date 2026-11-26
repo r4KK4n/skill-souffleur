@@ -7,7 +7,7 @@ import { loadFixture, toCoreEvents } from './fixtures.ts'
 
 const base: Config = {
   mode: 'enforce',
-  needs: { prose: 'Writing text people read.', ui: 'Building a screen.' },
+  needs: { prose: { for: 'readers', what: 'Writing text people read.' }, ui: { for: 'users', what: 'Building a screen.' } },
   trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true,
   skills: {
     'writing-guide': { need: 'prose', from: 'user' },
@@ -456,7 +456,7 @@ test('a config event drops needs the config no longer has and duties of removed 
 const projectCfg = (extra: Partial<Config> = {}): Config =>
   cfg({
     mode: 'enforce',
-    needs: { pn: 'A project need.' },
+    needs: { pn: { for: 'work', what: 'A project need.' } },
     projectNeeds: ['pn'],
     skills: { 'proj-skill': { need: 'pn', from: 'project' }, 'proj-always': { always: true, from: 'project' } },
     ...extra,

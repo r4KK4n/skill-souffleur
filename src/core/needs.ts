@@ -1,4 +1,4 @@
-import type { Config, NeedName, SkillName } from './types.ts'
+import type { Config, Need, NeedName, SkillName } from './types.ts'
 
 export type Classify = (text: string, labels: readonly string[]) => Promise<string>
 
@@ -9,7 +9,7 @@ export type Classify = (text: string, labels: readonly string[]) => Promise<stri
  */
 export async function classifyPromptChecked(
   prompt: string,
-  needs: Record<NeedName, string>,
+  needs: Record<NeedName, Need>,
   classify: Classify,
   timeout: (ms: number) => Promise<void>,
   budgetMs = 1500,
@@ -17,9 +17,9 @@ export async function classifyPromptChecked(
   const matched = new Set<NeedName>()
   let answered = 0
   let failed = false
-  const calls = Object.entries(needs).map(async ([name, description]) => {
+  const calls = Object.entries(needs).map(async ([name, need]) => {
     try {
-      const answer = await classify(`Need: ${description}\n\nPrompt: ${prompt}`, ['match', 'no-match'])
+      const answer = await classify(`Need: ${need.what}\n\nPrompt: ${prompt}`, ['match', 'no-match'])
       if (answer === 'match') matched.add(name)
       if (answer === 'match' || answer === 'no-match') answered += 1
       else failed = true
@@ -32,7 +32,7 @@ export async function classifyPromptChecked(
   return { matched: Object.keys(needs).filter((name) => matched.has(name)), failed: failed || answered < calls.length }
 }
 
-export async function classifyPrompt(prompt: string, needs: Record<NeedName, string>, classify: Classify, timeout: (ms: number) => Promise<void>, budgetMs = 1500): Promise<NeedName[]> {
+export async function classifyPrompt(prompt: string, needs: Record<NeedName, Need>, classify: Classify, timeout: (ms: number) => Promise<void>, budgetMs = 1500): Promise<NeedName[]> {
   return (await classifyPromptChecked(prompt, needs, classify, timeout, budgetMs)).matched
 }
 
@@ -43,3 +43,6 @@ export function neededSkills(config: Config, active: Record<NeedName, unknown>, 
     .map(([name]) => name)
   return [...named, ...extra.filter((name) => !named.includes(name))]
 }
+
+/** The classifier text of each need, for code that still works with plain strings. */
+export const needTexts = (needs: Record<NeedName, Need>): Record<NeedName, string> => Object.fromEntries(Object.entries(needs).map(([name, n]) => [name, n.what]))

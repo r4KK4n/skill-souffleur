@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- Config: a need can be `{ "for": "chat|readers|users|work", "what": "..." }` and an always-on skill can carry `for`; the old string need still works and counts as `work`. A user-file skill can list `notIn` project roots. The wording that uses them follows in the next change.
+
 ## [0.1.3] - 2026-11-26
 
 - A turn-end dialog that nobody answers is given up after two minutes and shown as a notice; the notice names `/souffleur accept <id>` where a reply cannot reach the session (`claude -p`). A prompt handled as a reply is not classified, and a failing debug log no longer drops the restore context.

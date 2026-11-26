@@ -12,7 +12,7 @@ const T1 = Date.UTC(2026, 10, 25, 9, 5)
 
 const config: Config = {
   mode: 'enforce',
-  needs: { prose: 'Writing text people read.', ui: 'Building a screen.' },
+  needs: { prose: { for: 'readers', what: 'Writing text people read.' }, ui: { for: 'users', what: 'Building a screen.' } },
   trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true,
   skills: {
     'writing-guide': { need: 'prose', from: 'user' },

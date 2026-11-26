@@ -6,7 +6,7 @@ import type { HookOverlap, Passage } from '../core/migrate.ts'
 import { CHOICE_LABEL, INJECTED_HELP, NOT_SET_UP, SETUP_INTRO, applyChoice, candidates, choiceOf, cleanNeedText, configProblem, currentChoice, describePlan, explicitOnly, injectedWarning, needKeyFor, options, parsePicks, parseSkips, picksPrompt, setupSteps } from '../core/setup.ts'
 import type { LoadChoice, NeedText, Plan, StartHooks, Suggestion } from '../core/setup.ts'
 import type { Action, CoreEvent, Session } from '../core/decide.ts'
-import { classifyPromptChecked } from '../core/needs.ts'
+import { classifyPromptChecked, needTexts } from '../core/needs.ts'
 import { EXTRACT_SYSTEM, MAX_SKILL_TEXT, extractPrompt, hashKey, parseAnswer, shouldRead, skillHash, trusted } from '../core/learn.ts'
 import type { Proposal } from '../core/proposals.ts'
 import { NO, YES_EVERYWHERE, YES_PROJECT, addEntry, answer, describeProposal, enqueue, findProposal, makeProposal, nextQuestion, parseReply, parseShaped, proposalLines, proposalNotice, shapePrompt } from '../core/proposals.ts'
@@ -453,9 +453,9 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
   let picks: Suggestion[] = []
   if (pool.length) {
     try {
-      const r = await $.model.complete({ model: 'haiku', prompt: picksPrompt(pool, config.needs) })
+      const r = await $.model.complete({ model: 'haiku', prompt: picksPrompt(pool, needTexts(config.needs)) })
       if (r.isAnswered) {
-        picks = parsePicks(r.text, pool.map((x) => x.name), config.needs)
+        picks = parsePicks(r.text, pool.map((x) => x.name), needTexts(config.needs))
         for (const name of parseSkips(r.text, pool.map((x) => x.name))) skips.add(name)
       }
       else notes.push('The small model gave no answer, so no descriptions are proposed.')
@@ -493,7 +493,7 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
   const proposal = (p: Plan): { need: NeedText; fallback: boolean } => {
     if (p.need) return { need: p.need, fallback: false }
     const key = config.skills[p.skill]?.need
-    const text = key === undefined ? undefined : config.needs[key]
+    const text = key === undefined ? undefined : config.needs[key]?.what
     if (key !== undefined && text !== undefined) return { need: { key, text }, fallback: false }
     return { need: { key: needKeyFor(p.skill), text: `The task calls for ${p.skill}.` }, fallback: true }
   }

@@ -9,7 +9,7 @@ import type { Config } from '../src/core/types.ts'
 const T = Date.UTC(2026, 10, 26, 8, 0)
 const config: Config = {
   mode: 'enforce',
-  needs: { prose: 'Writing text people read.' },
+  needs: { prose: { for: 'readers', what: 'Writing text people read.' } },
   trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true,
   skills: {
     'terse:terse-mode': { always: true, from: 'user' },

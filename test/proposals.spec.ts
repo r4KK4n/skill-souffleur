@@ -5,7 +5,7 @@ import { addEntry, answer, describeProposal, enqueue, makeProposal, nextQuestion
 import type { Proposal } from '../src/core/proposals.ts'
 import type { Config, Note, Rule } from '../src/core/types.ts'
 
-const config: Config = { mode: 'observe', skills: {}, needs: { ui: 'Building a screen.' }, trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true }
+const config: Config = { mode: 'observe', skills: {}, needs: { ui: { for: 'users', what: 'Building a screen.' } }, trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true }
 const fresh = () => initSession(config, 's1', 0, 'clear')
 const ruleRaw = (skill: string) => ({ kind: 'rule', before: { tools: ['Agent'] }, skill })
 const prop = (raw: unknown, from = 'slip'): Proposal => {
@@ -137,7 +137,7 @@ test('a passage proposal shows its file and line, and a project passage offers t
 })
 
 test('a note needing a project-file need is refused when the user file lacks it', () => {
-  const mixed: Config = { ...config, needs: { ui: 'x', extra: 'y' }, userNeeds: ['ui'] }
+  const mixed: Config = { ...config, needs: { ui: { for: 'work', what: 'x' }, extra: { for: 'work', what: 'y' } }, userNeeds: ['ui'] }
   assert.match(makeProposal({ kind: 'note', text: 'hi there', need: 'extra' }, 'user', mixed).error ?? '', /need/)
   assert.ok(makeProposal({ kind: 'note', text: 'hi there', need: 'ui' }, 'user', mixed).proposal)
 })

@@ -2,10 +2,19 @@ export type SkillName = string
 export type NeedName = string
 export type Match = { tools: string[]; paths?: string[] }
 export type Origin = 'user' | 'project'
+/** Who receives the output a skill shapes: the chat reply, other readers of a text, product users, or nobody (how the agent works). */
+export type Audience = 'chat' | 'readers' | 'users' | 'work'
+export const AUDIENCES: readonly Audience[] = ['chat', 'readers', 'users', 'work']
+/** `what` is the classifier text. `noAudience` marks the old string form, which counts as `work`. */
+export type Need = { for: Audience; what: string; noAudience?: true }
 export type SkillRule = {
   /** Set by the parser from the file the entry came from; never read from JSON. */
   from: Origin
   always?: boolean
+  /** Only with `always`. */
+  for?: Audience
+  /** Main repository roots where the skill is off. Only the user file sets it. */
+  notIn?: string[]
   startup?: 'injected'
   need?: NeedName
   gate?: Match
@@ -15,7 +24,7 @@ export type Mode = 'observe' | 'enforce'
 export type Config = {
   mode: Mode
   skills: Record<SkillName, SkillRule>
-  needs: Record<NeedName, string>
+  needs: Record<NeedName, Need>
   /** Absolute project roots whose gates and duties may deny. Only the user file sets it. */
   trustProjects: string[]
   /** Only the user file holds these. */
