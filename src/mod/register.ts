@@ -97,7 +97,7 @@ async function getLoaded($: Dollar): Promise<Loaded> {
   const cwd: string = await $.session.cwd()
   const userText = home ? await readOptional($, `${home}/.claude/souffleur.json`, errors, home) : undefined
   const projectText = await readOptional($, `${root}/.claude/souffleur.json`, errors, home)
-  const parsed = parseConfig(userText === undefined ? undefined : stripBom(userText), projectText === undefined ? undefined : stripBom(projectText))
+  const parsed = parseConfig(userText === undefined ? undefined : stripBom(userText), projectText === undefined ? undefined : stripBom(projectText), root)
   let tree = cwd
   try {
     const copy = await $.vcs.detect({ path: cwd })
@@ -437,7 +437,7 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
     if (problem) return stop(`${shown(configPath)} cannot be edited because ${problem}`)
   }
   const projectText = await readOptional($, `${l0.root}/.claude/souffleur.json`, notes, home)
-  const parsed = parseConfig(user.kind === 'ok' ? stripBom(user.text) : undefined, projectText === undefined ? undefined : stripBom(projectText))
+  const parsed = parseConfig(user.kind === 'ok' ? stripBom(user.text) : undefined, projectText === undefined ? undefined : stripBom(projectText), l0.root)
   const config = parsed.config
   notes.push(...parsed.errors)
   const projectSkills: Record<string, unknown> = Object.fromEntries(Object.entries(config.skills).filter(([, r]) => r.from === 'project'))

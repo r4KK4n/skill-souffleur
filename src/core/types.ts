@@ -41,6 +41,17 @@ export type Config = {
   userNeeds?: string[]
   /** The need names only the project file defines: they count only for a trusted root. */
   projectNeeds?: string[]
+  /** The per-project block of the open root, set when the user file has one for it. Standard entries it names are already removed. */
+  project?: {
+    root: string
+    /** Every name the block lists, skill, note or rule id, also names the standard lacks. */
+    blocked: string[]
+    /** The subset of `blocked` that names a skill of the standard. */
+    blockedSkills: string[]
+    /** Own skills, then note ids, then rule ids the block adds and that survived validation. */
+    own: string[]
+    ignored: string[]
+  }
 }
 
 /**

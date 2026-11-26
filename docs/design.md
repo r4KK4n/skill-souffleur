@@ -108,6 +108,19 @@ A skill with `always` is needed from the first turn. A skill with `need` is need
 
 The top-level `mode` key decides whether Souffleur may block anything. In `observe`, the default, Souffleur keeps the ledger, asks for restores and reports through `/souffleur`, but denies no tool call; `/souffleur` lists each call it would have denied. In `enforce`, gates and duties deny as described below. Only the user file sets `mode`. A project file that sets it gets an error and the mode stays as the user file has it, so a cloned repository can neither switch gates on nor off.
 
+### Project blocks
+
+The top level of the user file is the standard for every project. A project can differ from it without a copy of the file: the user file may hold `"projects": { "<main repository root>": { "block": [...], "skills": {...}, "needs": {...}, "notes": [...], "rules": [...], "ignored": [...] } }`. Only the user file reads `projects`; a project file that has the key gets an error and the key is ignored, so a repository can neither block nor add anything this way.
+
+`parseConfig(user, project, root)` resolves the effective config once per load, so `decide`, the needs, the system prompt section and `/souffleur` keep reading one `Config`. The effective set in a root is the standard, minus the names in `block`, plus the block's own entries.
+
+- `block` lists skill names and note or rule ids. A blocked skill is removed as if the file did not have it: from `always`, gates, duties, the restore text, the system prompt section, and a rule whose `skill` it is. A name the standard lacks stays in the list, so a skill added to the standard later is blocked there already.
+- An own skill, need, note or rule may not reuse a name or id of the standard that is left after the block. That is an error that names the entry (`projects["<root>"].skills.<name>: already in the standard; block it first or rename`), and the entry is dropped. Blocking a name first and defining it again in the same block is allowed.
+- Roots are absolute and compared without trailing slashes, like `where`; at most 50 roots, at most 20 entries per list. A relative root, or a block that is not an object, is dropped with an error. A wrong type inside a block drops that key or entry only. Other roots' blocks are checked only when that root is open, so their errors do not show in an unrelated project.
+- `notIn` and `where` work as before; a `notIn` root acts like a block of that skill.
+- `Config.project` is set when the open root has a block: `{ root, blocked, blockedSkills, own, ignored }`. `blocked` lists every name of the block, `blockedSkills` the part that names a skill of the standard, `own` the own skills, note ids and rule ids that passed validation.
+- `/souffleur` prints `Project: <root> (block: N blocked, M own)` when a block names or adds anything, and lists each blocked skill as a row with state `blocked here`. The ledger state `absent` is written `not needed yet` in the table; the state name itself is unchanged.
+
 ### Ledger
 
 One entry per configured skill, kept in `$.state` for the session and mirrored to `$.store` keyed by session id so a resume finds it.

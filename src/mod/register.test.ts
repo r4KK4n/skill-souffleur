@@ -452,7 +452,7 @@ test('skill loaded by a subagent does not mark the main ledger', async ($, on) =
   })
   await start($)
   await $.tool.call({ tool: 'Agent', prompt: 'skills: writing-guide', description: 'd', subagent_type: 'general-purpose' } as never)
-  expect(await table($)).toMatch(/writing-guide \| absent/)
+  expect(await table($)).toMatch(/writing-guide \| not needed yet/)
 })
 
 test('new session id after clear starts a fresh ledger', async ($, on) => {
@@ -462,7 +462,7 @@ test('new session id after clear starts a fresh ledger', async ($, on) => {
   expect(await table($)).toMatch(/writing-guide \| loaded/)
   await $.command.run({ command: 'clear', args: '' })
   w.setId('s2')
-  expect(await table($)).toMatch(/writing-guide \| absent/)
+  expect(await table($)).toMatch(/writing-guide \| not needed yet/)
   const r = await $.prompt.submit({ text: 'fresh' })
   expect(r.context?.join('\n')).toMatch(/writing-guide/)
 })
@@ -842,7 +842,7 @@ test('init applies at once: a new skill shows in the table and the status line',
   expect(text).not.toMatch(/next session/)
   expect(w.statuses.at(-1)).toBe('observe · 0 loaded')
   const t = await table($)
-  expect(t).toMatch(/\| ui-checklist \| absent \|/)
+  expect(t).toMatch(/\| ui-checklist \| not needed yet \|/)
   expect(t).not.toMatch(/not set up/)
 })
 
@@ -949,14 +949,14 @@ test('session.start on a reload gives a skill added to the config a ledger entry
   await start($)
   w.files[USER_FILE] = JSON.stringify({ skills: { 'writing-guide': { always: true }, 'ui-checklist': { always: true } } })
   await start($)
-  expect(await table($)).toMatch(/\| ui-checklist \| absent \|/)
+  expect(await table($)).toMatch(/\| ui-checklist \| not needed yet \|/)
 })
 
 test('a stored session that lacks a configured skill is healed on its first event', async ($, on) => {
   const config = parseConfig(ALWAYS, undefined).config
   const old = { ...initSession(config, 's1', 1, 'startup'), ledger: {} }
   world(on, { [USER_FILE]: ALWAYS }, { stored: { 'session:s1': old } })
-  expect(await table($)).toMatch(/\| writing-guide \| absent \|/)
+  expect(await table($)).toMatch(/\| writing-guide \| not needed yet \|/)
 })
 
 test('a skill listing that never answers does not hold the prompt back', async ($, on) => {
@@ -2906,4 +2906,22 @@ test('a typed rule whose dialog is dismissed still stops proposals', async ($, o
   await run($, 'rule Always say hi')
   expect(d.asked.length).toBe(1)
   expect(String((await propose($, note('Keep commits small.'))).result)).toBe(STOPPED)
+})
+
+test('a skill blocked in this root is left out of the system section and shown as blocked here', async ($, on) => {
+  const cfg = JSON.stringify({
+    mode: 'enforce',
+    skills: { 'terse:terse-mode': { always: true, for: 'chat' }, 'writing-guide': { always: true } },
+    projects: { '/work/proj': { block: ['terse:terse-mode'] }, '/work/other': { block: ['writing-guide'] } },
+  })
+  world(on, { [USER_FILE]: cfg })
+  on('prompt.compose', () => ({ sections: [] }))
+  await start($)
+  const r = await $.prompt.compose(COMPOSE)
+  const text = r.sections.find((s: { id: string }) => s.id === 'souffleur')?.text as string
+  expect(text).not.toMatch(/terse:terse-mode|Replies in this chat/)
+  expect(text).toMatch(/writing-guide/)
+  const t = await table($)
+  expect(t).toMatch(/^Project: \/work\/proj \(block: 1 blocked, 0 own\)$/m)
+  expect(t).toMatch(/\| terse:terse-mode \| blocked here \|/)
 })

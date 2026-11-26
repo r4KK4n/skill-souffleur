@@ -57,7 +57,7 @@ test('table lists every configured skill with state and reason', () => {
   assert.equal(lines[0], 'Mode: enforce. Times in UTC.')
   assert.match(out, /^\| Skill \| State \| Since \| Reason \|$/m)
   assert.match(out, /^\| writing-guide \| loaded \| 09:05 \| matched prompt \|$/m)
-  assert.match(out, /^\| terse:terse-mode \| absent \| 08:00 \|  \|$/m)
+  assert.match(out, /^\| terse:terse-mode \| not needed yet \| 08:00 \|  \|$/m)
   for (const name of Object.keys(config.skills)) assert.match(out, new RegExp(`^\\| ${name.replace(':', '\\:')} \\|`, 'm'))
   assert.equal(lines.at(-1), 'Claude Code 2.1.332')
 })
@@ -236,10 +236,10 @@ test('table: excluded skill shows its state text, needs without an audience get 
   const s = initSession(c, 's', T0, 'clear')
   const here = renderTable(c, s, T0, '/work/p/')
   assert.match(here, /\| ui-design \| excluded in this project \|/)
-  assert.match(here, /\| writing-guide \| absent \|/)
+  assert.match(here, /\| writing-guide \| not needed yet \|/)
   assert.match(here, /^prose: no audience set; add "for" to it in ~\/\.claude\/souffleur\.json$/m)
   assert.doesNotMatch(here, /^ui: no audience/m)
-  assert.match(renderTable(c, s, T0, '/work/q'), /\| ui-design \| absent \|/)
+  assert.match(renderTable(c, s, T0, '/work/q'), /\| ui-design \| not needed yet \|/)
 })
 
 test('status line leaves excluded skills out of the counts', () => {
@@ -292,4 +292,28 @@ test('the table shows failure counts after the error cleared', () => {
   assert.match(renderTable(config, s, T1), /^Failures this session: tool\.call 3, classifier 1$/m)
   assert.doesNotMatch(renderTable(config, { ...fresh(), failCounts: { 'tool.call': 0 } }, T1), /Failures this session/)
   assert.doesNotMatch(renderTable(config, fresh(), T1), /Failures this session/)
+})
+
+const standardJson = JSON.stringify({ skills: { 'chat-style': { always: true, for: 'chat' }, 'writing-guide': { need: 'prose' } }, needs: { prose: { for: 'readers', what: 'Writing.' } }, projects: { '/work/a': { block: ['chat-style'], skills: { local: { need: 'prose' } } } } })
+
+test('status names the project and shows blocked skills as blocked here', () => {
+  const { config: c } = parseConfig(standardJson, undefined, '/work/a')
+  const out = renderTable(c, initSession(c, 's', T0, 'clear'), T1, '/work/a')
+  assert.match(out, /^Project: \/work\/a \(block: 1 blocked, 1 own\)$/m)
+  assert.match(out, /^\| chat-style \| blocked here \|/m)
+  assert.doesNotMatch(out, /chat-style \| absent/)
+})
+
+test('status has no project line without a block', () => {
+  const { config: c } = parseConfig(standardJson, undefined, '/work/b')
+  assert.doesNotMatch(renderTable(c, initSession(c, 's', T0, 'clear'), T1, '/work/b'), /Project:|blocked here/)
+})
+
+test('absent rows read not needed yet in the table', () => {
+  const { config: c } = parseConfig(standardJson, undefined, '/work/b')
+  const s = initSession(c, 's', T0, 'clear')
+  assert.equal(s.ledger['writing-guide']!.state, 'absent')
+  const out = renderTable(c, s, T1, '/work/b')
+  assert.match(out, /^\| writing-guide \| not needed yet \|/m)
+  assert.doesNotMatch(out, /\| absent \|/)
 })
