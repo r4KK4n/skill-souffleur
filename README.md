@@ -87,12 +87,12 @@ git clone --branch v0.1.2 https://github.com/r4KK4n/skill-souffleur ~/.claude/sk
 Update to a newer release:
 
 ```
-cd ~/.claude/skills/skill-souffleur && git fetch --tags && git checkout v0.1.3
+cd ~/.claude/skills/skill-souffleur && git fetch --tags && git checkout <tag>
 ```
 
 Every running session picks up the new version, usually within half a minute. Use release tags only, never `main`: a release with a fault would reach every running session at once. To go back, check out the previous tag. A session that was already running when the folder was created does not see it; start that one once more.
 
-Use one install method, not both: with the marketplace plugin and the folder, Souffleur runs twice. The folder install keeps its own stored data, so skill texts are read again once and earlier proposals can come back; decline them again with `/souffleur decline <id>`.
+Use one install method, not both. While the marketplace plugin is installed, Claude Code does not load the folder at all: the installed plugin keeps the name `skill-souffleur`. The folder install keeps its own stored data. Copy the old store file if you want to keep it: in `~/.claude/plugins/store/`, the marketplace install writes `skill-souffleur_skill-souffleur-<hash>.json` and the folder install `skill-souffleur_skills-dir-<hash>.json`. Without the copy, skill texts are read again once, earlier proposals can come back (decline them again with `/souffleur decline <id>`), and a session resumed after the switch starts with an empty ledger.
 
 ## Quick start
 
