@@ -1,11 +1,10 @@
 import { excludedIn, isTrustedRoot, matches, matchesCommand } from './config.ts'
 import { compacted, initLedger, markInstalled, requested, skillLoaded, syncLedger } from './ledger.ts'
 import type { Ledger } from './ledger.ts'
-import { audienceOf, neededSkills } from './needs.ts'
+import { audienceOf, neededSkills, type Deliverable } from './needs.ts'
 import type { Proposal } from './proposals.ts'
 import { checkRules, contextNotes, ruleKind, ruleSkillNames } from './rules.ts'
 import { renderTable } from './status.ts'
-import type { Deliverable } from './needs.ts'
 import type { Audience, Config, NeedName, SkillName } from './types.ts'
 
 /** An open duty. `denied` is set once the duty has denied a call, so the retry passes. */
@@ -61,8 +60,8 @@ export type CoreEvent =
   | { type: 'start'; now: number; start: 'startup' | 'resume' | 'reload' | 'clear'; version?: string }
   | { type: 'skill'; now: number; skill: string; text?: string; source?: string; pluginName?: string; path?: string }
   | { type: 'compact'; now: number; phase: 'before' | 'after'; trigger: string; skipped?: boolean; agentId?: string }
-  /** `classifierFailed`: the classifier ran and failed (true) or answered every need (false); absent when it did not run. */
-  | { type: 'prompt'; now: number; text: string; fromUser: boolean; matched: NeedName[]; root?: string; classifierFailed?: boolean; deliverable?: Deliverable }
+  /** `classifierFailed`: call A failed (true) or answered (false); absent when the classifier did not run. `workFailed`: A said code work and call B failed, so `work` needs saw no verdict. `deliverable`: A's answer. */
+  | { type: 'prompt'; now: number; text: string; fromUser: boolean; matched: NeedName[]; root?: string; classifierFailed?: boolean; workFailed?: boolean; deliverable?: Deliverable }
   /** `present` names the arguments the call carries, for field rules. */
   | { type: 'tool'; now: number; tool: string; path?: string; command?: string; brief?: string; skill?: string; model?: string; present?: string[]; agentId?: string; root?: string; tree?: string }
   | { type: 'command'; now: number; args: string; root?: string }
@@ -296,6 +295,7 @@ function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'pro
     if (e.classifierFailed === false && e.text.trim().split(/\s+/).length > SHORT_PROMPT_WORDS) {
       for (const [name, n] of Object.entries(needs)) {
         if (e.matched.includes(name) || n.reason === 'command') continue
+        if (e.workFailed && config.needs[name]?.for === 'work') continue
         const misses = (n.misses ?? 0) + 1
         if (misses >= NEED_MISSES) {
           delete needs[name]
@@ -326,10 +326,10 @@ function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'pro
   if (r?.text !== undefined) add(r.text)
   if ((next.classifyFails ?? 0) >= FAIL_LIMIT && !s.paused) {
     const listed = Object.entries(config.needs)
-      .filter(([name, n]) => n.for === 'work' && (trusted || !(config.projectNeeds ?? []).includes(name)))
+      .filter(([name, n]) => n.for === 'work' && !(name in next.needs) && (trusted || !(config.projectNeeds ?? []).includes(name)))
       .map(([name, n]) => {
         const skills = Object.entries(config.skills)
-          .filter(([skill, rule]) => rule.need === name && next.ledger[skill]?.state !== 'not installed here' && !excludedIn(rule, e.root) && (trusted || rule.from !== 'project'))
+          .filter(([skill, rule]) => rule.need === name && next.ledger[skill]?.state !== 'not installed here' && next.ledger[skill]?.state !== 'loaded' && !excludedIn(rule, e.root) && (trusted || rule.from !== 'project'))
           .map(([skill]) => skill)
         return skills.length ? `${name} (${n.what}): ${skills.join(', ')}` : ''
       })

@@ -1311,10 +1311,11 @@ export const register: Register = (on) => {
           )
         : undefined
       await listing
-      const { actions } = await apply($, (l2) => ({ type: 'prompt', now: now(), text: e.text, fromUser, matched: verdict?.matched ?? [], root: l2.root, ...(verdict === undefined ? {} : { classifierFailed: verdict.failed }), ...(verdict?.kind === undefined ? {} : { deliverable: verdict.kind }) }))
-      if (verdict?.failure !== undefined) {
+      const { actions } = await apply($, (l2) => ({ type: 'prompt', now: now(), text: e.text, fromUser, matched: verdict?.matched ?? [], root: l2.root, ...(verdict === undefined ? {} : { classifierFailed: verdict.failed }), ...(verdict?.kind === undefined ? {} : { deliverable: verdict.kind }), ...(verdict?.bFailure === undefined ? {} : { workFailed: true }) }))
+      const classifierLine = verdict?.failure !== undefined ? `classifier: ${verdict.failure}` : verdict?.bFailure !== undefined ? `classifier B: ${verdict.bFailure}` : undefined
+      if (classifierLine !== undefined) {
         try {
-          $.ui.log(`classifier: ${verdict.failure}`, { to: 'debug' })
+          $.ui.log(classifierLine, { to: 'debug' })
         } catch {
           // a debug line is a courtesy
         }

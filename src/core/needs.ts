@@ -8,12 +8,11 @@ export type Deliverable = (typeof DELIVERABLES)[number]
 export type ClassifyFailure = 'timeout' | 'rejected' | 'unknown-label'
 
 const LATE = '\0late'
-const REJECTED = '\0rejected'
 
 /**
  * Two classifier calls in parallel under one budget. Call A asks what the agent will produce; `text-for-others` starts every
  * `readers` need, `screen` every `users` need, `chat-reply` nothing. Call B picks one `work` need (or `none`) and counts only
- * when A says `code-or-repo-work`. A late, rejected or unknown answer of A fails the prompt; B never does.
+ * when A says `code-or-repo-work`; A is awaited first and B only then. A late, rejected, empty or unknown answer of A fails the prompt; a failed B is reported as `bFailure` and fails nothing.
  */
 export async function classifyDeliverable(
   prompt: string,
@@ -21,29 +20,37 @@ export async function classifyDeliverable(
   classify: Classify,
   sleep: (ms: number) => Promise<void>,
   budgetMs = 2500,
-): Promise<{ matched: NeedName[]; failed: boolean; kind?: Deliverable; failure?: ClassifyFailure }> {
+): Promise<{ matched: NeedName[]; failed: boolean; kind?: Deliverable; failure?: ClassifyFailure; bFailure?: ClassifyFailure }> {
   const timer = sleep(budgetMs).then(() => LATE)
   const entries = Object.entries(needs)
   const work = entries.filter(([, n]) => n.for === 'work')
-  const labels = work.map(([name, n]) => `${name}: ${n.what}`)
-  const callA = Promise.race([classify(`What will the agent produce in answer to this prompt?\n\n${prompt}`, DELIVERABLES), timer]).then(
-    (answer): { answer: string } => ({ answer }),
-    (): { answer: string } => ({ answer: REJECTED }),
-  )
-  // B starts at once so the two calls overlap; whether it counts is decided after A.
-  const callB: Promise<string> =
-    work.length === 0
-      ? Promise.resolve('none')
-      : Promise.race([classify(`Which kind of work does this prompt start?\n\n${prompt}`, [...labels, 'none']), timer]).catch(() => 'none')
-  const [{ answer: a }, b] = await Promise.all([callA, callB])
-  if (a === LATE) return { matched: [], failed: true, failure: 'timeout' }
-  if (!(DELIVERABLES as readonly string[]).includes(a)) return { matched: [], failed: true, failure: a === REJECTED ? 'rejected' : 'unknown-label' }
-  const kind = a as Deliverable
+  // The label is the bare need name: the classifier returns no label at all for a long label with a colon (verified on 2.1.332).
+  const labels = [...work.map(([name]) => name), 'none']
+  const options = work.map(([name, n]) => `${name}: ${n.what}`).join('\n')
+  /** One call under the shared budget; never rejects. */
+  const call = async (text: string, asked: readonly string[]): Promise<{ answer: string } | { failure: ClassifyFailure }> => {
+    try {
+      const answer = await Promise.race([classify(text, asked), timer])
+      if (answer === LATE) return { failure: 'timeout' }
+      if (answer === undefined || answer === null || answer === '') return { failure: 'rejected' }
+      return asked.includes(answer) ? { answer } : { failure: 'unknown-label' }
+    } catch {
+      return { failure: 'rejected' }
+    }
+  }
+  const callA = call(`What will the agent produce in answer to this prompt?\n\n${prompt}`, DELIVERABLES)
+  // B starts at once so the two calls overlap; it is awaited only when A says code work.
+  const callB = work.length === 0 ? Promise.resolve({ answer: 'none' }) : call(`Which kind of work does this prompt start? Answer none if it starts no work.\n${options}\n\n${prompt}`, labels)
+  const a = await callA
+  if ('failure' in a) return { matched: [], failed: true, failure: a.failure }
+  const kind = a.answer as Deliverable
   const of = (audience: Audience) => entries.filter(([, n]) => n.for === audience).map(([name]) => name)
   if (kind === 'text-for-others') return { matched: of('readers'), failed: false, kind }
   if (kind === 'screen') return { matched: of('users'), failed: false, kind }
-  if (kind === 'chat-reply' || b === LATE) return { matched: [], failed: false, kind }
-  const pick = work.find(([name]) => b.slice(0, Math.max(b.indexOf(': '), 0)) === name || b === name)
+  if (kind === 'chat-reply') return { matched: [], failed: false, kind }
+  const b = await callB
+  if ('failure' in b) return { matched: [], failed: false, kind, bFailure: b.failure }
+  const pick = work[labels.indexOf(b.answer)]
   return { matched: pick ? [pick[0]] : [], failed: false, kind }
 }
 

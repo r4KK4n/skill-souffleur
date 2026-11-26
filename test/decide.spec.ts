@@ -849,3 +849,38 @@ test('the prompt event carries the deliverable and it changes nothing by itself'
   const r = run(workCfg, [{ ...prompt('x'), classifierFailed: false, deliverable: 'chat-reply' } as CoreEvent])
   assert.deepEqual(r.s.needs, {})
 })
+
+test('a failed call B counts no miss for work needs but still for others', () => {
+  const c = cfg({ needs: { ...base.needs, debug: { for: 'work', what: 'Debugging a failure.' } }, skills: { ...base.skills, 'root-cause': { need: 'debug', from: 'user' } } })
+  const start = run(c, [], { ...initSession(c, 'session-1', 0, 'clear'), needs: { debug: { since: 1, reason: 'need:debug from "x"', misses: 0 }, prose: { since: 1, reason: 'x', misses: 0 } } as never })
+  const r = run(c, [{ ...prompt('please fix the failing test now'), classifierFailed: false, workFailed: true } as CoreEvent], start.s)
+  assert.equal(r.s.needs.debug!.misses ?? 0, 0)
+  assert.equal(r.s.needs.prose!.misses, 1)
+})
+
+const fallbackCfg = (patch: Partial<Config>) => cfg({ needs: { ...base.needs, debug: { for: 'work', what: 'Debugging a failure.' } }, ...patch })
+const failedSession = (c: Config, extra: Partial<Session> = {}) => ({ ...initSession(c, 'session-1', 0, 'clear'), classifyFails: 3, ...extra })
+const fallbackLine = (c: Config, s: Session) => ctx(one(c, [failedPrompt()], s))
+
+test('fallback line skips loaded skills and active needs', () => {
+  const c = fallbackCfg({ skills: { ...base.skills, 'root-cause': { need: 'debug', from: 'user' }, 'second-look': { need: 'debug', from: 'user' } } })
+  const s = failedSession(c)
+  assert.match(fallbackLine(c, s), /debug \(Debugging a failure\.\): root-cause, second-look/)
+  const loaded = { ...s, ledger: { ...s.ledger, 'root-cause': { ...s.ledger['root-cause']!, state: 'loaded' as const } } }
+  assert.match(fallbackLine(c, loaded), /: second-look$/)
+  const active = { ...s, needs: { debug: { since: 1, reason: 'command' } } }
+  assert.doesNotMatch(fallbackLine(c, active), /cannot classify/)
+})
+
+test('fallback line leaves out untrusted project, notIn, not-installed skills; none while paused', () => {
+  const c = fallbackCfg({ skills: { ...base.skills, 'proj-skill': { need: 'debug', from: 'project' }, 'user-skill': { need: 'debug', from: 'user', notIn: ['/work/p'] } } })
+  assert.doesNotMatch(ctx(one(c, [{ ...failedPrompt(), root: '/work/p' } as CoreEvent], failedSession(c))), /cannot classify/)
+  const c2 = fallbackCfg({ skills: { ...base.skills, 'proj-skill': { need: 'debug', from: 'project' }, ok: { need: 'debug', from: 'user' } } })
+  const t = ctx(one(c2, [failedPrompt()], failedSession(c2)))
+  assert.match(t, /: ok$/)
+  assert.doesNotMatch(t, /proj-skill/)
+  const s = failedSession(c2)
+  const gone = { ...s, ledger: { ...s.ledger, ok: { ...s.ledger.ok!, state: 'not installed here' as const } } }
+  assert.doesNotMatch(fallbackLine(c2, gone), /cannot classify/)
+  assert.doesNotMatch(fallbackLine(c2, { ...s, paused: true }), /cannot classify/)
+})

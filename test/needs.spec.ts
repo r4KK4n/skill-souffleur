@@ -48,21 +48,23 @@ test('call A asks about the deliverable with the exact labels and text', async (
 })
 
 test('each deliverable label maps to its needs', async () => {
-  assert.deepEqual(await classifyDeliverable('x', needs, kind('chat-reply', 'debug: Debugging a failure.'), never), { matched: [], failed: false, kind: 'chat-reply' })
+  assert.deepEqual(await classifyDeliverable('x', needs, kind('chat-reply', 'debug'), never), { matched: [], failed: false, kind: 'chat-reply' })
   assert.deepEqual(await classifyDeliverable('x', needs, kind('text-for-others'), never), { matched: ['prose'], failed: false, kind: 'text-for-others' })
   assert.deepEqual(await classifyDeliverable('x', needs, kind('screen'), never), { matched: ['ui'], failed: false, kind: 'screen' })
-  assert.deepEqual(await classifyDeliverable('x', needs, kind('code-or-repo-work', 'plan: Planning a change.'), never), { matched: ['plan'], failed: false, kind: 'code-or-repo-work' })
+  assert.deepEqual(await classifyDeliverable('x', needs, kind('code-or-repo-work', 'plan'), never), { matched: ['plan'], failed: false, kind: 'code-or-repo-work' })
 })
 
-test('call B offers only work needs plus none, and none starts nothing', async () => {
+test('call B labels are the work need names plus none, the descriptions sit in the text, and none starts nothing', async () => {
   const seen: (readonly string[])[] = []
-  const got = await classifyDeliverable('x', needs, async (text, labels) => { seen.push(labels); return text.startsWith('What will') ? 'code-or-repo-work' : 'none' }, never)
+  const texts: string[] = []
+  const got = await classifyDeliverable('x', needs, async (text, labels) => { seen.push(labels); texts.push(text); return text.startsWith('What will') ? 'code-or-repo-work' : 'none' }, never)
   assert.deepEqual(got, { matched: [], failed: false, kind: 'code-or-repo-work' })
-  assert.deepEqual(seen.find((l) => l.includes('none')), ['debug: Debugging a failure.', 'plan: Planning a change.', 'none'])
+  assert.deepEqual(seen.find((l) => l.includes('none')), ['debug', 'plan', 'none'])
+  assert.match(texts.find((t) => t.includes('Which kind'))!, /debug: Debugging a failure\.\nplan: Planning a change\./)
 })
 
 test('a German chat question classified chat-reply starts nothing', async () => {
-  const got = await classifyDeliverable('warum steht dort restoring?', needs, kind('chat-reply', 'debug: Debugging a failure.'), never)
+  const got = await classifyDeliverable('warum steht dort restoring?', needs, kind('chat-reply', 'debug'), never)
   assert.deepEqual(got.matched, [])
   assert.equal(got.failed, false)
 })
@@ -72,9 +74,8 @@ test('A late is a timeout failure', async () => {
   assert.deepEqual(got, { matched: [], failed: true, failure: 'timeout' })
 })
 
-test('A with an unknown or empty label is unknown-label, a throw is rejected', async () => {
+test('A with an unknown label is unknown-label, a throw is rejected', async () => {
   assert.deepEqual(await classifyDeliverable('x', needs, kind('banana'), never), { matched: [], failed: true, failure: 'unknown-label' })
-  assert.equal((await classifyDeliverable('x', needs, kind(''), never)).failure, 'unknown-label')
   const thrown = await classifyDeliverable('x', needs, async () => { throw new Error('boom') }, never)
   assert.deepEqual(thrown, { matched: [], failed: true, failure: 'rejected' })
 })
@@ -84,16 +85,44 @@ test('one slow call B does not fail the prompt when A answered in time', async (
   const gate = new Promise<void>((r) => (release = r))
   const run = classifyDeliverable('x', needs, (text) => (text.startsWith('What will') ? Promise.resolve('code-or-repo-work') : new Promise<string>(() => {})), () => gate)
   release()
-  assert.deepEqual(await run, { matched: [], failed: false, kind: 'code-or-repo-work' })
+  assert.deepEqual(await run, { matched: [], failed: false, kind: 'code-or-repo-work', bFailure: 'timeout' })
 })
 
 test('a throwing call B never fails the prompt', async () => {
   const got = await classifyDeliverable('x', needs, async (text) => { if (text.startsWith('What will')) return 'code-or-repo-work'; throw new Error('boom') }, never)
-  assert.deepEqual(got, { matched: [], failed: false, kind: 'code-or-repo-work' })
+  assert.deepEqual(got, { matched: [], failed: false, kind: 'code-or-repo-work', bFailure: 'rejected' })
 })
 
 test('without work needs call B is not made', async () => {
   let calls = 0
   await classifyDeliverable('x', { prose: needs.prose }, async () => { calls += 1; return 'code-or-repo-work' }, never)
   assert.equal(calls, 1)
+})
+
+test('chat-reply returns at once, whatever B and the clock do', async () => {
+  const got = await classifyDeliverable('x', needs, (text) => (text.startsWith('What will') ? Promise.resolve('chat-reply') : new Promise<string>(() => {})), never)
+  assert.deepEqual(got, { matched: [], failed: false, kind: 'chat-reply' })
+})
+
+test('B failures are reported as bFailure only for code work', async () => {
+  const code = (b: () => Promise<string>) => async (text: string) => (text.startsWith('What will') ? 'code-or-repo-work' : b())
+  assert.equal((await classifyDeliverable('x', needs, code(async () => { throw new Error('boom') }), never)).bFailure, 'rejected')
+  assert.equal((await classifyDeliverable('x', needs, code(async () => 'banana'), never)).bFailure, 'unknown-label')
+  assert.equal((await classifyDeliverable('x', needs, code(async () => ''), never)).bFailure, 'rejected')
+  const late = await classifyDeliverable('x', needs, (text) => (text.startsWith('What will') ? Promise.resolve('code-or-repo-work') : new Promise<string>(() => {})), () => Promise.resolve(), 1)
+  assert.deepEqual(late, { matched: [], failed: false, kind: 'code-or-repo-work', bFailure: 'timeout' })
+  assert.equal((await classifyDeliverable('x', needs, code(async () => 'none'), never)).bFailure, undefined)
+  const chat = await classifyDeliverable('x', needs, async (text) => { if (text.startsWith('What will')) return 'chat-reply'; throw new Error('boom') }, never)
+  assert.equal(chat.bFailure, undefined)
+})
+
+test('an empty or null answer of A is rejected, not unknown-label', async () => {
+  assert.equal((await classifyDeliverable('x', needs, async () => '', never)).failure, 'rejected')
+  assert.equal((await classifyDeliverable('x', needs, async () => null as unknown as string, never)).failure, 'rejected')
+})
+
+test('B maps by label index even when a need name is a prefix of another', async () => {
+  const two = { debug: { for: 'work', what: 'a: b' }, 'debug-more': { for: 'work', what: 'c' } } as const
+  const got = await classifyDeliverable('x', two, async (text, labels) => (text.startsWith('What will') ? 'code-or-repo-work' : labels[1]!), never)
+  assert.deepEqual(got.matched, ['debug-more'])
 })

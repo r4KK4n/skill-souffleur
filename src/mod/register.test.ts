@@ -39,7 +39,7 @@ type World = {
 }
 
 type Opts = {
-  classify?: string | (() => string)
+  classify?: string | ((labels?: readonly string[]) => string)
   stored?: Record<string, unknown>
   skipCompact?: boolean
   /** Installed skill names `$.session.usage` lists. */
@@ -158,10 +158,10 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   let classifyCalls = 0
   on('model.classify', (_, e) => {
     classifyCalls += 1
-    const raw = typeof opts.classify === 'function' ? opts.classify() : (opts.classify ?? 'no-match')
+    const labels = (e as { labels: readonly string[] }).labels
+    const raw = typeof opts.classify === 'function' ? opts.classify(labels) : (opts.classify ?? 'no-match')
     // 'match' / 'no-match' stand for the old per-need answers: A answers code work, B picks the first need.
     if (raw !== 'match' && raw !== 'no-match') return { value: raw }
-    const labels = (e as { labels: readonly string[] }).labels
     if (labels.includes('chat-reply')) return { value: raw === 'match' ? 'code-or-repo-work' : 'chat-reply' }
     return { value: raw === 'match' ? labels[0]! : 'none' }
   })
@@ -2535,4 +2535,12 @@ test('a failed call A writes its kind to the debug log', async ($, on) => {
   await start($)
   await $.prompt.submit({ text: 'one two three four' })
   expect(w.debugLogs.join('\n')).toMatch(/classifier: unknown-label/)
+})
+
+test('a failed call B writes classifier B to the debug log', async ($, on) => {
+  const w = world(on, { [USER_FILE]: JSON.stringify({ skills: { g: { need: 'n' } }, needs: { n: { for: 'work', what: 'Something.' } } }) }, { classify: (labels) => (labels?.includes('chat-reply') ? 'code-or-repo-work' : 'banana') })
+  await start($)
+  await $.prompt.submit({ text: 'one two three four' })
+  expect(w.debugLogs.join('\n')).toMatch(/classifier B: unknown-label/)
+  expect(w.debugLogs.join('\n')).not.toMatch(/classifier: /)
 })

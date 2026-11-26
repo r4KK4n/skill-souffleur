@@ -133,7 +133,7 @@ After any compaction every `loaded` skill becomes `stale`. Measuring which skill
 
 ### Needs
 
-- On every user prompt (`prompt.submit`, not prompts submitted by a plugin), the adapter asks the classifier once per configured need whether the prompt matches it. The calls run in parallel; the whole step has a budget of 1.5 s, after which it continues without a verdict.
+- On every user prompt (`prompt.submit`, not prompts submitted by a plugin), the adapter makes two classifier calls in parallel under one budget of 2.5 s (see Audience): what the agent will produce, and, for code or repo work, which `work` need applies. A call that is late or fails gives no verdict for the prompt.
 - A matched need stays active across prompts that do not mention it. Work on a prototype spans many prompts that do not mention it again; dropping the need after one unrelated prompt would bring back the original problem. It ends by itself only after a long run of misses (see Status).
 - `/souffleur need ui` and `/souffleur drop ui` let the user set or clear a need by hand.
 
@@ -286,7 +286,7 @@ Needs start from the deliverable, not the topic. Planned (not built yet): tool e
 
 - Planned: a `readers` or `users` need starts from tool evidence: a call its skills' gates match, or `gh issue create|comment`, `gh pr create|edit`, `git commit` for `readers`. No model call.
 - Per prompt, two classifier calls run in parallel instead of one per need. Call A asks what the agent will produce: `chat-reply`, `text-for-others`, `screen`, `code-or-repo-work`. Call B picks one `work` need or `none`, and counts only when A says `code-or-repo-work`. `chat-reply` starts nothing.
-- A failed call counts as `chat-reply`. After three failures in a row the status shows `needs: degraded`, and each prompt carries one line listing the `work` needs so the main model can pick; the line stops with the first good answer. Each failure goes to the debug log with its kind.
+- A failed call counts as `chat-reply`. After three failures of call A in a row the status shows `degraded, see /souffleur` with the reason in the command, and each prompt carries one line listing the `work` needs so the main model can pick; the line stops with the first good answer. Each failure goes to the debug log with its kind (`classifier: timeout|rejected|unknown-label`, and `classifier B: <kind>` for call B, which fails nothing: the `work` needs then count no miss for that prompt). The line leaves out needs that are already active and skills already loaded.
 - Planned: after a compaction, `chat` and `work` skills are requested on the next prompt; `readers` and `users` skills wait for the next deliverable signal.
 
 Planned: adherence is checked for the `chat` skill only, without a model: on `turn.complete` with reason `answer`, the answer's length without code blocks and its count of heading lines are compared with `"reply": { "maxChars": …, "headings": … }` on that skill. A violation is counted in `/souffleur` and adds one line to the next prompt's context (at most once per five prompts). In `enforce`, two violations in a row mark the skill `stale`, so it is requested again. Nothing is denied; the answer is already shown.
@@ -321,7 +321,7 @@ The propose tool's server can disconnect between turns while the hooks keep runn
 ### Failure handling
 
 - A hook that throws passes the event through unchanged (the engine's default) and records the error for `/souffleur`. The error clears once the same step works again; each step has its own name, so another step's success does not clear it. Config errors and the small-model failure counts keep their own rules.
-- The classifier failing or timing out means no new need for that prompt; existing needs stay.
+- The classifier failing or timing out means no new need for that prompt; existing needs stay. Call A runs first and a `chat-reply` answer returns at once; call B is waited for only after `code-or-repo-work`.
 - The adapter checks the Claude Code version at start and lists it in the status. Behaviour verified on other versions is named in `docs/compatibility.md`.
 
 ## Testing
