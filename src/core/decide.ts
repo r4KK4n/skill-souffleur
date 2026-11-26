@@ -5,6 +5,7 @@ import { audienceOf, neededSkills } from './needs.ts'
 import type { Proposal } from './proposals.ts'
 import { checkRules, contextNotes, ruleKind, ruleSkillNames } from './rules.ts'
 import { renderTable } from './status.ts'
+import type { Deliverable } from './needs.ts'
 import type { Audience, Config, NeedName, SkillName } from './types.ts'
 
 /** An open duty. `denied` is set once the duty has denied a call, so the retry passes. */
@@ -61,7 +62,7 @@ export type CoreEvent =
   | { type: 'skill'; now: number; skill: string; text?: string; source?: string; pluginName?: string; path?: string }
   | { type: 'compact'; now: number; phase: 'before' | 'after'; trigger: string; skipped?: boolean; agentId?: string }
   /** `classifierFailed`: the classifier ran and failed (true) or answered every need (false); absent when it did not run. */
-  | { type: 'prompt'; now: number; text: string; fromUser: boolean; matched: NeedName[]; root?: string; classifierFailed?: boolean }
+  | { type: 'prompt'; now: number; text: string; fromUser: boolean; matched: NeedName[]; root?: string; classifierFailed?: boolean; deliverable?: Deliverable }
   /** `present` names the arguments the call carries, for field rules. */
   | { type: 'tool'; now: number; tool: string; path?: string; command?: string; brief?: string; skill?: string; model?: string; present?: string[]; agentId?: string; root?: string; tree?: string }
   | { type: 'command'; now: number; args: string; root?: string }
@@ -323,6 +324,18 @@ function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'pro
     return true
   }
   if (r?.text !== undefined) add(r.text)
+  if ((next.classifyFails ?? 0) >= FAIL_LIMIT && !s.paused) {
+    const listed = Object.entries(config.needs)
+      .filter(([name, n]) => n.for === 'work' && (trusted || !(config.projectNeeds ?? []).includes(name)))
+      .map(([name, n]) => {
+        const skills = Object.entries(config.skills)
+          .filter(([skill, rule]) => rule.need === name && next.ledger[skill]?.state !== 'not installed here' && !excludedIn(rule, e.root) && (trusted || rule.from !== 'project'))
+          .map(([skill]) => skill)
+        return skills.length ? `${name} (${n.what}): ${skills.join(', ')}` : ''
+      })
+      .filter(Boolean)
+    if (listed.length) add(`Souffleur cannot classify prompts right now. If this prompt starts one of these, invoke its skills first: ${listed.join('; ')}`)
+  }
   const notes = contextNotes(config, next, e.root).kept
   if (notes.length && add(`Souffleur notes from the user's config:\n${notes.map((n) => `- ${n.text}`).join('\n')}`)) {
     const ids = notes.map((n) => n.id)

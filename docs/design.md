@@ -281,12 +281,12 @@ Every skill shapes output for someone. Souffleur records who, and says it whenev
 
 The load request groups skills by audience with a fixed sentence per value, for example: `writing-guide, writing-check: for texts other people read (docs, issues, PRs, app copy). Not for your replies in this chat.` Groups come in the order readers, users, work, chat, then the compaction sentence when it applies. When a `chat` skill is always on and the request holds a `readers` or `users` group, the last line is `Your replies in this chat follow <chat skill>.` The system prompt section says that each skill applies only to the output named with it, names the `chat` skill, and lists the other always-on skills as `Always-on skills: <names>.`
 
-Needs start from the deliverable, not the topic. Planned (not built yet): the rest of this list and the reply check below. Today a need starts from the prompt classifier, one call per need.
+Needs start from the deliverable, not the topic. Planned (not built yet): tool evidence, compaction handling and the reply check below.
 
 
 - Planned: a `readers` or `users` need starts from tool evidence: a call its skills' gates match, or `gh issue create|comment`, `gh pr create|edit`, `git commit` for `readers`. No model call.
-- Planned: per prompt, two classifier calls run in parallel instead of one per need. Call A asks what the agent will produce: `chat-reply`, `text-for-others`, `screen`, `code-or-repo-work`. Call B picks one `work` need or `none`, and counts only when A says `code-or-repo-work`. `chat-reply` starts nothing.
-- Planned: a failed call counts as `chat-reply`. After three failures in a row the status shows `needs: degraded`, and each prompt carries one line listing the `work` needs so the main model can pick; the line stops with the first good answer. Each failure goes to the debug log with its kind.
+- Per prompt, two classifier calls run in parallel instead of one per need. Call A asks what the agent will produce: `chat-reply`, `text-for-others`, `screen`, `code-or-repo-work`. Call B picks one `work` need or `none`, and counts only when A says `code-or-repo-work`. `chat-reply` starts nothing.
+- A failed call counts as `chat-reply`. After three failures in a row the status shows `needs: degraded`, and each prompt carries one line listing the `work` needs so the main model can pick; the line stops with the first good answer. Each failure goes to the debug log with its kind.
 - Planned: after a compaction, `chat` and `work` skills are requested on the next prompt; `readers` and `users` skills wait for the next deliverable signal.
 
 Planned: adherence is checked for the `chat` skill only, without a model: on `turn.complete` with reason `answer`, the answer's length without code blocks and its count of heading lines are compared with `"reply": { "maxChars": …, "headings": … }` on that skill. A violation is counted in `/souffleur` and adds one line to the next prompt's context (at most once per five prompts). In `enforce`, two violations in a row mark the skill `stale`, so it is requested again. Nothing is denied; the answer is already shown.

@@ -156,9 +156,14 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
     return { value: text }
   })
   let classifyCalls = 0
-  on('model.classify', () => {
+  on('model.classify', (_, e) => {
     classifyCalls += 1
-    return { value: typeof opts.classify === 'function' ? opts.classify() : (opts.classify ?? 'no-match') }
+    const raw = typeof opts.classify === 'function' ? opts.classify() : (opts.classify ?? 'no-match')
+    // 'match' / 'no-match' stand for the old per-need answers: A answers code work, B picks the first need.
+    if (raw !== 'match' && raw !== 'no-match') return { value: raw }
+    const labels = (e as { labels: readonly string[] }).labels
+    if (labels.includes('chat-reply')) return { value: raw === 'match' ? 'code-or-repo-work' : 'chat-reply' }
+    return { value: raw === 'match' ? labels[0]! : 'none' }
   })
   on('store.keys', () => ({ value: Object.keys(storeData) }) as never)
   on('ui.status', (_, e) => {
@@ -1801,7 +1806,7 @@ test('pause stops classifier calls and turn-end questions; resume brings them ba
   expect(w.asked.length).toBe(asked)
   expect(await run($, 'resume')).toMatch(/on again/)
   await $.prompt.submit({ text: 'after resume' })
-  expect(w.classifyCalls()).toBe(before + 1)
+  expect(w.classifyCalls()).toBe(before + 2)
   await turnEnd($)
   expect(w.asked.length).toBe(asked + 1)
 })
@@ -2523,4 +2528,11 @@ test('the status line does not count a skill excluded in this project', async ($
   await skillLoaded($, 'ui-design')
   await skillLoaded($, 'writing-guide')
   expect(w.statuses.at(-1)).toMatch(/^1 loaded/)
+})
+
+test('a failed call A writes its kind to the debug log', async ($, on) => {
+  const w = world(on, { [USER_FILE]: JSON.stringify({ skills: { g: { need: 'n' } }, needs: { n: 'Something.' } }) }, { classify: () => 'banana' })
+  await start($)
+  await $.prompt.submit({ text: 'one two three four' })
+  expect(w.debugLogs.join('\n')).toMatch(/classifier: unknown-label/)
 })

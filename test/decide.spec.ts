@@ -826,3 +826,26 @@ test('gate denial names the audience of the skill', () => {
   const reason = (r.actions.find((x) => x.kind === 'deny') as { reason: string }).reason
   assert.match(reason, /Souffleur: load writing-guide with the Skill tool first, then retry\. writing-guide is for texts other people read \(docs, issues, PRs, app copy\)\. Not for your replies in this chat\./)
 })
+
+const workCfg = cfg({
+  needs: { ...base.needs, debug: { for: 'work', what: 'Debugging a failure.' } },
+  skills: { ...base.skills, 'root-cause': { need: 'debug', from: 'user' } },
+})
+const failedPrompt = (): CoreEvent => ({ type: 'prompt', now: at(), text: 'x', fromUser: true, matched: [], classifierFailed: true })
+
+test('after three classifier failures each prompt lists only the work needs, a good answer ends it', () => {
+  const two = run(workCfg, [failedPrompt(), failedPrompt()])
+  assert.doesNotMatch(ctx(two.out.at(-1)!), /cannot classify/)
+  const three = run(workCfg, [failedPrompt()], two.s)
+  assert.equal(ctx(three.out[0]!), 'Souffleur cannot classify prompts right now. If this prompt starts one of these, invoke its skills first: debug (Debugging a failure.): root-cause')
+  const four = run(workCfg, [failedPrompt()], three.s)
+  assert.match(ctx(four.out[0]!), /cannot classify prompts right now/)
+  assert.doesNotMatch(ctx(four.out[0]!), /prose|writing-guide|ui-checklist/)
+  const good = run(workCfg, [{ ...prompt('x'), classifierFailed: false } as CoreEvent], four.s)
+  assert.doesNotMatch(ctx(good.out[0]!), /cannot classify/)
+})
+
+test('the prompt event carries the deliverable and it changes nothing by itself', () => {
+  const r = run(workCfg, [{ ...prompt('x'), classifierFailed: false, deliverable: 'chat-reply' } as CoreEvent])
+  assert.deepEqual(r.s.needs, {})
+})
