@@ -1,7 +1,7 @@
 import { excludedIn, isTrustedRoot, matches, matchesCommand } from './config.ts'
 import { compacted, initLedger, markInstalled, requested, skillLoaded, syncLedger } from './ledger.ts'
 import type { Ledger } from './ledger.ts'
-import { audienceOf, neededSkills } from './needs.ts'
+import { audienceOf, neededSkills, type Deliverable } from './needs.ts'
 import type { Proposal } from './proposals.ts'
 import { checkRules, contextNotes, ruleKind, ruleSkillNames } from './rules.ts'
 import { renderTable } from './status.ts'
@@ -13,7 +13,8 @@ export type Duty = { skill: SkillName; openedAt: number; by: string; denied: boo
 /** Plain JSON only: the adapter persists it and reads it back. */
 export type Session = {
   ledger: Ledger
-  needs: Record<NeedName, { since: number; reason: string; misses?: number }>
+  /** `dormant`: a readers/users need after a compaction; its skills wait for the next deliverable signal. */
+  needs: Record<NeedName, { since: number; reason: string; misses?: number; dormant?: boolean; /** Started or woken by tool evidence: its skills are not asked for again on a prompt that is not its deliverable. */ evidence?: boolean }>
   duties: Duty[]
   paused: boolean
   id: string
@@ -60,8 +61,8 @@ export type CoreEvent =
   | { type: 'start'; now: number; start: 'startup' | 'resume' | 'reload' | 'clear'; version?: string }
   | { type: 'skill'; now: number; skill: string; text?: string; source?: string; pluginName?: string; path?: string }
   | { type: 'compact'; now: number; phase: 'before' | 'after'; trigger: string; skipped?: boolean; agentId?: string }
-  /** `classifierFailed`: the classifier ran and failed (true) or answered every need (false); absent when it did not run. */
-  | { type: 'prompt'; now: number; text: string; fromUser: boolean; matched: NeedName[]; root?: string; classifierFailed?: boolean }
+  /** `classifierFailed`: call A failed (true) or answered (false); absent when the classifier did not run. `workFailed`: A said code work and call B failed, so `work` needs saw no verdict. `deliverable`: A's answer. */
+  | { type: 'prompt'; now: number; text: string; fromUser: boolean; matched: NeedName[]; root?: string; classifierFailed?: boolean; workFailed?: boolean; deliverable?: Deliverable }
   /** `present` names the arguments the call carries, for field rules. */
   | { type: 'tool'; now: number; tool: string; path?: string; command?: string; brief?: string; skill?: string; model?: string; present?: string[]; agentId?: string; root?: string; tree?: string }
   | { type: 'command'; now: number; args: string; root?: string }
@@ -218,8 +219,18 @@ function onCompact(config: Config, s: Session, e: Extract<CoreEvent, { type: 'co
   if (e.agentId !== undefined || e.phase !== 'after' || e.skipped || !COMPACT_TRIGGERS.includes(e.trigger)) return s
   // Need notes went out in a context block the compaction cut: send them again while their need stays active.
   const needNotes = new Set(config.notes.filter((n) => n.need !== undefined).map((n) => n.id))
-  return { ...s, ledger: compacted(s.ledger, e.now), compactedSincePrompt: true, notesSent: s.notesSent.filter((id) => !needNotes.has(id)) }
+  // Texts for others and screens wait for the next signal; chat and work needs are requested on the next prompt as before.
+  const needs = Object.fromEntries(Object.entries(s.needs).map(([name, n]) => [name, isOutward(config, name) && n.reason !== 'command' ? { ...n, dormant: true } : n]))
+  return { ...s, needs, ledger: compacted(s.ledger, e.now), compactedSincePrompt: true, notesSent: s.notesSent.filter((id) => !needNotes.has(id)) }
 }
+
+const DELIVERABLE_OF: Partial<Record<Audience, Deliverable>> = { readers: 'text-for-others', users: 'screen' }
+const ownDeliverable = (config: Config, name: NeedName): Deliverable | undefined => {
+  const audience = config.needs[name]?.for
+  return audience === undefined ? undefined : DELIVERABLE_OF[audience]
+}
+/** A need whose deliverable is a text for others or a screen. */
+const isOutward = (config: Config, name: NeedName): boolean => config.needs[name]?.for === 'readers' || config.needs[name]?.for === 'users'
 
 const ORDER: readonly Audience[] = ['readers', 'users', 'work', 'chat']
 const GROUP_SENTENCE: Record<Audience, string> = {
@@ -240,21 +251,35 @@ function restoreText(config: Config, names: readonly SkillName[], chat: readonly
   return ['Souffleur: before anything else, invoke these skills with the Skill tool, one after another:', ...lines, ...(why ? [why] : []), ...trailer].join('\n')
 }
 
+/** A fresh signal for these needs: their skills may be asked for twice again, and an unavailable one is absent again. */
+function resetSkills(config: Config, ledger: Ledger, needNames: readonly NeedName[]): Ledger {
+  if (needNames.length === 0) return ledger
+  const next: Ledger = { ...ledger }
+  for (const [name, rule] of Object.entries(config.skills)) {
+    const e = next[name]
+    if (rule.need === undefined || !needNames.includes(rule.need) || e === undefined || e.state === 'loaded' || e.state === 'not installed here') continue
+    next[name] = e.state === 'unavailable' ? { ...e, state: 'absent', since: e.since, reason: '', requests: 0 } : { ...e, requests: 0 }
+  }
+  return next
+}
+
 /**
  * Asks for needed skills that are missing. Skills asked for twice without a load are not named again;
  * `requested` moves them to unavailable. Restores run in config order. The request names as many skills as fit
  * into RESTORE_LIMIT characters, grouped by audience; the rest stay as they are (the table of /souffleur lists them) and are asked for
  * on a later prompt. Skills of a project file are asked for only when its root is trusted; skills excluded in this root never.
  */
-function restore(config: Config, s: Session, now: number, trusted: boolean, root?: string): { ledger: Ledger; text?: string } {
+function restore(config: Config, s: Session, now: number, trusted: boolean, root?: string, scope: { only?: ReadonlySet<SkillName>; skip?: ReadonlySet<SkillName> } = {}): { ledger: Ledger; text?: string; asked: SkillName[] } {
   const missing = neededSkills(config, s.needs, s.ruleSkills, root).filter((name) => {
+    if (scope.only && !scope.only.has(name)) return false
+    if (scope.skip?.has(name)) return false
     if (!trusted && config.skills[name]?.from === 'project') return false
     const st = s.ledger[name]?.state
     return st === 'absent' || st === 'stale' || st === 'restoring'
   })
   const wanted = missing.filter((name) => s.ledger[name]!.requests < MAX_REQUESTS)
   const giveUp = missing.filter((name) => s.ledger[name]!.requests >= MAX_REQUESTS)
-  const why = wanted.some((name) => s.ledger[name]!.state !== 'absent') ? 'Compaction cut or dropped their text. The note that skills invoked earlier must not be run again does not apply to them: invoke them again.' : ''
+  const why = wanted.some((name) => { const e = s.ledger[name]!; return e.state === 'stale' || (e.state === 'restoring' && e.lastCompactAt !== undefined) }) ? 'Compaction cut or dropped their text. The note that skills invoked earlier must not be run again does not apply to them: invoke them again.' : ''
   const chat = Object.entries(config.skills)
     .filter(([name, rule]) => rule.always === true && audienceOf(config, name) === 'chat' && s.ledger[name]?.state !== 'not installed here' && (trusted || rule.from !== 'project') && !excludedIn(rule, root))
     .map(([name]) => name)
@@ -264,8 +289,8 @@ function restore(config: Config, s: Session, now: number, trusted: boolean, root
     ask.push(name)
   }
   const ledger = requested(s.ledger, [...ask, ...giveUp], now)
-  if (ask.length === 0) return { ledger }
-  return { ledger, text: restoreText(config, ask, chat, why) }
+  if (ask.length === 0) return { ledger, asked: [] }
+  return { ledger, text: restoreText(config, ask, chat, why), asked: ask }
 }
 
 /** User prompts in a row that the classifier ran on without matching a need before the need ends. */
@@ -283,18 +308,28 @@ function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'pro
   if (!s.paused) {
     for (const name of e.matched) {
       if (name in needs) {
-        if (needs[name]!.misses) needs[name] = { ...needs[name]!, misses: 0 }
+        const { dormant: _d, evidence: _e, ...rest } = needs[name]!
+        needs[name] = { ...rest, ...(rest.misses ? { misses: 0 } : {}) }
         continue
       }
       const reason = `need:${name} from "${e.text.slice(0, 40)}"`
       needs[name] = { since: e.now, reason }
       debug.push({ kind: 'debug', text: `need started: ${reason}` })
     }
+    // A's deliverable is a fresh signal for the readers/users needs it belongs to: it wakes them, ends their evidence-only mode and gives their skills two requests again.
+    const fresh = e.deliverable === undefined ? [] : Object.keys(needs).filter((name) => ownDeliverable(config, name) === e.deliverable && (trusted || !(config.projectNeeds ?? []).includes(name)))
+    for (const name of fresh) {
+      const { dormant: _d, evidence: _e, ...rest } = needs[name]!
+      needs[name] = rest
+    }
+    ledger = resetSkills(config, ledger, fresh)
     // Only a prompt the classifier ran on without failing counts as a miss; a need set with the command never ends by itself.
     // A reply of a word or two ("ja") says nothing about the topic: it does not count as a miss. A match on it still resets the count (see the matched branch above).
     if (e.classifierFailed === false && e.text.trim().split(/\s+/).length > SHORT_PROMPT_WORDS) {
       for (const [name, n] of Object.entries(needs)) {
-        if (e.matched.includes(name) || n.reason === 'command') continue
+        // A readers/users need is hit by its own deliverable only; A answering anything else is a miss.
+        if (e.matched.includes(name) || n.reason === 'command' || (e.deliverable !== undefined && ownDeliverable(config, name) === e.deliverable)) continue
+        if (e.workFailed && config.needs[name]?.for === 'work') continue
         const misses = (n.misses ?? 0) + 1
         if (misses >= NEED_MISSES) {
           delete needs[name]
@@ -310,7 +345,9 @@ function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'pro
     ledger = Object.fromEntries(Object.entries(ledger).map(([name, row]) => [name, row.state === 'restoring' && !still.includes(name) ? { ...row, state: 'absent' as const, requests: 0, reason: '' } : row]))
   }
   const next: Session = track({ ...s, ledger, needs, compactedSincePrompt: false }, 'classifyFails', 'classifier: ', e.classifierFailed, 'the small model failed or timed out 3 prompts in a row, so needs are not detected')
-  const r = s.paused ? undefined : restore(config, next, e.now, trusted, e.root)
+  // Needs that evidence started stay quiet on a prompt that is not their deliverable (a chat reply, a failed classification).
+  const quiet = new Set(Object.entries(config.skills).filter(([, rule]) => rule.need !== undefined && needs[rule.need]?.evidence === true).map(([name]) => name))
+  const r = s.paused ? undefined : restore(config, next, e.now, trusted, e.root, { skip: quiet })
   if (r) next.ledger = r.ledger
   // One block, at most CONTEXT_LIMIT characters. What does not fit waits: it stays in the session and /souffleur lists it.
   const lines: string[] = []
@@ -323,6 +360,18 @@ function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'pro
     return true
   }
   if (r?.text !== undefined) add(r.text)
+  if ((next.classifyFails ?? 0) >= FAIL_LIMIT && !s.paused) {
+    const listed = Object.entries(config.needs)
+      .filter(([name, n]) => n.for === 'work' && !(name in next.needs) && (trusted || !(config.projectNeeds ?? []).includes(name)))
+      .map(([name, n]) => {
+        const skills = Object.entries(config.skills)
+          .filter(([skill, rule]) => rule.need === name && next.ledger[skill]?.state !== 'not installed here' && next.ledger[skill]?.state !== 'loaded' && !excludedIn(rule, e.root) && (trusted || rule.from !== 'project'))
+          .map(([skill]) => skill)
+        return skills.length ? `${name} (${n.what}): ${skills.join(', ')}` : ''
+      })
+      .filter(Boolean)
+    if (listed.length) add(`Souffleur cannot classify prompts right now. If this prompt starts one of these, invoke its skills first: ${listed.join('; ')}`)
+  }
   const notes = contextNotes(config, next, e.root).kept
   if (notes.length && add(`Souffleur notes from the user's config:\n${notes.map((n) => `- ${n.text}`).join('\n')}`)) {
     const ids = notes.map((n) => n.id)
@@ -338,6 +387,53 @@ function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'pro
   return { session: next, actions: [...(lines.length ? [{ kind: 'context' as const, text: lines.join('\n') }] : []), ...debug] }
 }
 
+/** Bash commands that end in a text other people read, as a whole-word prefix of a command part. */
+const TEXT_COMMANDS = ['gh issue create', 'gh issue comment', 'gh pr create', 'gh pr edit']
+const RUNNERS = /^(?:(?:env|sudo|time|command)\s+|[A-Za-z_]\w*=\S*\s+)+/
+
+/** The first of the chained parts of a command that is a text command, with assignments and `env`/`sudo`/`time`/`command` removed; quotes are not parsed, so a quoted `&& gh pr create` counts too. */
+function textCommand(command: string | undefined): string | undefined {
+  for (const part of (command ?? '').split(/&&|\|\||[;|\n]/)) {
+    const bare = part.trim().replace(RUNNERS, '')
+    if (TEXT_COMMANDS.some((c) => bare === c || bare.startsWith(`${c} `))) return bare
+  }
+  return undefined
+}
+
+/**
+ * A call that shows what the agent delivers starts or wakes the `readers`/`users` needs it belongs to, without a model call:
+ * a tool call matching a gate of one of the need's skills, and for `readers` a text command. Skills excluded in this root and
+ * skills of an untrusted project do not count, and a need only the project file defines starts only in a trusted root.
+ * Returns the needs that started or woke, so the caller asks for their skills.
+ */
+function startFromEvidence(config: Config, next: Session, e: Extract<CoreEvent, { type: 'tool' }>, trustedRoot: boolean): NeedName[] {
+  const usable = (skill: string): boolean => {
+    const rule = config.skills[skill]
+    return rule !== undefined && next.ledger[skill]?.state !== 'not installed here' && !excludedIn(rule, e.root) && (trustedRoot || rule.from !== 'project')
+  }
+  const head = textCommand(e.command)
+  const started: NeedName[] = []
+  for (const [name, need] of Object.entries(config.needs)) {
+    if (need.for !== 'readers' && need.for !== 'users') continue
+    if (!trustedRoot && (config.projectNeeds ?? []).includes(name)) continue
+    const own = Object.entries(config.skills).filter(([skill, rule]) => rule.need === name && usable(skill))
+    const byGate = own.some(([, rule]) => rule.gate !== undefined && !(e.tool === 'Skill') && matches(rule.gate, e.tool, e.path, e.tree ?? e.root))
+    const byCommand = need.for === 'readers' && e.tool === 'Bash' && head !== undefined && own.length > 0
+    if (!byGate && !byCommand) continue
+    const had = next.needs[name]
+    if (had !== undefined) {
+      const { dormant, ...rest } = had
+      next.needs[name] = { ...rest, ...(dormant === true ? { evidence: true } : {}), ...(rest.misses ? { misses: 0 } : {}) }
+      if (dormant === true) started.push(name)
+    } else {
+      const what = e.path ?? (head ?? e.command ?? '').split(/\s+/).slice(0, 3).join(' ').slice(0, 40)
+      next.needs[name] = { since: e.now, reason: `tool: ${e.tool} ${what}`.trimEnd(), evidence: true }
+      started.push(name)
+    }
+  }
+  return started
+}
+
 function evidenceMatches(ev: { tool: string; command?: string }, e: Extract<CoreEvent, { type: 'tool' }>): boolean {
   if (ev.tool !== e.tool) return false
   return ev.command === undefined || matchesCommand(ev.command, e.command ?? '')
@@ -345,7 +441,7 @@ function evidenceMatches(ev: { tool: string; command?: string }, e: Extract<Core
 
 function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool' }>): Result {
   if (e.agentId !== undefined) return { session: s, actions: [] }
-  const next: Session = { ...s }
+  const next: Session = { ...s, needs: { ...s.needs } }
   const actions: Action[] = []
 
   if (e.tool === 'Skill' && e.skill !== undefined && e.skill in s.ledger) next.mainSkillCalls = [...s.mainSkillCalls, e.skill]
@@ -353,9 +449,25 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
   if (e.tool === 'Skill' && e.skill !== undefined) next.learnCalls = [...(s.learnCalls ?? []), e.skill].slice(-KEEP)
 
   const trustedRoot = isTrustedRoot(config, e.root)
+  const started = next.paused ? [] : startFromEvidence(config, next, e, trustedRoot)
+  // A call that starts or wakes a need asks for that need's skills only: in enforce the call is denied once (the retry finds the need active), in observe the request follows it.
+  const evidenceAsked = new Set<SkillName>()
+  const evidenceText: string[] = []
+  if (started.length) {
+    const own = new Set(Object.entries(config.skills).filter(([, rule]) => rule.need !== undefined && started.includes(rule.need)).map(([name]) => name))
+    next.ledger = resetSkills(config, next.ledger, started)
+    const r = restore(config, next, e.now, trustedRoot, e.root, { only: own })
+    next.ledger = r.ledger
+    r.asked.forEach((n) => evidenceAsked.add(n))
+    if (r.text !== undefined) {
+      // Observe records the first evidence call as one enforce would have denied, and the request follows the call.
+      evidenceText.push(r.text)
+      if (config.mode !== 'enforce') actions.push({ kind: 'toolContext', text: r.text })
+    }
+  }
   if (s.compactedSincePrompt && !s.paused) {
     next.compactedSincePrompt = false
-    const r = restore(config, next, e.now, trustedRoot, e.root)
+    const r = restore(config, next, e.now, trustedRoot, e.root, { skip: evidenceAsked })
     next.ledger = r.ledger
     if (r.text !== undefined) actions.push({ kind: 'toolContext', text: r.text })
   }
@@ -371,7 +483,7 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
   if (!next.paused) {
     if (e.tool === 'Agent') {
       // A need only the project file defines counts for a trusted root alone, like its skills.
-      const active = Object.keys(next.needs).filter((n) => trustedRoot || !(config.projectNeeds ?? []).includes(n))
+      const active = Object.keys(next.needs).filter((n) => !next.needs[n]!.dormant).filter((n) => trustedRoot || !(config.projectNeeds ?? []).includes(n))
       if (active.length === 0 || BRIEF_SKILLS.test(e.brief ?? '')) next.agentDenied = false
       else if (next.agentDenied) next.agentDenied = false
       else {
@@ -383,9 +495,10 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
       }
     }
 
+    for (const text of evidenceText) found.push({ text: `${text} ${PAUSE_HINT}`, trusted: true })
     const needed = neededSkills(config, next.needs, next.ruleSkills, e.root)
     for (const [name, rule] of Object.entries(config.skills)) {
-      if (!rule.gate || next.ledger[name]?.state === 'not installed here' || excludedIn(rule, e.root) || (e.tool === 'Skill' && e.skill === name) || !matches(rule.gate, e.tool, e.path, e.tree ?? e.root)) continue
+      if (!rule.gate || next.ledger[name]?.state === 'not installed here' || excludedIn(rule, e.root) || evidenceAsked.has(name) || (e.tool === 'Skill' && e.skill === name) || !matches(rule.gate, e.tool, e.path, e.tree ?? e.root)) continue
       const trusted = rule.from === 'user' || trustedRoot
       const state = next.ledger[name]?.state
       if (needed.includes(name) && state !== undefined && state !== 'loaded' && state !== 'unavailable') {

@@ -6,7 +6,7 @@ import type { HookOverlap, Passage } from '../core/migrate.ts'
 import { CHOICE_LABEL, INJECTED_HELP, NOT_SET_UP, SETUP_INTRO, applyChoice, candidates, choiceOf, cleanNeedText, configProblem, currentChoice, describePlan, explicitOnly, injectedWarning, needKeyFor, options, parsePicks, parseSkips, picksPrompt, setupSteps } from '../core/setup.ts'
 import type { LoadChoice, NeedText, Plan, StartHooks, Suggestion } from '../core/setup.ts'
 import type { Action, CoreEvent, Session } from '../core/decide.ts'
-import { audienceOf, classifyPromptChecked, needTexts } from '../core/needs.ts'
+import { audienceOf, classifyDeliverable, needTexts } from '../core/needs.ts'
 import { EXTRACT_SYSTEM, MAX_SKILL_TEXT, extractPrompt, hashKey, parseAnswer, shouldRead, skillHash, trusted } from '../core/learn.ts'
 import type { Proposal } from '../core/proposals.ts'
 import { NO, YES_EVERYWHERE, YES_PROJECT, addEntry, answer, describeProposal, enqueue, findProposal, makeProposal, nextQuestion, parseReply, parseShaped, proposalLines, proposalNotice, shapePrompt } from '../core/proposals.ts'
@@ -1303,7 +1303,7 @@ export const register: Register = (on) => {
       // The skill listing runs beside the classification and gives up after its own short budget.
       const listing = fromUser ? safe($, 'installed', undefined, () => refreshInstalled($)) : undefined
       const verdict = classify
-        ? await classifyPromptChecked(
+        ? await classifyDeliverable(
             e.text,
             needs,
             async (text, labels) => (await $.model.classify(text, labels)) ?? '',
@@ -1311,7 +1311,15 @@ export const register: Register = (on) => {
           )
         : undefined
       await listing
-      const { actions } = await apply($, (l2) => ({ type: 'prompt', now: now(), text: e.text, fromUser, matched: verdict?.matched ?? [], root: l2.root, ...(verdict === undefined ? {} : { classifierFailed: verdict.failed }) }))
+      const { actions } = await apply($, (l2) => ({ type: 'prompt', now: now(), text: e.text, fromUser, matched: verdict?.matched ?? [], root: l2.root, ...(verdict === undefined ? {} : { classifierFailed: verdict.failed }), ...(verdict?.kind === undefined ? {} : { deliverable: verdict.kind }), ...(verdict?.bFailure === undefined ? {} : { workFailed: true }) }))
+      const classifierLine = verdict?.failure !== undefined ? `classifier: ${verdict.failure}` : verdict?.bFailure !== undefined ? `classifier B: ${verdict.bFailure}` : undefined
+      if (classifierLine !== undefined) {
+        try {
+          $.ui.log(classifierLine, { to: 'debug' })
+        } catch {
+          // a debug line is a courtesy
+        }
+      }
       for (const a of actions) {
         if (a.kind !== 'debug') continue
         try {
