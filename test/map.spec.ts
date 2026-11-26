@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { isFromUser, toolFields } from '../src/mod/map.ts'
+import { isFromUser, presentArgs, toolFields } from '../src/mod/map.ts'
 
 const input = (extra: Record<string, unknown> = {}) => ({ text: 'hello', origin: { kind: 'composer' }, ...extra })
 
@@ -24,4 +24,13 @@ test('toolFields reads the flat string arguments and ignores other types', () =>
 
 test('isFromUser treats a prompt without origin as typed (the test kit sets none)', () => {
   assert.equal(isFromUser({ text: 'hello' } as never), true)
+})
+
+test('presentArgs drops reserved metadata', () => {
+  const e = { tool: 'Agent', tool_use_id: 't1', agentId: 'a1', agent: 'x', requestMeta: {}, model: 'haiku', description: '' }
+  assert.deepEqual(presentArgs(e), ['model'])
+})
+
+test('presentArgs keeps real arguments', () => {
+  assert.deepEqual(presentArgs({ tool: 'Write', file_path: '/a', content: undefined, command: null, prompt: 'x' }), ['file_path', 'prompt'])
 })

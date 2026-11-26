@@ -15,7 +15,7 @@ import { statusLine } from '../core/status.ts'
 import type { Config, Note, Rule } from '../core/types.ts'
 import { notices, startNotice } from '../core/notices.ts'
 import { PLUGIN_VERSION } from './version.ts'
-import { isFromUser, isUserOrigin, toolFields } from './map.ts'
+import { isFromUser, isUserOrigin, presentArgs, toolFields } from './map.ts'
 
 // The hooks' `$` is the engine interface; the adapter calls only documented members.
 type Dollar = any
@@ -1235,7 +1235,7 @@ export const register: Register = (on) => {
         now: now(),
         tool: e.tool,
         ...fields,
-        present: Object.entries(e).filter(([, v]) => v !== undefined && v !== null && v !== '').map(([k]) => k),
+        present: presentArgs(e),
         ...(e.agentId === undefined ? {} : { agentId: e.agentId }),
         root: l.root,
         tree: l.tree,
