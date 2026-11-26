@@ -26,7 +26,7 @@ const REF = { plugin: 'skill-souffleur', key: 'session' } as const
 const RULE =
   'Souffleur keeps track of skills in this session. If a message from Souffleur asks you to load skills, invoke each one with the Skill tool before you continue.'
 const PROPOSE_SENTENCE =
-  ' When something went wrong that a rule would have caught, or the user asks you to remember a rule, call the souffleur_propose tool. Souffleur then asks the user; do not write the rule anywhere yourself.'
+  ' Call the souffleur_propose tool only (a) when the user gives a standing instruction meant to hold beyond the current task, as a note, or (b) when something went wrong that a checkable rule would have caught (a skill loaded before a call, a field a call carries, evidence after a call), as a rule. Never for facts about one task, issue or file. Souffleur then asks the user; do not write the entry anywhere yourself.'
 const PROPOSE_TOOL = 'mcp__skill-souffleur__souffleur_propose'
 const DECLINED_KEY = 'souffleur:declined'
 
@@ -55,6 +55,9 @@ let personTurn = false
 const ASK_WAIT_MS = 120_000
 /** The proposals a notice showed (kept after the offer ended), so each proposal gets one notice. */
 const noticed = new Set<string>()
+
+/** Set by `session.start` from the session it restored: a reload or resume keeps a dismissed dialog dismissed. */
+let restoredAskStopped = false
 
 const now = () => Date.now()
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err))
@@ -743,7 +746,7 @@ const PROPOSE_SCHEMA = {
 const REGISTER_PROPOSE = {
   name: 'souffleur_propose',
   description:
-    'Propose a rule or a note for Souffleur to keep. Call it when something went wrong that a rule would have caught (a denial, a correction by the user), or when the user asks you to remember a rule or standing instruction. A rule has a trace Souffleur can check: a skill loaded before a call, a field a call carries, or evidence that follows a call. Anything else is a note. Souffleur asks the user before anything is kept; never write the entry into a file yourself.',
+    'Propose a note or a rule for Souffleur to keep. Call it only for a standing instruction of the user that holds beyond the current task (a note), or when something went wrong that a checkable rule would have caught: a skill loaded before a call, a field a call carries, or evidence that follows a call (a rule). Never for facts about one task, issue or file. Souffleur asks the user before anything is kept; never write the entry into a file yourself.',
   inputSchema: PROPOSE_SCHEMA,
 }
 
@@ -798,6 +801,19 @@ function update($: Dollar, change: (l: Loaded, s: Session) => Session): Promise<
   })
 }
 
+/** The person declined or skipped a proposal, or a dialog was dismissed: kept in the session, so a reload does not forget it. */
+async function markStopped($: Dollar, flags: { proposals?: boolean; ask?: boolean }): Promise<void> {
+  if (flags.ask) askStopped = true
+  await update($, (_l, s) => ({ ...s, ...(flags.proposals ? { proposalsStopped: true } : {}), ...(flags.ask ? { askStopped: true } : {}) }))
+}
+
+/** A prompt of the person ends the offer a notice made; without an answer the proposal counts as skipped. */
+async function endOffer($: Dollar): Promise<void> {
+  if (shownHash === undefined) return
+  shownHash = undefined
+  await markStopped($, { proposals: true })
+}
+
 /** Applies the user's answer to one waiting proposal: writes after a yes, remembers a no, keeps the proposal when the write fails. */
 function commitAnswer($: Dollar, hash: string, label: string): Promise<string> {
   return serial(() => commitAnswerNow($, hash, label))
@@ -831,7 +847,7 @@ async function commitAnswerNow($: Dollar, hash: string, label: string): Promise<
     }
     return `Souffleur: ${w.text}.`
   }
-  await persist($, l, r.session)
+  await persist($, l, label === NO ? { ...r.session, proposalsStopped: true } : r.session)
   await markVersionDone($, session, r.session, hash)
   if (label === NO) {
     try {
@@ -874,14 +890,18 @@ async function askFirst($: Dollar, atTurnEnd = false): Promise<string | undefine
       noticeFirst($, l, session)
     } else if (atTurnEnd) {
       // Nobody can answer a dialog here: show the proposal once and let a one-word reply answer it.
-      askStopped = true
       noDialog = true
+      await markStopped($, { proposals: true, ask: true })
       noticeFirst($, l, session)
-    } else askAtTurnEnd = true
+    } else {
+      askAtTurnEnd = true
+      await markStopped($, { proposals: true })
+    }
     return undefined
   }
   if (typeof label !== 'string' || label.trim() === '') {
-    if (atTurnEnd) askStopped = true
+    // A dismissed dialog is a skip: nothing more is asked at turn end, and the model proposes no more.
+    await markStopped($, { proposals: true, ...(atTurnEnd ? { ask: true } : {}) })
     return undefined
   }
   return commitAnswer($, q.hash, label)
@@ -918,6 +938,7 @@ async function answerShown($: Dollar, text: string): Promise<string | undefined>
   const hash = shownHash
   shownHash = undefined
   const verdict = parseReply(text)
+  if (hash !== undefined && verdict === undefined) await markStopped($, { proposals: true })
   if (hash === undefined || verdict === undefined) return undefined
   const { l, session } = await current($)
   const p = session.paused ? undefined : session.proposals.find((x) => x.hash === hash)
@@ -1080,6 +1101,8 @@ const PROPOSE_REPLY: Record<string, string> = {
 
 async function runPropose($: Dollar, input: Record<string, unknown>): Promise<string> {
   if (input.agentId !== undefined) return 'Only the main session proposes rules and notes. Tell the main session what went wrong instead.'
+  if (input.kind === 'note' && input.source === 'slip') return 'Souffleur: a note comes only from a standing instruction of the user; nothing queued.'
+  if ((await current($)).session.proposalsStopped === true) return 'Souffleur: the user declined or skipped a proposal in this session; do not propose more. Nothing queued.'
   const raw: Record<string, unknown> = {}
   for (const key of PROPOSE_FIELDS) if (input[key] !== undefined) raw[key] = input[key]
   const r = await propose($, raw, input.source === 'slip' ? 'slip' : 'user')
@@ -1231,11 +1254,13 @@ export const register: Register = (on) => {
       const stored = held?.id === id ? undefined : await $.store.get(`session:${id}`)
       const before = held?.id === id ? held : isSession(stored, id) ? stored : undefined
       let s: Session
+      restoredAskStopped = false
       if (before) {
         // Resume or reload: the ledger stays, what the config said last time does not.
         s = decide(l.config, { ...before, errors: [] }, { type: 'start', now: now(), start: held?.id === id ? 'reload' : 'resume', version }).session
         s = decide(l.config, s, { type: 'config', now: now(), errors: l.errors }).session
       } else s = await freshSession($, l, id, 'startup')
+      restoredAskStopped = s.askStopped === true
       // Problems that hold at the start are news once; a resumed session's stored `noticed` keeps them from repeating.
       const first = notices(l.config, s, s, l.root)
       s = first.session
@@ -1252,7 +1277,7 @@ export const register: Register = (on) => {
     lastPromptKind = undefined
     lastPromptCommand = false
     personTurn = false
-    askStopped = false
+    askStopped = restoredAskStopped
     shownHash = undefined
     noticed.clear()
     timedOutAsk.clear()
@@ -1299,8 +1324,8 @@ export const register: Register = (on) => {
     lastPromptCommand = e.command !== undefined
     if (fromUser) await safe($, 'tool.reconnect', undefined, () => reconnectTool($))
     // Only a prompt of the person (composer or bridge, no command) answers; any prompt of the person ends the offer.
-    if (e.command !== undefined && isUserOrigin(e)) shownHash = undefined
-    const answered = !fromUser ? undefined : e.origin?.kind === 'composer' || e.origin?.kind === 'bridge' ? await safe($, 'prompt.reply', undefined as string | undefined, () => answerShown($, e.text)) : void (shownHash = undefined)
+    if (e.command !== undefined && isUserOrigin(e)) await safe($, 'prompt.offer', undefined, () => endOffer($))
+    const answered = !fromUser ? undefined : e.origin?.kind === 'composer' || e.origin?.kind === 'bridge' ? await safe($, 'prompt.reply', undefined as string | undefined, () => answerShown($, e.text)) : await safe($, 'prompt.offer', undefined, () => endOffer($))
     const texts = await safe($, 'prompt.submit', [] as string[], async () => {
       const { l, session } = await current($)
       const { config } = l

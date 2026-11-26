@@ -1156,6 +1156,8 @@ test('no declines it for good: the hash is stored and the proposal is not queued
   await propose($, AGENT_RULE)
   await turnEnd($)
   expect(w.writes.length).toBe(0)
+  w.setId('s2')
+  await start($)
   const again = await propose($, AGENT_RULE)
   expect(String(again.result)).toMatch(/declined this before/)
   expect(await run($, 'review')).toMatch(/no proposals/)
@@ -1413,12 +1415,12 @@ test('a subagent may not propose, and the model gets five proposals per session'
   expect(String((await propose($, note('One too many.'))).result)).toMatch(/five proposals/)
 })
 
-test('the reply points to review once a dialog was dismissed', async ($, on) => {
+test('the reply points to review once a dialog was dismissed, and a later proposal is refused', async ($, on) => {
   world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
   await start($)
   await propose($, note('First note here.'))
   await turnEnd($)
-  expect(String((await propose($, note('Second note here.'))).result)).toMatch(/notice/)
+  expect(String((await propose($, note('Second note here.'))).result)).toMatch(/do not propose more/)
 })
 
 test('a dialog that fails under /souffleur rule does not stop the turn-end questions', async ($, on) => {
@@ -2157,6 +2159,8 @@ test('reply decline declines the shown proposal for good', async ($, on) => {
   await reply($, 'decline', { kind: 'bridge' })
   expect(w.writes.length).toBe(0)
   expect(hasLine(w, `Souffleur: the user declined proposal ${id}; nothing else to do for it.`)).toBe(true)
+  w.setId('s2')
+  await start($)
   expect(String((await propose($, note('Reply in German.'))).result)).toMatch(/declined this before/)
 })
 
@@ -2260,9 +2264,9 @@ test('a proposal queued after the first notice gets its own notice, and a reply 
   const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
   await start($)
   await propose($, note('First note here.'))
+  const b = idOf(await propose($, note('Second note here.')))
   await turnEnd($)
   await reply($, 'hello', COMPOSER)
-  const b = idOf(await propose($, note('Second note here.')))
   await turnEnd($)
   await turnEnd($)
   expect(w.asked.length).toBe(1)
@@ -2375,10 +2379,10 @@ test('a reload while an offer is armed disarms it: accept does not act and the n
   await start($)
   await reply($, 'accept', COMPOSER)
   expect(w.writes.length).toBe(0)
+  // The dismissed dialog survives the reload (#59): no new notice, the proposal stays queued for review.
   await turnEnd($)
-  expect(w.logs.filter((l) => l.includes('Reply "accept"')).length).toBe(2)
-  await reply($, 'accept', COMPOSER)
-  expect(userFile(w).notes.length).toBe(1)
+  expect(w.logs.filter((l) => l.includes('Reply "accept"')).length).toBe(1)
+  expect(await run($, 'review')).toMatch(/Reply in German/)
 })
 
 test('a prompt handled as a reply is not classified', async ($, on) => {
@@ -2624,4 +2628,120 @@ test('a turn that is not the answer to a person prompt is not counted and keeps 
   await $.prompt.submit({ text: '<task-notification>again</task-notification>', isMeta: true } as never)
   await turnEnd($, { answer: LONG_REPLY })
   expect(await table($)).toMatch(/1 of 1 replies over the limit/)
+})
+
+// ---- proposal scope and stop (#59) ----
+const PROPOSE_SENTENCE =
+  ' Call the souffleur_propose tool only (a) when the user gives a standing instruction meant to hold beyond the current task, as a note, or (b) when something went wrong that a checkable rule would have caught (a skill loaded before a call, a field a call carries, evidence after a call), as a rule. Never for facts about one task, issue or file. Souffleur then asks the user; do not write the entry anywhere yourself.'
+const STOPPED = 'Souffleur: the user declined or skipped a proposal in this session; do not propose more. Nothing queued.'
+const SLIP_NOTE = 'Souffleur: a note comes only from a standing instruction of the user; nothing queued.'
+
+test('the system prompt carries the exact propose sentence and the tool description the same scope', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE })
+  on('prompt.compose', () => ({ sections: [] }))
+  await start($)
+  const section = (await $.prompt.compose(COMPOSE)).sections.find((s: { id: string }) => s.id === 'souffleur')
+  expect(section?.text).toContain(PROPOSE_SENTENCE)
+  expect(JSON.stringify(w.tools)).toMatch(/standing instruction/)
+  expect(JSON.stringify(w.tools)).toMatch(/never for facts about one task/i)
+})
+
+test('a note from a slip is refused, a checkable rule from a slip is queued', async ($, on) => {
+  world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  expect(String((await propose($, { kind: 'note', text: 'Issue 5 needs a retry.', source: 'slip' })).result)).toBe(SLIP_NOTE)
+  expect(await run($, 'review')).toMatch(/no proposals/)
+  expect(String((await propose($, { ...AGENT_RULE, source: 'slip' })).result)).toMatch(/Queued as rule-/)
+  expect(String((await propose($, { kind: 'note', text: 'Answer in German.', source: 'user' })).result)).toMatch(/Queued as note-/)
+})
+
+test('skipping the dialog stops further model proposals, which are not queued', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: ['__undefined__'] })
+  await start($)
+  await propose($, AGENT_RULE)
+  await turnEnd($)
+  expect(w.asked.length).toBe(1)
+  expect(String((await propose($, note('Answer in German.'))).result)).toBe(STOPPED)
+  expect(await table($)).toMatch(/Open proposals \(1\)/)
+})
+
+test('declining by dialog stops proposals', async ($, on) => {
+  world(on, { [USER_FILE]: ENFORCE }, { answers: ['No'] })
+  await start($)
+  await propose($, AGENT_RULE)
+  await turnEnd($)
+  expect(String((await propose($, note('Answer in German.'))).result)).toBe(STOPPED)
+})
+
+test('declining by reply word stops proposals', async ($, on) => {
+  await armed($, on)
+  await reply($, 'decline', COMPOSER)
+  expect(String((await propose($, note('Answer in German, always.'))).result)).toBe(STOPPED)
+})
+
+test('declining by command stops proposals', async ($, on) => {
+  world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  const id = idOf(await propose($, note('Reply in German.')))
+  await run($, `decline ${id}`)
+  expect(String((await propose($, note('Answer in French, always.'))).result)).toBe(STOPPED)
+})
+
+test('a reload keeps the stop and the dismissed dialog', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: ['__undefined__', 'No'] })
+  await start($)
+  await propose($, AGENT_RULE)
+  await turnEnd($)
+  expect(w.asked.length).toBe(1)
+  await start($)
+  await turnEnd($)
+  expect(w.asked.length).toBe(1)
+  expect(String((await propose($, note('Answer in German.'))).result)).toBe(STOPPED)
+})
+
+test('a new session starts without the stop', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: ['__undefined__'] })
+  await start($)
+  await propose($, AGENT_RULE)
+  await turnEnd($)
+  w.setId('s2')
+  await start($)
+  expect(String((await propose($, note('Answer in German.'))).result)).toMatch(/Queued as note-/)
+})
+
+test('a rule the person types still queues after a stop', async ($, on) => {
+  world(on, { [USER_FILE]: ENFORCE }, { answers: ['__undefined__'], shaped: '{"kind":"note","text":"Always answer in German."}' })
+  await start($)
+  await propose($, AGENT_RULE)
+  await turnEnd($)
+  expect(String((await propose($, note('Answer in German.'))).result)).toBe(STOPPED)
+  expect(await run($, 'rule Always answer in German.')).toMatch(/queued note|Souffleur:/)
+  expect(await table($)).toMatch(/Open proposals \(2\)/)
+})
+
+test('already queued proposals stay visible in review after a stop', async ($, on) => {
+  world(on, { [USER_FILE]: ENFORCE }, { answers: ['__undefined__'] })
+  await start($)
+  await propose($, AGENT_RULE)
+  await turnEnd($)
+  expect(await run($, 'review')).toMatch(/Waiting for your answer|no dialog/)
+})
+
+test('a reply offer that a person prompt ends without an answer counts as skipped', async ($, on) => {
+  await armed($, on)
+  await reply($, 'what is the weather', COMPOSER)
+  expect(String((await propose($, note('Answer in German, always.'))).result)).toBe(STOPPED)
+})
+
+test('an accepted reply does not stop proposals', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { holdAsk: true })
+  await start($)
+  await propose($, note('Reply in German.'))
+  const t = turnEnd($)
+  await new Promise((r) => setTimeout(r, 50))
+  await w.clock.advance(120_000)
+  await t
+  await reply($, 'accept', COMPOSER)
+  expect(userFile(w).notes.length).toBe(1)
+  expect(String((await propose($, note('Answer in French, always.'))).result)).toMatch(/Queued as note-/)
 })

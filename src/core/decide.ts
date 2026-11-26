@@ -47,6 +47,10 @@ export type Session = {
   revise: string[]
   /** Hashes of the proposals the model made through the tool: at most five per session. */
   proposed: string[]
+  /** The person declined or skipped a proposal: the model proposes no more in this session (kept over reload and resume). */
+  proposalsStopped?: boolean
+  /** A dialog was dismissed or could not open: no more questions at turn end in this session (kept over reload and resume). */
+  askStopped?: boolean
   /** Counts the stores, so the newer of two copies can be told. */
   rev?: number
   /** Classifier runs that failed in a row, and learn calls that failed in a row. */
