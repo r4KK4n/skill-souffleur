@@ -90,7 +90,7 @@ test('observe mode shows would-have-denied reasons in table', () => {
   }
   const out = renderTable(observe, s, T1)
   assert.equal(out.split('\n')[0], 'Mode: observe. Times in UTC.')
-  assert.match(out, /^Would have denied:\n- 1× gate: ui-checklist needs ui \(09:30–09:30\)$/m)
+  assert.match(out, /^Would have denied:\n- 09:30 gate: ui-checklist needs ui$/m)
 })
 
 test('paused shows in first line', () => {
@@ -172,7 +172,7 @@ test('different reasons stay apart', () => {
   ] }
   const out = renderTable(config, s, T1)
   assert.match(out, /^- 2× gate: a needs ui \(09:50–09:52\)$/m)
-  assert.match(out, /^- 1× gate: b needs ui \(09:51–09:51\)$/m)
+  assert.match(out, /^- 09:51 gate: b needs ui$/m)
 })
 
 test('status says times are UTC', () => {
@@ -190,4 +190,39 @@ test('notes going out next are not listed as waiting', () => {
   const out = renderTable(c, s, T1)
   assert.match(out, /Notes waiting for a later prompt[^:]*: n2$/m)
   assert.doesNotMatch(out, /n1/)
+})
+
+const PAUSE = 'To turn checks off for this session: /souffleur pause.'
+const brief = (needs: string) => `Souffleur: add a line "skills: <names>" (or "skills: none" for mechanical work) to the brief, then retry. Configured skills: writing-guide, ui-checklist. Active needs: ${needs}. ${PAUSE}`
+
+test('production-shaped denials: a group of two prints count, range and the newest full message', () => {
+  const s: Session = { ...fresh(), observed: [
+    { at: Date.UTC(2026, 10, 25, 9, 50), reason: brief('ui') },
+    { at: Date.UTC(2026, 10, 25, 10, 42), reason: brief('ui, prose') },
+  ] }
+  const out = renderTable(config, s, T1)
+  assert.match(out, /^- 2× Souffleur: add a line "skills: <names>" \(or "skills: none" for mechanical work\) to the brief, then retry \(09:50–10:42\)$/m)
+  assert.ok(out.includes(`\n  ${brief('ui, prose')}`))
+  assert.equal(out.split('Active needs: ui,').length - 1, 1)
+})
+
+test('production-shaped denials: a single one prints time and the full message on one line', () => {
+  const s: Session = { ...fresh(), observed: [{ at: Date.UTC(2026, 10, 25, 9, 50), reason: brief('ui') }] }
+  const out = renderTable(config, s, T1)
+  assert.ok(out.includes(`\n- 09:50 ${brief('ui')}`))
+  assert.doesNotMatch(out, /1×/)
+})
+
+test('a multi-violation reason stays apart from a single one and prints all its lines indented', () => {
+  const a = `Souffleur: load ui-checklist with the Skill tool first, then retry. ${PAUSE}`
+  const b = `${a}\nSouffleur: open duty for ui-checklist (Write x.html). Do this first: Bash. Then retry. ${PAUSE}`
+  const s: Session = { ...fresh(), observed: [
+    { at: Date.UTC(2026, 10, 25, 9, 50), reason: a },
+    { at: Date.UTC(2026, 10, 25, 9, 51), reason: b },
+    { at: Date.UTC(2026, 10, 25, 9, 52), reason: b },
+  ] }
+  const out = renderTable(config, s, T1)
+  assert.match(out, /^- 09:50 Souffleur: load ui-checklist/m)
+  assert.match(out, /^- 2× Souffleur: load ui-checklist with the Skill tool first, then retry; Souffleur: open duty for ui-checklist \(Write x\.html\) \(09:51–09:52\)$/m)
+  assert.ok(out.includes(`\n  ${a}\n  Souffleur: open duty`))
 })

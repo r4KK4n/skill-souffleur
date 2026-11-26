@@ -9,8 +9,8 @@ const cell = (text: string) => text.replace(/\\/g, '\\\\').replace(/\|/g, '\\|')
 /** `HH:MM` in UTC. */
 const clock = (ms: number) => new Date(ms).toISOString().slice(11, 16)
 
-/** The reason up to its first sentence end, without the final period. */
-const firstSentence = (reason: string) => (reason.split(/\.(?:\s|$)/)[0] ?? reason).trim()
+/** The first sentence of each line of a reason, without final periods. */
+const heads = (reason: string): string[] => reason.split('\n').map((l) => (l.split(/\.(?:\s|$)/)[0] ?? l).trim())
 
 /** The `/souffleur` reply: mode, the version notice when Claude Code is newer than the verified one, one row per ledger entry, then non-empty sections, then the Claude Code version. */
 export function renderTable(config: Config, s: Session, now: number, root?: string): string {
@@ -30,14 +30,22 @@ export function renderTable(config: Config, s: Session, now: number, root?: stri
   if (duties.length) lines.push('', 'Open duties:', ...duties)
   const needs = Object.entries(s.needs).map(([name, n]) => `- ${name} (since ${clock(n.since)})`)
   if (needs.length) lines.push('', 'Active needs:', ...needs)
-  const groups = new Map<string, { n: number; first: number; last: number; newest: string }>()
+  // Equal first sentences (per line, sorted) form one group, so a call that broke two checks stays apart from one that broke one.
+  const groups = new Map<string, { n: number; first: number; last: number; newest: string; newestAt: number }>()
   for (const o of s.observed) {
-    const head = firstSentence(o.reason)
-    const g = groups.get(head)
-    if (g) Object.assign(g, { n: g.n + 1, first: Math.min(g.first, o.at), last: Math.max(g.last, o.at), newest: o.at >= g.last ? o.reason : g.newest })
-    else groups.set(head, { n: 1, first: o.at, last: o.at, newest: o.reason })
+    const key = heads(o.reason).sort().join('\n')
+    const g = groups.get(key)
+    if (!g) groups.set(key, { n: 1, first: o.at, last: o.at, newest: o.reason, newestAt: o.at })
+    else Object.assign(g, { n: g.n + 1, first: Math.min(g.first, o.at), last: Math.max(g.last, o.at), ...(o.at >= g.newestAt ? { newest: o.reason, newestAt: o.at } : {}) })
   }
-  const denied = [...groups].flatMap(([head, g]) => [`- ${g.n}× ${head} (${clock(g.first)}–${clock(g.last)})`, ...(g.newest === head ? [] : [`  ${g.newest}`])])
+  const indent = (text: string) => text.split('\n').map((l) => `  ${l}`)
+  const denied = [...groups.values()].flatMap((g) => {
+    if (g.n === 1) {
+      const [first = '', ...rest] = g.newest.split('\n')
+      return [`- ${clock(g.first)} ${first}`, ...rest.map((l) => `  ${l}`)]
+    }
+    return [`- ${g.n}× ${heads(g.newest).join('; ')} (${clock(g.first)}–${clock(g.last)})`, ...indent(g.newest)]
+  })
   if (denied.length) lines.push('', 'Would have denied:', ...denied)
   if (s.proposals.length) lines.push('', `Open proposals (${s.proposals.length}), /souffleur review asks about them:`, ...s.proposals.map((p) => `- ${p.entry.id}`))
   const leftOut = sectionNotes(config, root).leftOut

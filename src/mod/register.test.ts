@@ -32,6 +32,8 @@ type World = {
   classifyCalls: () => number
   /** The lines written with `$.ui.log` (transcript). */
   logs: string[]
+  /** The lines written with `$.ui.log(..., { to: 'debug' })`. */
+  debugLogs: string[]
   /** From now on `$.tool.list` does not show the propose tool, as after a disconnect. */
   dropTool: () => void
 }
@@ -120,6 +122,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   })
   let toolGone = false
   const logs: string[] = []
+  const debugLogs: string[] = []
   on('tool.list', () => {
     if (opts.listMode === 'throws') throw new Error('list failed')
     if (opts.listMode === 'junk') return { value: 'nope' } as never
@@ -129,6 +132,10 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   })
   on('ui.log', (_, e) => {
     if (opts.failLog) throw new Error('no transcript here')
+    if ((e as { to?: string }).to === 'debug') {
+      debugLogs.push(e.text)
+      return { value: undefined } as never
+    }
     logs.push(e.text)
     return { value: undefined } as never
   })
@@ -208,7 +215,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   on('turn.complete', (_, e) => ({ text: e.answer }))
   on('session.compact', () => (opts.skipCompact ? { skip: 'vetoed' } : { messages: [{ role: 'user', text: 'summary', toolUses: [] }] }))
   on('command.run', () => ({}))
-  return { statuses, setId: (next) => { id = next }, seen, writes, asked, options, clock, hide: (path) => void hidden.add(path), files, tools, toasts, failRead, answers, driftAfter: (path, n) => { drift.path = path; drift.left = n }, stored: storeData, classifyCalls: () => classifyCalls, logs, dropTool: () => { toolGone = true } }
+  return { statuses, setId: (next) => { id = next }, seen, writes, asked, options, clock, hide: (path) => void hidden.add(path), files, tools, toasts, failRead, answers, driftAfter: (path, n) => { drift.path = path; drift.left = n }, stored: storeData, classifyCalls: () => classifyCalls, logs, debugLogs, dropTool: () => { toolGone = true } }
 }
 
 const COMPOSE = { model: 'm', promptModel: 'm', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] } as never
@@ -2307,4 +2314,13 @@ test('a reply whose entry the reader drops tells the model it is not active', as
   await reply($, 'accept', COMPOSER)
   expect(hasLine(w, `proposal ${id}, but the reader did not keep the entry; it is not active`)).toBe(true)
   expect(hasLine(w, 'nothing else to do')).toBe(false)
+})
+
+test('a prompt that starts a need writes the reason to the debug log only', async ($, on) => {
+  const w = world(on, { [USER_FILE]: UI }, { classify: 'match' })
+  await start($)
+  w.logs.length = 0
+  await $.prompt.submit({ text: 'build me a login screen' })
+  expect(w.debugLogs.filter((l) => /need started: need:ui/.test(l))).toHaveLength(1)
+  expect(w.logs.filter((l) => /need:ui/.test(l))).toEqual([])
 })

@@ -269,8 +269,8 @@ Without a dialog (`claude -p`), both commands print what they would ask, the con
 
 - `/souffleur` (or `/souffleur status`) prints the ledger: skill, state, since, reason, open duties.
 - Active needs show as `prose (since 05:27)`. The prompt excerpt that started a need goes to the debug log only.
-- "Would have denied" groups the entries by reason: `6× Agent brief without a "skills:" line (05:50–06:42)`, followed once by the full message of the newest entry.
-- A need ends by itself after 20 user prompts in a row that the classifier ran on and did not match to it. A need set with `/souffleur need` ends only with `/souffleur drop`. Ending a need writes a debug line, no notice.
+- "Would have denied" groups the entries by the first sentence of each line of the reason: a group of two or more prints `6× Agent brief without a "skills:" line (05:50–06:42)`, followed once by the full message of the newest entry, indented; a single entry prints `05:50 <full message>`.
+- A need ends by itself after 20 user prompts in a row that the classifier ran on and did not match to it. A prompt of three words or fewer ("ja", "mach weiter") neither counts nor resets the count. Skills that were only being restored for the ended need go back to `absent`. A need set with `/souffleur need` ends only with `/souffleur drop`. Ending a need writes a debug line, no notice.
 - The status line shows a short summary, for example `observe · 4 loaded, 1 restoring`. Claude Code puts the plugin name in front of it.
 - When the mod cannot read an event it expects (a renamed field, a missing event), the status line says `degraded, see /souffleur` and the command lists what failed.
 

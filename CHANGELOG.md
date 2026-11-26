@@ -7,7 +7,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 - Proposals are asked about at the end of every main-session answer, also in sessions that report no interactive surface (Remote Control starts such sessions). Where no dialog opens, Souffleur shows the proposal as a notice, and a reply of `accept`, `annehmen`, `decline` or `ablehnen` as the person's very next prompt answers it. A peer, a hand-back or the model cannot answer this way (#44).
-- `/souffleur` is shorter: active needs show as name and start time (the prompt excerpt that started a need goes to the debug log), "Would have denied" groups equal reasons as `6× reason (05:50–06:42)` with the newest full message once, "Notes waiting for a later prompt" lists only notes that are held back, and the header says times are UTC. A need ends by itself after 20 prompts in a row that the classifier ran on without matching it; a need set with `/souffleur need` stays until `/souffleur drop` (#37).
+- `/souffleur` is shorter: active needs show as name and start time (the prompt excerpt that started a need goes to the debug log), "Would have denied" groups equal reasons as `6× reason (05:50–06:42)` with the newest full message once, "Notes waiting for a later prompt" lists only notes that are held back, and the header says times are UTC. A need ends by itself after 20 prompts in a row that the classifier ran on without matching it; a need set with `/souffleur need` stays until `/souffleur drop`. Prompts of three words or fewer do not count toward the 20, and skills that were only being restored for an ended need go back to absent (#37).
 
 ## [0.1.2] - 2026-11-26
 

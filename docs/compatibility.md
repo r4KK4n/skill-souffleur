@@ -16,6 +16,7 @@ Souffleur depends on Claude Code's mod API, which is early access and changes be
 | A hooks module outside `hooks/` can import sibling `.ts` files (no fixture) | 2.1.332 |
 | After `/compact` in the same process, the engine re-attaches the skill with the note "Do NOT re-execute these skills". A plain request to load them again is ignored; a request that names that note and says it does not apply is followed | 2.1.332 |
 | A `prompt.submit` `context` entry reaches the model as a hook note on the user's turn, also on the first prompt after `/compact` | 2.1.332 |
+| `$.ui.log(text, { to: 'debug' })` goes to the debug log and not to the transcript | per the 2.1.332 types, not verified live; the adapter test only checks that the mod asks for the debug target |
 | `$.ui.status(text)` shows in headless stream-json output as a `ui_status` system message | 2.1.332 |
 | `$.command.register` makes `/souffleur` reach a `command.run` hook with `command: "souffleur"` | 2.1.332 |
 | `$.fs.exists` and `$.fs.read` read `~/.claude/souffleur.json` and `<project>/.claude/souffleur.json`; `$.env.get("HOME")` gives the home folder | 2.1.332 |
