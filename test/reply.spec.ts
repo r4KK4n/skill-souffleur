@@ -62,3 +62,11 @@ test('an unclosed fence runs to the end of the answer', () => {
   const r = checkReply(`hi\n${FENCE}\n${'x'.repeat(1000)}`, { maxChars: 200 })
   assert.equal(r.skip, true)
 })
+
+test('tilde fences count like backtick fences', () => {
+  const r = checkReply(`hi\n~~~sh\n# not a heading\n${'x'.repeat(500)}\n~~~\nend`, { maxChars: 200, headings: 0 })
+  assert.equal(r.headings, 0)
+  assert.equal(r.chars, 'hi\n\nend'.length)
+  assert.equal(r.over, false)
+  assert.equal(checkReply(`~~~\n${'x'.repeat(1000)}`, { maxChars: 200 }).skip, true)
+})

@@ -501,11 +501,9 @@ test('a chat need gets a warning: it only starts with /souffleur need', () => {
 })
 
 test('reply is read on an always-on chat skill; both fields are optional', () => {
-  const ok = parseConfig(json({ skills: { chat: { always: true, for: 'chat', reply: { maxChars: 800, headings: 0 } }, c2: { always: true, for: 'chat', reply: { headings: 2 } }, c3: { always: true, for: 'chat', reply: {} } } }), undefined)
+  const ok = parseConfig(json({ skills: { chat: { always: true, for: 'chat', reply: { maxChars: 800, headings: 0 } }, c2: { always: true, for: 'readers' } } }), undefined)
   assert.deepEqual(ok.errors, [])
   assert.deepEqual(ok.config.skills.chat?.reply, { maxChars: 800, headings: 0 })
-  assert.deepEqual(ok.config.skills.c2?.reply, { headings: 2 })
-  assert.deepEqual(ok.config.skills.c3?.reply, {})
 })
 
 test('reply elsewhere is an error and ignored', () => {
@@ -529,4 +527,17 @@ test('reply values out of range, not integer or unknown are errors and ignored',
   }
   const edge = parseConfig(json({ skills: { s: { always: true, for: 'chat', reply: { maxChars: 200, headings: 20 } } } }), undefined)
   assert.deepEqual(edge.errors, [])
+})
+
+test('reply with neither field is an error and ignored', () => {
+  const r = parseConfig(json({ skills: { s: { always: true, for: 'chat', reply: {} } } }), undefined)
+  assert.ok(r.errors.some((e) => e.endsWith('s.reply: needs maxChars or headings; ignored')))
+  assert.equal(r.config.skills.s?.reply, undefined)
+})
+
+test('only one chat skill can carry reply; the later one is an error and ignored', () => {
+  const r = parseConfig(json({ skills: { a: { always: true, for: 'chat', reply: { maxChars: 800 } }, b: { always: true, for: 'chat', reply: { headings: 0 } } } }), undefined)
+  assert.deepEqual(r.config.skills.a?.reply, { maxChars: 800 })
+  assert.equal(r.config.skills.b?.reply, undefined)
+  assert.ok(r.errors.some((e) => e.endsWith('b.reply: only one chat skill can carry reply; ignored')))
 })

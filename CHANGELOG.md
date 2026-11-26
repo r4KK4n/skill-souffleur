@@ -6,7 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
-- Reply check for the `chat` skill: an always-on skill with `for: "chat"` can carry `reply: { maxChars, headings }` (200 to 20000 characters, 0 to 20 headings, both optional). After each main-session answer Souffleur measures the reply without code blocks and counts heading lines, counts violations per session (kept over a resume), shows `<skill>: <v> of <t> replies over the limit` in `/souffleur`, and adds one reminder line to the next prompt's context, at most once per five prompts. In `enforce`, two violations in a row mark the skill `stale` so it is requested again. Replies to typed commands, aborted turns and mostly-code replies are not checked; nothing is denied. When a stale skill is requested after replies, the request no longer says a compaction cut it.
+- Reply check for the `chat` skill: an always-on skill with `for: "chat"` can carry `reply: { maxChars, headings }` (200 to 20000 characters, 0 to 20 headings, both optional). After each main-session answer Souffleur measures the reply without code blocks and counts heading lines, counts violations per session (kept over a resume), shows `<skill>: <v> of <t> replies over the limit` in `/souffleur`, and adds one reminder line to the next prompt's context, at most once per five prompts. Both modes only remind. Replies to typed commands, aborted turns and mostly-code replies are not checked; nothing is denied.
 
 ## [0.1.5] - 2026-11-26
 

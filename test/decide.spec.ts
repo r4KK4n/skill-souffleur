@@ -1199,7 +1199,7 @@ test('reply: a violation is counted and the next prompt carries one reminder lin
   const c = replyCfg()
   const r = run(c, [loadSkill('terse:terse-mode'), reply(`# Head\n${LONG}`), prompt('next')])
   assert.deepEqual(r.s.replyCheck && { total: r.s.replyCheck.total, over: r.s.replyCheck.over }, { total: 1, over: 1 })
-  assert.match(ctx(r.out.at(-1)!), /^Souffleur: your last reply had 307 characters and 1 headings \(limit 100 characters, 0 headings\)\. Replies in this chat follow terse:terse-mode\.$/m)
+  assert.match(ctx(r.out.at(-1)!), /^Souffleur: your last reply had 307 characters and 1 heading \(limit 100 characters, 0 headings\)\. Replies in this chat follow terse:terse-mode\.$/m)
   assert.equal(r.s.replyCheck?.pending, undefined)
 })
 
@@ -1207,7 +1207,7 @@ test('reply: without a headings limit the headings part is omitted, without maxC
   const a = run(replyCfg('enforce', { maxChars: 100 }), [loadSkill('terse:terse-mode'), reply(LONG), prompt('x')])
   assert.match(ctx(a.out.at(-1)!), /Souffleur: your last reply had 300 characters \(limit 100 characters\)\. Replies in this chat follow terse:terse-mode\./)
   const b = run(replyCfg('enforce', { headings: 1 }), [loadSkill('terse:terse-mode'), reply('# a\n## b\nok'), prompt('x')])
-  assert.match(ctx(b.out.at(-1)!), /Souffleur: your last reply had 2 headings \(limit 1 headings\)\. Replies in this chat follow terse:terse-mode\./)
+  assert.match(ctx(b.out.at(-1)!), /Souffleur: your last reply had 2 headings \(limit 1 heading\)\. Replies in this chat follow terse:terse-mode\./)
 })
 
 test('reply: a reply within the limits is counted but gives no reminder and clears a waiting one', () => {
@@ -1215,7 +1215,6 @@ test('reply: a reply within the limits is counted but gives no reminder and clea
   const r = run(c, [loadSkill('terse:terse-mode'), reply(LONG), reply('short'), prompt('x')])
   assert.equal(r.s.replyCheck?.total, 2)
   assert.equal(r.s.replyCheck?.over, 1)
-  assert.equal(r.s.replyCheck?.streak, 0)
   assert.doesNotMatch(ctx(r.out.at(-1)!), /last reply/)
 })
 
@@ -1260,18 +1259,20 @@ test('reply: the reminder is context, not a notice, and notices false does not c
   assert.deepEqual(r.out.at(-1)!.map((a) => a.kind).filter((k) => k !== 'context'), [])
 })
 
-test('reply: enforce marks the chat skill stale after two violations in a row; observe does not', () => {
-  const enforce = run(replyCfg('enforce'), [loadSkill('terse:terse-mode'), reply(LONG)])
-  assert.equal(enforce.s.ledger['terse:terse-mode']?.state, 'loaded')
-  const two = run(replyCfg('enforce'), [loadSkill('terse:terse-mode'), reply(LONG), reply(LONG)])
-  assert.equal(two.s.ledger['terse:terse-mode']?.state, 'stale')
-  const ask = one(replyCfg('enforce'), [prompt('go')], two.s)
-  assert.match(ctx(ask), /- terse:terse-mode: for your replies in this chat\./)
-  assert.equal(decide(replyCfg('enforce'), two.s, prompt('go')).session.ledger['terse:terse-mode']?.state, 'restoring')
-  const obs = run(replyCfg('observe'), [loadSkill('terse:terse-mode'), reply(LONG), reply(LONG)])
-  assert.equal(obs.s.ledger['terse:terse-mode']?.state, 'loaded')
-  const broken = run(replyCfg('enforce'), [loadSkill('terse:terse-mode'), reply(LONG), reply('ok'), reply(LONG)])
-  assert.equal(broken.s.ledger['terse:terse-mode']?.state, 'loaded')
+test('reply: both modes only remind; the skill stays loaded however many violations come', () => {
+  for (const mode of ['enforce', 'observe'] as const) {
+    const r = run(replyCfg(mode), [loadSkill('terse:terse-mode'), reply(LONG), reply(LONG), reply(LONG)])
+    assert.equal(r.s.ledger['terse:terse-mode']?.state, 'loaded')
+    assert.equal(r.s.replyCheck?.over, 3)
+    assert.equal('streak' in (r.s.replyCheck ?? {}), false)
+  }
+})
+
+test('reply: singular heading in the reminder', () => {
+  const r = run(replyCfg('enforce', { headings: 1, maxChars: 200 }), [loadSkill('terse:terse-mode'), reply(`# a\n## b\n${'x'.repeat(10)}`), prompt('x')])
+  assert.match(ctx(r.out.at(-1)!), /had 19 characters and 2 headings \(limit 200 characters, 1 heading\)/)
+  const one = run(replyCfg('enforce', { headings: 0, maxChars: 200 }), [loadSkill('terse:terse-mode'), reply('# a\nb'), prompt('x')])
+  assert.match(ctx(one.out.at(-1)!), /and 1 heading \(limit 200 characters, 0 headings\)/)
 })
 
 test('reply: nothing is ever denied by the reply check', () => {

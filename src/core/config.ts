@@ -220,6 +220,7 @@ function parseReply(v: unknown, where: string, soft: (m: string) => void): Reply
     if (!int(v.headings, 0, 20)) return void soft(`${where}.headings: must be an integer from 0 to 20; ignored`)
     out.headings = v.headings
   }
+  if (out.maxChars === undefined && out.headings === undefined) return void soft(`${where}: needs maxChars or headings; ignored`)
   return out
 }
 
@@ -456,6 +457,15 @@ export function parseConfig(
     Object.assign(config.needs, project.needs)
     const projectNeeds = Object.keys(project.needs)
     if (projectNeeds.length) config.projectNeeds = projectNeeds
+  }
+  let replyOwner: string | undefined
+  for (const [name, rule] of Object.entries(config.skills)) {
+    if (rule.reply === undefined) continue
+    if (replyOwner === undefined) replyOwner = name
+    else {
+      errors.push(`${rule.from} config: ${name}.reply: only one chat skill can carry reply; ignored`)
+      delete rule.reply
+    }
   }
   return { config, errors }
 }

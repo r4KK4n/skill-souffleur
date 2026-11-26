@@ -49,6 +49,8 @@ let noDialog = false
 let lastPromptKind: string | undefined
 /** The last prompt of the person was a typed command: its reply is not checked against the chat skill's limits. */
 let lastPromptCommand = false
+/** The turn now running was started by a prompt of the person (typed or a command); background and agent notification turns are not counted. */
+let personTurn = false
 /** How long the dialog at a turn end may stay open before it counts as a rejection. */
 const ASK_WAIT_MS = 120_000
 /** The proposals a notice showed (kept after the offer ended), so each proposal gets one notice. */
@@ -1249,6 +1251,7 @@ export const register: Register = (on) => {
     interactive = e.isInteractive === true
     lastPromptKind = undefined
     lastPromptCommand = false
+    personTurn = false
     askStopped = false
     shownHash = undefined
     noticed.clear()
@@ -1292,7 +1295,8 @@ export const register: Register = (on) => {
   on('prompt.submit', async ($, e, next) => {
     const fromUser = isFromUser(e)
     if (fromUser) lastPromptKind = e.origin?.kind
-    if (fromUser || (e.command !== undefined && isUserOrigin(e))) lastPromptCommand = e.command !== undefined
+    personTurn = fromUser || (e.command !== undefined && isUserOrigin(e))
+    lastPromptCommand = e.command !== undefined
     if (fromUser) await safe($, 'tool.reconnect', undefined, () => reconnectTool($))
     // Only a prompt of the person (composer or bridge, no command) answers; any prompt of the person ends the offer.
     if (e.command !== undefined && isUserOrigin(e)) shownHash = undefined
@@ -1394,7 +1398,7 @@ export const register: Register = (on) => {
   // At the end of a turn: one question about the first waiting proposal; where no dialog opens, a notice with a reply hint.
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
-    if (e.agentId === undefined && e.reason === 'answer') {
+    if (e.agentId === undefined && e.reason === 'answer' && personTurn && typeof e.answer === 'string') {
       await safe($, 'turn.reply', undefined, async () => {
         await apply($, (l) => ({ type: 'reply', now: now(), answer: e.answer, fromCommand: lastPromptCommand, aborted: e.isAborted, root: l.root }))
       })

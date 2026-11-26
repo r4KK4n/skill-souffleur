@@ -2,7 +2,7 @@ import { excludedIn, isTrustedRoot } from './config.ts'
 import type { Config, ReplyLimits, SkillName } from './types.ts'
 
 /** Fenced blocks; one that is never closed runs to the end of the answer. */
-const FENCED = /```[\s\S]*?(?:```|(?![\s\S]))/g
+const FENCED = /(```|~~~)[\s\S]*?(?:\1|(?![\s\S]))/g
 const INLINE = /`[^`\n]*`/g
 const HEADING = /^#{1,6}\s/
 
@@ -36,6 +36,7 @@ export function reminderLine(skill: SkillName, limits: ReplyLimits, r: { chars: 
   const had: string[] = []
   const limit: string[] = []
   if (limits.maxChars !== undefined) { had.push(`${r.chars} characters`); limit.push(`${limits.maxChars} characters`) }
-  if (limits.headings !== undefined) { had.push(`${r.headings} headings`); limit.push(`${limits.headings} headings`) }
+  const heading = (n: number) => `${n} ${n === 1 ? 'heading' : 'headings'}`
+  if (limits.headings !== undefined) { had.push(heading(r.headings)); limit.push(heading(limits.headings)) }
   return `Souffleur: your last reply had ${had.join(' and ')} (limit ${limit.join(', ')}). Replies in this chat follow ${skill}.`
 }
