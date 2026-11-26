@@ -265,6 +265,34 @@ At the end `init` says whether it found hooks or notes that overlap with the new
 
 Without a dialog (`claude -p`), both commands print what they would ask, the config entries as JSON and the steps, and change nothing. Once rules and notes exist, `migrate` also queues the standing instructions it found as note proposals, with or without a dialog; they are asked at turn end or by `/souffleur review`. The queue lives in the session and does not survive it, except that a declined hash is kept in the plugin store.
 
+### Audience
+
+Every skill shapes output for someone. Souffleur records who, and says it whenever it asks for a skill, so a skill for one audience does not shape output for another (for example a writing-style skill for documentation does not change the replies in the chat).
+
+| `for` | Who receives the output | Examples |
+|---|---|---|
+| `chat` | the person in this session | the agent's replies in the conversation |
+| `readers` | people outside the chat who read a text | docs, specs, issue and PR texts, commit bodies, app copy |
+| `users` | people who use the product | screens, pages, components, prototypes |
+| `work` | nobody reads it; it shapes how the agent works | debugging, test-first, planning, review steps |
+
+`for` sits on a need (`"prose": { "for": "readers", "what": "A text people outside this chat will read …" }`), because the skills of one need share its deliverable. An `always` skill has no need and carries `for` itself. The old string form of a need still works and counts as `work`, with a status hint to run `/souffleur init`. `init` proposes `for` from the skill's description and warns when an always-on skill is `readers` or `users`.
+
+The load request groups skills by audience with a fixed sentence per value, for example: `writing-guide, writing-check: for texts other people read (docs, issues, PRs, app copy). Not for your replies in this chat.` When a `chat` skill is always on and the request holds a `readers` or `users` group, it ends with `Your replies in this chat follow <chat skill>.` The system prompt section says that each skill applies only to the output named with it, and names the `chat` skill.
+
+Needs start from the deliverable, not the topic:
+
+- A `readers` or `users` need starts from tool evidence: a call its skills' gates match, or `gh issue create|comment`, `gh pr create|edit`, `git commit` for `readers`. No model call.
+- Per prompt, two classifier calls run in parallel instead of one per need. Call A asks what the agent will produce: `chat-reply`, `text-for-others`, `screen`, `code-or-repo-work`. Call B picks one `work` need or `none`, and counts only when A says `code-or-repo-work`. `chat-reply` starts nothing.
+- A failed call counts as `chat-reply`. After three failures in a row the status shows `needs: degraded`, and each prompt carries one line listing the `work` needs so the main model can pick; the line stops with the first good answer. Each failure goes to the debug log with its kind.
+- After a compaction, `chat` and `work` skills are requested on the next prompt; `readers` and `users` skills wait for the next deliverable signal.
+
+Adherence is checked for the `chat` skill only, without a model: on `turn.complete` with reason `answer`, the answer's length without code blocks and its count of heading lines are compared with `"reply": { "maxChars": …, "headings": … }` on that skill. A violation is counted in `/souffleur` and adds one line to the next prompt's context (at most once per five prompts). In `enforce`, two violations in a row mark the skill `stale`, so it is requested again. Nothing is denied; the answer is already shown.
+
+A user-file skill can carry `"notIn": [<main repository root>, …]`: in those roots it is not needed, requested or gated, and `/souffleur` shows `excluded in this project`. A project file cannot switch off a user's skill.
+
+A duty arms only on a call that changes a file. A publish (`Artifact`) counts only when the path was written since the last evidence.
+
 ### Status
 
 - `/souffleur` (or `/souffleur status`) prints the ledger: skill, state, since, reason, open duties.
