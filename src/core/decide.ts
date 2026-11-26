@@ -52,6 +52,8 @@ export type Session = {
   learnFails?: number
   /** When this copy was stored last, so old copies in the plugin store can be removed. */
   touched?: number
+  /** What notices already told the user: skills cut by compaction, and problem keys shown. */
+  noticed?: { cut: SkillName[]; problems: string[] }
 }
 
 export type CoreEvent =

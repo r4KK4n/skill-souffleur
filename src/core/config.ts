@@ -8,6 +8,7 @@ type FileConfig = {
   rules: Rule[]
   notes: Note[]
   learn?: { skills: boolean }
+  notices?: boolean
   /** Every skill and need key the file spells out, valid or not, for clash checks. */
   skillKeys: string[]
   needKeys: string[]
@@ -232,7 +233,7 @@ function parseFile(text: string, source: Origin, errors: string[]): FileConfig {
 
   for (const key of Object.keys(obj)) {
     if (key === 'skills' || key === 'needs') continue
-    if (key === 'mode' || key === 'trustProjects' || key === 'rules' || key === 'notes' || key === 'learn') {
+    if (key === 'mode' || key === 'trustProjects' || key === 'rules' || key === 'notes' || key === 'learn' || key === 'notices') {
       if (source === 'project') fail(`${key} is only allowed in the user config; ignored`)
       continue
     }
@@ -252,6 +253,10 @@ function parseFile(text: string, source: Origin, errors: string[]): FileConfig {
     }
   }
 
+  if (source === 'user' && obj.notices !== undefined) {
+    if (typeof obj.notices === 'boolean') file.notices = obj.notices
+    else fail('notices: must be true or false; ignored')
+  }
   if (source === 'user' && obj.learn !== undefined) {
     const l = obj.learn
     if (isObject(l) && Object.keys(l).every((k) => k === 'skills') && (l.skills === undefined || typeof l.skills === 'boolean')) file.learn = { skills: l.skills !== false }
@@ -326,7 +331,7 @@ export function parseConfig(
   projectText: string | undefined,
 ): { config: Config; errors: string[] } {
   const errors: string[] = []
-  const config: Config = { mode: 'observe', skills: {}, needs: {}, trustProjects: [], rules: [], notes: [], learn: { skills: true } }
+  const config: Config = { mode: 'observe', skills: {}, needs: {}, trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true }
 
   const read = (source: Origin, text: string | undefined): FileConfig | undefined => {
     if (text === undefined) return undefined
@@ -354,6 +359,7 @@ export function parseConfig(
     if (user.mode !== undefined) config.mode = user.mode
     if (user.trustProjects) config.trustProjects = user.trustProjects
     if (user.learn) config.learn = user.learn
+    if (user.notices !== undefined) config.notices = user.notices
     config.rules = user.rules
     config.notes = user.notes
     config.userNeeds = Object.keys(user.needs)
