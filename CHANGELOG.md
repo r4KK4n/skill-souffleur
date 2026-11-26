@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-26
+
 - Once per session, in a repository with no project block yet, Souffleur asks one question about the project's own skills that your config does not name: set them up now (init's round, for this project or everywhere), ignore them all here, or later. Where no dialog opens it shows one notice. Nothing is written for `Later`, a dismissal or a timeout.
 
 - `/souffleur block <name>`, `unblock <name>` and `project` change and show the per-project block of the open repository.
