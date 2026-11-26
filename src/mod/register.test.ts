@@ -3244,3 +3244,58 @@ test('init Everywhere puts the project skill into the standard', async ($, on) =
   expect(written.skills['proj-skill']).toEqual({ always: true })
   expect(written.projects?.[MAIN]?.skills).toBeUndefined()
 })
+
+// --- last fix round ---
+
+test('a session that reports no interactive prompt (Remote Control) still gets the project question', async ($, on) => {
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['proj-skill'], answers: ['Ignore all here'] })
+  await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: false })
+  await $.prompt.submit({ text: 'hello', origin: { kind: 'bridge' } } as never)
+  await turnEnd($)
+  expect(w.asked.length).toBe(1)
+  expect(rootBlock(w)).toEqual({ ignored: ['proj-skill'] })
+})
+
+test('a headless sdk session gets the notice instead of the dialog', async ($, on) => {
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['proj-skill'], answers: ['Ignore all here'] })
+  await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: false })
+  await $.prompt.submit({ text: 'hello', origin: { kind: 'sdk' } } as never)
+  await turnEnd($)
+  expect(w.asked.length).toBe(0)
+  expect(w.logs.some((l) => /this project has 1 skills? not in your config/.test(l))).toBe(true)
+  expect(w.writes.length).toBe(0)
+})
+
+test('Set up now reports only what it wrote, with its scope', async ($, on) => {
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['proj-skill', 'second-skill'], answers: ['Set up now', 'When the task needs it', 'This project only', "Don't watch"] })
+  await start($)
+  await turnEnd($)
+  const report = w.logs.find((l) => /proj-skill: watched for/.test(l)) ?? ''
+  expect(report).toMatch(/proj-skill: watched for .* in this project/)
+  expect(report).toMatch(/second-skill: ignored here/)
+  expect(report).not.toMatch(/Souffleur init|Installed and not watched|migrate|New entries apply/)
+})
+
+test('Set up now with nothing written says so in one line', async ($, on) => {
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['proj-skill'], answers: ['Set up now', 'Stop'] })
+  await start($)
+  await turnEnd($)
+  expect(w.logs).toContain('Souffleur: nothing set up; /souffleur init asks again.')
+})
+
+test('init saves one backup per session like the other writers', async ($, on) => {
+  const user = JSON.stringify({ mode: 'enforce', skills: {} })
+  const w = world(on, { [USER_FILE]: user }, { repoRoot: MAIN, projectSkills: ['a-skill', 'b-skill'], answers: ['From the start', 'Everywhere', 'From the start', 'Everywhere'] })
+  await start($)
+  await run($, 'init')
+  const backups = w.writes.filter((x) => /souffleur\.json\.bak-\d+$/.test(x.path))
+  expect(backups.length).toBe(1)
+  expect(backups[0]!.text).toBe(user)
+})
+
+test('block works on a user file that starts with a byte order mark', async ($, on) => {
+  const w = world(on, { [USER_FILE]: `﻿${BLOCKABLE}` })
+  await start($)
+  expect(await run($, 'block writing-guide')).toMatch(/blocked in/)
+  expect(JSON.parse(userWrites(w).at(-1)!.text).projects['/work/proj'].block).toEqual(['writing-guide'])
+})

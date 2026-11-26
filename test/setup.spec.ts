@@ -319,3 +319,13 @@ test('Everywhere refuses a skill that a project block uses as its own', () => {
   assert.match(r.note ?? '', /o/)
   assert.match(r.note ?? '', /project/)
 })
+
+test('Everywhere may still change a standard skill that a block also redefines', () => {
+  const user = { skills: { x: { always: true } }, projects: { '/a': { block: ['x'], skills: { x: { need: 'n' } }, needs: { n: 'Own.' } } } }
+  const changed = applyChoice(user, 'x', 'need', { key: 'm', text: 'Std.' })
+  assert.equal(changed.note, undefined)
+  assert.deepEqual((changed.config as { skills: unknown }).skills, { x: { need: 'm' } })
+  const gone = applyChoice(user, 'x', 'none')
+  assert.equal(gone.note, undefined)
+  assert.deepEqual((gone.config as { skills: unknown }).skills, {})
+})

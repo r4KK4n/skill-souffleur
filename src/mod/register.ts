@@ -454,7 +454,7 @@ async function runInit($: Dollar, l0: Loaded, only?: string[]): Promise<string> 
   skip.push(...(here.config.project?.blocked ?? []), ...(here.config.project?.own ?? []))
   const projectSkills: Record<string, unknown> = Object.fromEntries(Object.entries(config.skills).filter(([, r]) => r.from === 'project'))
 
-  const settings = await readSettings($, settingsPath, home)
+  const settings = only === undefined ? await readSettings($, settingsPath, home) : {}
   if (settings.error) notes.push(`${settings.error}, so its hooks were not checked.`)
   const described = await installedWithDescriptions($)
   const installed = described.map((x) => x.name)
@@ -462,7 +462,7 @@ async function runInit($: Dollar, l0: Loaded, only?: string[]): Promise<string> 
   const hooks = findHookOverlaps(settings.value, configured, installed.filter((n) => !configured.includes(n)))
   const reloadHooked = [...new Set(hooks.flatMap((o) => (o.skill !== undefined && installed.includes(o.skill) && !(o.skill in config.skills) ? [o.skill] : [])))]
   const startHooked = new Set(hooks.flatMap((o) => (o.event === 'SessionStart' && o.skill !== undefined ? [o.skill] : [])))
-  const passages = findPassages(await readStanding($, l0, home, notes), configured, Infinity)
+  const passages = only === undefined ? findPassages(await readStanding($, l0, home, notes), configured, Infinity) : []
 
   // One small-model call over the installed skills that have no need yet: unconfigured, hook-reloaded, or in the user file without one.
   // Skills whose description says they run only on an explicit request are not sent; they are advised against watching.
@@ -499,6 +499,7 @@ async function runInit($: Dollar, l0: Loaded, only?: string[]): Promise<string> 
   const watched = new Set(plans.map((p) => p.skill))
   const unwatched = installed.filter((name) => !watched.has(name) && !skip.includes(name))
   const toAsk = plans.filter((p) => p.source !== 'project')
+  const setUp: string[] = []
 
   /** The line for an injected result: the plugin's SessionStart hooks decide which one. */
   const injectedLine = async (skill: string) => injectedWarning(skill, await pluginStartHooks($, home, skill))
@@ -612,8 +613,14 @@ async function runInit($: Dollar, l0: Loaded, only?: string[]): Promise<string> 
         }
         continue
       }
+      if (!backedUp && now2.kind === 'ok') {
+        await $.fs.write(`${configPath}.bak-${Date.now()}`, now2.text)
+        backedUp = true
+      }
       await $.fs.write(configPath, `${JSON.stringify(r.config, null, 2)}\n`)
       wrote = true
+      const need2 = choice === 'need' ? `for ${need?.text ?? 'its description'}` : choice === 'start' ? 'from the start' : choice === 'injected' ? 'as its plugin injects it' : ''
+      setUp.push(choice === 'none' ? `${p.skill}: ${scope === 'project' ? 'ignored here' : 'not watched'}` : `${p.skill}: watched ${need2} ${scope === 'project' ? 'in this project' : 'everywhere'}`)
       loaded = undefined // the session reads the new file on its next event
       done.push(`${p.skill}: ${label}.`)
       if (choice === 'injected') {
@@ -642,6 +649,10 @@ async function runInit($: Dollar, l0: Loaded, only?: string[]): Promise<string> 
     if (wrote) await safe($, 'installed', undefined, () => refreshInstalled($))
   }
 
+  if (only !== undefined) {
+    const problems = done.filter((d) => /Stopped|skipped|Nothing was written|not changed|already a skill/.test(d))
+    return setUp.length ? [...setUp, ...problems].join('\n') : 'Souffleur: nothing set up; /souffleur init asks again.'
+  }
   const out = ['Souffleur init', '', ...(toAsk.length || done.length ? done.map((d) => `- ${d}`) : ['- Nothing to ask: no skill is configured yet and none looks worth watching.'])]
   const project = plans.filter((p) => p.source === 'project')
   if (project.length) out.push('', `Set only in the project file, so init leaves ${project.length === 1 ? 'it' : 'them'} alone: ${project.map((p) => p.skill).join(', ')}.`)
@@ -1006,8 +1017,7 @@ async function askOwnSkills($: Dollar, dialog: boolean): Promise<void> {
     return
   }
   if (answer === OWN_NOW) {
-    const text = await runInit($, l, names)
-    say($, l, text)
+    say($, l, await runInit($, l, names))
     return
   }
   if (answer !== OWN_IGNORE) return
@@ -1718,7 +1728,7 @@ export const register: Register = (on) => {
         }
         const hadProposals = (await current($)).session.proposals.length > 0
         const line = await askFirst($, true)
-        if (!hadProposals && line === undefined && !noDialog && !askStopped) await askOwnSkills($, interactive)
+        if (!hadProposals && line === undefined && !noDialog && !askStopped) await askOwnSkills($, interactive || lastPromptKind !== 'sdk')
         if (line !== undefined) {
           try {
             $.ui.toast(line)
