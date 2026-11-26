@@ -6,6 +6,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- Notices: short `Souffleur:` lines in the transcript for session start, compaction and problems, once per event and for the main session only. `"notices": false` in the user file turns them off.
+- The propose tool is registered again on a user prompt when it dropped out of the tool list, with the line `Souffleur: tool reconnected.`
+- Version `0.1.1`.
 - A project file is report only unless its root is in `trustProjects`: Souffleur no longer asks the model to load its skills, names them in the system prompt or lets its needs deny an `Agent` brief. A project file may define 20 skills and 10 needs; more get an error that names the cap. Duty evidence gets the same length and control character checks as rule evidence, and `trustProjects` ignores trailing slashes.
 - The restore request and the notes of one prompt stay under 10,000 characters. Skills that do not fit are asked for on a later prompt and stay listed in `/souffleur`.
 - The status turns `degraded` after three failed classifier runs or three failed skill reads in a row, and clears after a good one.

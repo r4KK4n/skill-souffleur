@@ -269,7 +269,7 @@ Without a dialog (`claude -p`), both commands print what they would ask, the con
 
 ### Notices
 
-The status line shows only in the terminal. Users of the desktop and mobile apps, and anyone not watching it, learn what Souffleur did from short lines in the transcript. A notice is a `notice` action from the core; the adapter writes it with `$.ui.log`, which the user sees as a dim line and the model does not.
+The status line shows only in the terminal. Users of the desktop and mobile apps, and anyone not watching it, learn what Souffleur did from short lines in the transcript. The core compares the session before and after each change (`src/core/notices.ts`); the adapter writes the lines with `$.ui.log`, which the user sees as a dim line and the model does not.
 
 - Each notice starts with `Souffleur:`, is English, has at most two sentences, and fires once per event.
 - Session start (fresh or resumed): version, mode, how many skills are always on and on demand, waiting proposals. Without a user file: `not set up, run /souffleur init`.
