@@ -54,7 +54,7 @@ test('table lists every configured skill with state and reason', () => {
   const s: Session = { ...s0, ledger: skillLoaded(s0.ledger, 'writing-guide', T1, 'matched prompt') }
   const out = renderTable(config, s, T1)
   const lines = out.split('\n')
-  assert.equal(lines[0], 'Mode: enforce')
+  assert.equal(lines[0], 'Mode: enforce. Times in UTC.')
   assert.match(out, /^\| Skill \| State \| Since \| Reason \|$/m)
   assert.match(out, /^\| writing-guide \| loaded \| 09:05 \| matched prompt \|$/m)
   assert.match(out, /^\| terse:terse-mode \| absent \| 08:00 \|  \|$/m)
@@ -78,7 +78,7 @@ test('table lists open duties and active needs', () => {
   }
   const out = renderTable(config, s, T1)
   assert.match(out, /^Open duties:\n- ui-checklist \(Write index\.html\)$/m)
-  assert.match(out, /^Active needs:\n- ui: command$/m)
+  assert.match(out, /^Active needs:\n- ui \(since 09:05\)$/m)
   assert.match(out, /^Errors:\n- tool_name missing from payload$/m)
 })
 
@@ -89,13 +89,13 @@ test('observe mode shows would-have-denied reasons in table', () => {
     observed: [{ at: Date.UTC(2026, 10, 25, 9, 30), reason: 'gate: ui-checklist needs ui' }],
   }
   const out = renderTable(observe, s, T1)
-  assert.equal(out.split('\n')[0], 'Mode: observe')
-  assert.match(out, /^Would have denied:\n- 09:30 gate: ui-checklist needs ui$/m)
+  assert.equal(out.split('\n')[0], 'Mode: observe. Times in UTC.')
+  assert.match(out, /^Would have denied:\n- 1× gate: ui-checklist needs ui \(09:30–09:30\)$/m)
 })
 
 test('paused shows in first line', () => {
   const s: Session = { ...fresh(), paused: true }
-  assert.equal(renderTable(config, s, T1).split('\n')[0], 'Mode: enforce (paused)')
+  assert.equal(renderTable(config, s, T1).split('\n')[0], 'Mode: enforce (paused). Times in UTC.')
 })
 
 test('decide status command replies with the table', () => {
@@ -143,4 +143,51 @@ test('the table says when a project file is read but not trusted', () => {
   assert.match(renderTable(c, fresh(c), T1, '/work/p'), /not trusted.*trustProjects/s)
   assert.doesNotMatch(renderTable({ ...c, trustProjects: ['/work/p/'] }, fresh(c), T1, '/work/p'), /not trusted/)
   assert.doesNotMatch(renderTable(config, fresh(), T1, '/work/p'), /not trusted/)
+})
+
+test('status shows needs as name and time', () => {
+  const s: Session = { ...fresh(), needs: { ui: { since: T1, reason: 'need:ui from "&lt;!-- reply 9"' } } }
+  const out = renderTable(config, s, T1)
+  assert.match(out, /^Active needs:\n- ui \(since 09:05\)$/m)
+  assert.doesNotMatch(out, /reply 9|&lt;/)
+})
+
+test('status groups equal denials with count and range', () => {
+  const r = 'Agent brief without a "skills:" line. Add one and retry.'
+  const s: Session = { ...fresh(), observed: [
+    { at: Date.UTC(2026, 10, 25, 9, 50), reason: r },
+    { at: Date.UTC(2026, 10, 25, 10, 10), reason: r },
+    { at: Date.UTC(2026, 10, 25, 10, 42), reason: r },
+  ] }
+  const out = renderTable(config, s, T1)
+  assert.match(out, /^Would have denied:\n- 3× Agent brief without a "skills:" line \(09:50–10:42\)\n  Agent brief without a "skills:" line\. Add one and retry\.$/m)
+  assert.equal(out.split('Add one and retry').length - 1, 1)
+})
+
+test('different reasons stay apart', () => {
+  const s: Session = { ...fresh(), observed: [
+    { at: Date.UTC(2026, 10, 25, 9, 50), reason: 'gate: a needs ui' },
+    { at: Date.UTC(2026, 10, 25, 9, 51), reason: 'gate: b needs ui' },
+    { at: Date.UTC(2026, 10, 25, 9, 52), reason: 'gate: a needs ui' },
+  ] }
+  const out = renderTable(config, s, T1)
+  assert.match(out, /^- 2× gate: a needs ui \(09:50–09:52\)$/m)
+  assert.match(out, /^- 1× gate: b needs ui \(09:51–09:51\)$/m)
+})
+
+test('status says times are UTC', () => {
+  const out = renderTable(config, fresh(), T1)
+  assert.match(out.split('\n')[0]!, /Times in UTC\./)
+  assert.equal(out.split('Times in UTC.').length - 1, 1)
+})
+
+test('notes going out next are not listed as waiting', () => {
+  const c: Config = { ...config, notes: [
+    { id: 'n1', text: 'a'.repeat(100), need: 'ui', source: 'user' },
+    { id: 'n2', text: 'b'.repeat(5000), need: 'ui', source: 'user' },
+  ] }
+  const s: Session = { ...fresh(c), needs: { ui: { since: T1, reason: 'command' } } }
+  const out = renderTable(c, s, T1)
+  assert.match(out, /Notes waiting for a later prompt[^:]*: n2$/m)
+  assert.doesNotMatch(out, /n1/)
 })

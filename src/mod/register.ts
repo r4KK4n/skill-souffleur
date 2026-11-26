@@ -1266,6 +1266,7 @@ export const register: Register = (on) => {
         : undefined
       await listing
       const { actions } = await apply($, (l2) => ({ type: 'prompt', now: now(), text: e.text, fromUser, matched: verdict?.matched ?? [], root: l2.root, ...(verdict === undefined ? {} : { classifierFailed: verdict.failed }) }))
+      for (const a of actions) if (a.kind === 'debug') $.ui.log(a.text, { to: 'debug' })
       return actions.flatMap((a) => (a.kind === 'context' ? [a.text] : []))
     })
     if (answered !== undefined) texts.push(answered)

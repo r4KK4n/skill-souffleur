@@ -13,7 +13,7 @@ export type Duty = { skill: SkillName; openedAt: number; by: string; denied: boo
 /** Plain JSON only: the adapter persists it and reads it back. */
 export type Session = {
   ledger: Ledger
-  needs: Record<NeedName, { since: number; reason: string }>
+  needs: Record<NeedName, { since: number; reason: string; misses?: number }>
   duties: Duty[]
   paused: boolean
   id: string
@@ -79,6 +79,8 @@ export type CoreEvent =
 
 export type Action =
   | { kind: 'context'; text: string }
+  /** A line for the debug log only; the user and the model do not see it. */
+  | { kind: 'debug'; text: string }
   /** A main-session skill load whose text may be read for proposals; the adapter decides whether to. */
   | { kind: 'learn'; skill: SkillName; text: string; source?: string; pluginName?: string; path?: string }
   | { kind: 'deny'; reason: string }
@@ -246,14 +248,34 @@ function restore(config: Config, s: Session, now: number, trusted: boolean): { l
   return { ledger, text: `${head}${ask.join(', ')}.${why}` }
 }
 
+/** User prompts in a row that the classifier ran on without matching a need before the need ends. */
+const NEED_MISSES = 20
+
 function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'prompt' }>): Result {
   if (!e.fromUser) return { session: s, actions: [] }
   const trusted = isTrustedRoot(config, e.root)
   const needs = { ...s.needs }
+  const debug: Action[] = []
   if (!s.paused) {
     for (const name of e.matched) {
-      if (name in needs) continue
-      needs[name] = { since: e.now, reason: `need:${name} from "${e.text.slice(0, 40)}"` }
+      if (name in needs) {
+        if (needs[name]!.misses) needs[name] = { ...needs[name]!, misses: 0 }
+        continue
+      }
+      const reason = `need:${name} from "${e.text.slice(0, 40)}"`
+      needs[name] = { since: e.now, reason }
+      debug.push({ kind: 'debug', text: `need started: ${reason}` })
+    }
+    // Only a prompt the classifier ran on without failing counts as a miss; a need set with the command never ends by itself.
+    if (e.classifierFailed === false) {
+      for (const [name, n] of Object.entries(needs)) {
+        if (e.matched.includes(name) || n.reason === 'command') continue
+        const misses = (n.misses ?? 0) + 1
+        if (misses >= NEED_MISSES) {
+          delete needs[name]
+          debug.push({ kind: 'debug', text: `need ended: ${name} (${NEED_MISSES} prompts without a match)` })
+        } else needs[name] = { ...n, misses }
+      }
     }
   }
   const next: Session = track({ ...s, needs, compactedSincePrompt: false }, 'classifyFails', 'classifier: ', e.classifierFailed, 'the small model failed or timed out 3 prompts in a row, so needs are not detected')
@@ -282,7 +304,7 @@ function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'pro
     return add(`Open duty: ${d.skill} (${d.by}).`) ? { ...d, told: true } : d
   })
   next.openRules = next.openRules.map((o) => (!o.told && add(`Open rule: ${o.id} (${o.by}).`) ? { ...o, told: true } : o))
-  return { session: next, actions: lines.length ? [{ kind: 'context', text: lines.join('\n') }] : [] }
+  return { session: next, actions: [...(lines.length ? [{ kind: 'context' as const, text: lines.join('\n') }] : []), ...debug] }
 }
 
 function evidenceMatches(ev: { tool: string; command?: string }, e: Extract<CoreEvent, { type: 'tool' }>): boolean {
