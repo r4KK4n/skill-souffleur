@@ -6,7 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
-- Fixed: field rules no longer see the event metadata of a tool call (`tool`, `tool_use_id`, `agentId`, `agent`, `requestMeta`) as arguments, so a rule on `model` or `description` is not fooled by them (#40).
+- Fixed: field rules no longer see the event metadata of a tool call (`tool`, `tool_use_id`, `agentId`, `requestMeta`) as arguments, so a rule on `model` or `description` is not fooled by them (#40).
 - Fixed: a resume in a new process resets the per-run counters (subagents running, main skill calls, denied agent and field rules, pending learn calls), so a stale count no longer blocks or misreads the resumed session; a reload in the same process keeps them (#32).
 - Fixed: a hook error clears once that hook works again, so one transient failure no longer keeps the status `degraded` until restart. Config errors and the classifier and learn failure counts keep their own lifecycle.
 - Notices: short `Souffleur:` lines in the transcript for session start, compaction and problems, once per event and for the main session only. `"notices": false` in the user file turns them off.

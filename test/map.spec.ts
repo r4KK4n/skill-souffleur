@@ -27,10 +27,10 @@ test('isFromUser treats a prompt without origin as typed (the test kit sets none
 })
 
 test('presentArgs drops reserved metadata', () => {
-  const e = { tool: 'Agent', tool_use_id: 't1', agentId: 'a1', agent: 'x', requestMeta: {}, model: 'haiku', description: '' }
+  const e = { tool: 'Agent', tool_use_id: 't1', agentId: 'a1', requestMeta: {}, model: 'haiku', description: '' }
   assert.deepEqual(presentArgs(e), ['model'])
 })
 
 test('presentArgs keeps real arguments', () => {
-  assert.deepEqual(presentArgs({ tool: 'Write', file_path: '/a', content: undefined, command: null, prompt: 'x' }), ['file_path', 'prompt'])
+  assert.deepEqual(presentArgs({ tool: 'Agent', file_path: '/a', content: undefined, command: null, prompt: 'x', agent: 'reviewer' }), ['file_path', 'prompt', 'agent'])
 })

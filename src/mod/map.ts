@@ -32,11 +32,11 @@ export function toolFields(e: Readonly<Record<string, unknown>>): ToolFields {
   return out
 }
 
-/** Metadata the engine puts on every `tool.call` next to the tool's own arguments (ToolCallInput, 2.1.332). */
-const RESERVED = ['tool', 'tool_use_id', 'agentId', 'agent', 'requestMeta']
+/** Metadata the engine puts on every `tool.call` beside the tool's own arguments (ToolCallInput, 2.1.332). */
+const RESERVED = ['tool', 'tool_use_id', 'agentId', 'requestMeta']
 
 /** Names of the arguments a tool call actually carries: set values only, without the engine's metadata keys. */
-export function presentArgs(e: Record<string, unknown>): string[] {
+export function presentArgs(e: Readonly<Record<string, unknown>>): string[] {
   return Object.entries(e)
     .filter(([k, v]) => !RESERVED.includes(k) && v !== undefined && v !== null && v !== '')
     .map(([k]) => k)

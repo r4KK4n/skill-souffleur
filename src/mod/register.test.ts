@@ -1266,6 +1266,12 @@ test('a field rule denies an Agent call without model once, with the real call f
   expect((await $.tool.call({ tool: 'Agent', prompt: 'x', model: 'sonnet' } as never)).deny).toBe(undefined)
 })
 
+test('a field rule on tool_use_id treats the metadata key as missing when no argument carries it', async ($, on) => {
+  world(on, { [USER_FILE]: JSON.stringify({ mode: 'enforce', rules: [{ id: 'agent-names-tool-use-id', before: { tools: ['Agent'] }, field: 'tool_use_id', source: 'slip' }] }) })
+  await start($)
+  expect((await $.tool.call({ tool: 'Agent', prompt: 'x', tool_use_id: 't1' } as never)).deny).toMatch(/agent-names-tool-use-id/)
+})
+
 test('migrate queues the standing instructions it found as note proposals and writes nothing', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS, [CLAUDE_MD]: 'Always invoke writing-guide before writing prose.\nOther text.' }, { skills: ['writing-guide'], answers: 'reject' })
   await start($)
