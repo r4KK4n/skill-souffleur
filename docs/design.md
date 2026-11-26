@@ -301,7 +301,7 @@ The propose tool's server can disconnect between turns while the hooks keep runn
 4. How does the status line render in the desktop and mobile clients?
 5. Plugin skill names: is the `skill.prompt` key `terse:terse-mode` or `terse-mode`?
 
-Items 1 to 5 were answered on 2.1.332; see [background.md](background.md). Item 4 was dropped: the status line is built for the terminal, and `/souffleur` shows the same everywhere. Items 7 to 10 were answered on 2.1.332 as well, with the evidence in [background.md](background.md#tests-for-rules-and-notes-claude-code-21332):
+Items 1 to 5 were answered on 2.1.332, except the reload half of item 3; see [background.md](background.md). Item 4 was dropped: the status line is built for the terminal, and `/souffleur` shows the same everywhere. Items 7 to 10 were answered on 2.1.332 as well, with the evidence in [background.md](background.md#tests-for-rules-and-notes-claude-code-21332):
 
 7. A tool registered with `$.tool.register` reaches the model in the main session, and the model calls it when the system prompt section asks.
 8. One small-model call over a 43 KB skill text takes about 2 seconds and returns the requested JSON.
