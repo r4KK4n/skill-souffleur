@@ -13,6 +13,8 @@ type FileConfig = {
   /** Every skill and need key the file spells out, valid or not, for clash checks. */
   skillKeys: string[]
   needKeys: string[]
+  /** Raw per-project blocks of the user file by normalised root; each is parsed only for the root that is open. */
+  projects: Record<string, unknown>
 }
 
 class SchemaError extends Error {}
@@ -50,7 +52,10 @@ export function hasControl(s: string): boolean {
   })
 }
 
-const MAX_LIST = 20
+/** Entries per list, also in a project block. */
+export const MAX_LIST = 20
+/** Project blocks read from the user file. */
+export const MAX_PROJECT_ROOTS = 50
 const MAX_TOOL = 100
 const MAX_GLOB = 200
 /** A project file is untrusted input: it may define this many skills and needs. */
@@ -287,7 +292,7 @@ function parseRule(v: unknown, where: string, source: Origin, soft: (m: string) 
 }
 
 /** Parses one file. Whole-file problems throw; entry problems are collected and the entry dropped. */
-function parseFile(text: string, source: Origin, errors: string[]): FileConfig {
+function parseFile(text: string, source: Origin, errors: string[], extraNeeds: readonly string[] = []): FileConfig {
   const label = `${source} config`
   const fail = (message: string): void => void errors.push(`${label}: ${message}`)
   let data: unknown
@@ -298,11 +303,11 @@ function parseFile(text: string, source: Origin, errors: string[]): FileConfig {
   }
   check(isObject(data), 'top level', 'must be an object')
   const obj = data as Record<string, unknown>
-  const file: FileConfig = { skills: {}, needs: {}, rules: [], notes: [], skillKeys: [], needKeys: [] }
+  const file: FileConfig = { skills: {}, needs: {}, rules: [], notes: [], skillKeys: [], needKeys: [], projects: {} }
 
   for (const key of Object.keys(obj)) {
     if (key === 'skills' || key === 'needs') continue
-    if (key === 'mode' || key === 'trustProjects' || key === 'rules' || key === 'notes' || key === 'learn' || key === 'notices') {
+    if (key === 'mode' || key === 'trustProjects' || key === 'rules' || key === 'notes' || key === 'learn' || key === 'notices' || key === 'projects') {
       if (source === 'project') fail(`${key} is only allowed in the user config; ignored`)
       continue
     }
@@ -319,6 +324,19 @@ function parseFile(text: string, source: Origin, errors: string[]): FileConfig {
       file.trustProjects = (list as string[]).map(normRoot)
     } else {
       fail('trustProjects: must be a list of absolute paths; ignored')
+    }
+  }
+
+  if (source === 'user' && obj.projects !== undefined) {
+    if (!isObject(obj.projects)) fail('projects: must be an object; ignored')
+    else {
+      const entries = Object.entries(obj.projects)
+      if (entries.length > MAX_PROJECT_ROOTS) fail(`projects: at most ${MAX_PROJECT_ROOTS} roots are read; the rest are ignored`)
+      for (const [root, block] of entries.slice(0, MAX_PROJECT_ROOTS)) {
+        if (!isAbsolutePath(root, MAX_GLOB)) errors.push(`projects[${show(root)}]: the root must be an absolute path; block ignored`)
+        else if (normRoot(root) in file.projects) errors.push(`projects[${show(root)}]: the root is listed twice; the later block is ignored`)
+        else file.projects[normRoot(root)] = block
+      }
     }
   }
 
@@ -374,7 +392,7 @@ function parseFile(text: string, source: Origin, errors: string[]): FileConfig {
       for (const [i, value] of list.entries()) {
         try {
           const label = `${kind} ${i + 1}`
-          const entry = kind === 'rule' ? parseRuleEntry(value, label) : parseNoteEntry(value, label, Object.keys(file.needs))
+          const entry = kind === 'rule' ? parseRuleEntry(value, label) : parseNoteEntry(value, label, [...Object.keys(file.needs), ...extraNeeds])
           check(!ids.has(entry.id), label, `id ${show(entry.id)} is already used`)
           ids.add(entry.id)
           if (kind === 'rule') file.rules.push(entry as Rule)
@@ -389,6 +407,103 @@ function parseFile(text: string, source: Origin, errors: string[]): FileConfig {
   return file
 }
 
+type Block = { blocked: string[]; blockedSkills: string[]; ownSkills: string[]; ownNotes: string[]; ownRules: string[]; ignored: string[] }
+
+/** The names of a block's list (`block`, `ignored`): the first 20 entries, each invalid name dropped with its own error, so a typo never unblocks the rest. */
+function nameList(v: unknown, where: string, errors: string[]): string[] {
+  if (!Array.isArray(v)) {
+    errors.push(`${where}: must be a list of names; ignored`)
+    return []
+  }
+  if (v.length > MAX_LIST) errors.push(`${where}: at most ${MAX_LIST} names are read; the rest are ignored`)
+  const out: string[] = []
+  for (const n of v.slice(0, MAX_LIST)) {
+    if (typeof n === 'string' && NAME.test(n) && n !== '__proto__') {
+      if (!out.includes(n)) out.push(n)
+    } else errors.push(`${where}: ${show(n)} is not a valid name; ignored`)
+  }
+  return out
+}
+
+/**
+ * Applies the block of `root` to the user file: removes the blocked skills, notes and rules as if the file did not have them,
+ * then adds the block's own entries, which may not reuse a name or id of what is left of the standard.
+ * Errors name the entry and carry no "user config" label. Returns undefined when the root has no usable block.
+ */
+function applyBlock(user: FileConfig, root: string, errors: string[]): Block | undefined {
+  const raw = user.projects[root]
+  if (raw === undefined) return undefined
+  const W = `projects[${JSON.stringify(root)}]`
+  if (!isObject(raw)) {
+    errors.push(`${W}: must be an object; block ignored`)
+    return undefined
+  }
+  for (const key of Object.keys(raw)) if (!['block', 'skills', 'needs', 'notes', 'rules', 'ignored'].includes(key)) errors.push(`${W}: unknown key ${show(key)}; ignored`)
+  const block: Block = { blocked: [], blockedSkills: [], ownSkills: [], ownNotes: [], ownRules: [], ignored: [] }
+  if (raw.block !== undefined) block.blocked = nameList(raw.block, `${W}.block`, errors)
+  if (raw.ignored !== undefined) block.ignored = nameList(raw.ignored, `${W}.ignored`, errors)
+
+  const gone = new Set(block.blocked)
+  block.blockedSkills = block.blocked.filter((n) => user.skillKeys.includes(n))
+  for (const name of gone) delete user.skills[name]
+  user.skillKeys = user.skillKeys.filter((n) => !gone.has(n))
+  user.rules = user.rules.filter((r) => !gone.has(r.id) && !(r.skill !== undefined && gone.has(r.skill)))
+  user.notes = user.notes.filter((n) => !gone.has(n.id))
+
+  const own: Record<string, unknown> = {}
+  for (const key of ['skills', 'needs', 'notes', 'rules']) {
+    const v = raw[key]
+    if (v === undefined) continue
+    if (Array.isArray(v) ? v.length > MAX_LIST : isObject(v) && Object.keys(v).length > MAX_LIST) {
+      errors.push(`${W}.${key}: at most ${MAX_LIST} entries; ignored`)
+      continue
+    }
+    own[key] = v
+  }
+  const sub: string[] = []
+  const mine = parseFile(JSON.stringify(own), 'user', sub, Object.keys(user.needs))
+  for (const msg of sub) errors.push(`${W}: ${msg.replace(/^user config: /, '')}`)
+  const taken = new Set([...user.rules, ...user.notes].map((e) => e.id))
+  const clash = (path: string): void => void errors.push(`${W}.${path}: already in the standard; block it first or rename; entry dropped`)
+  for (const [name, rule] of Object.entries(mine.skills)) {
+    if (user.skillKeys.includes(name)) clash(`skills.${name}`)
+    else if (rule.notIn !== undefined) errors.push(`${W}.skills.${name}: notIn has no meaning inside a block; entry dropped`)
+    else {
+      user.skills[name] = rule
+      user.skillKeys.push(name)
+      block.ownSkills.push(name)
+    }
+  }
+  for (const [name, need] of Object.entries(mine.needs)) {
+    if (user.needKeys.includes(name)) errors.push(`${W}.needs.${name}: already in the standard; rename; entry dropped`)
+    else {
+      user.needs[name] = need
+      user.needKeys.push(name)
+    }
+  }
+  for (const [kind, list] of [['rules', mine.rules], ['notes', mine.notes]] as const) {
+    for (const entry of list) {
+      if (taken.has(entry.id)) {
+        clash(`${kind}.${entry.id}`)
+        continue
+      }
+      if (entry.where !== undefined) {
+        errors.push(`${W}.${kind}.${entry.id}: where has no meaning inside a block; entry dropped`)
+        continue
+      }
+      taken.add(entry.id)
+      if (kind === 'rules') {
+        user.rules.push(entry as Rule)
+        block.ownRules.push(entry.id)
+      } else {
+        user.notes.push(entry as Note)
+        block.ownNotes.push(entry.id)
+      }
+    }
+  }
+  return block
+}
+
 /**
  * Reads the user file and the project file (either may be absent). Each file is
  * validated on its own: an invalid entry drops only that entry. The project file
@@ -399,6 +514,7 @@ function parseFile(text: string, source: Origin, errors: string[]): FileConfig {
 export function parseConfig(
   userText: string | undefined,
   projectText: string | undefined,
+  root?: string,
 ): { config: Config; errors: string[] } {
   const errors: string[] = []
   const config: Config = { mode: 'observe', skills: {}, needs: {}, trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true }
@@ -425,6 +541,8 @@ export function parseConfig(
     }
   }
 
+  let block: Block | undefined
+  if (user && root !== undefined) block = applyBlock(user, normRoot(root), errors)
   if (user) {
     if (user.mode !== undefined) config.mode = user.mode
     if (user.trustProjects) config.trustProjects = user.trustProjects
@@ -436,6 +554,16 @@ export function parseConfig(
     dropUnknownNeed(user, 'user', new Set(Object.keys(user.needs)))
     Object.assign(config.skills, user.skills)
     Object.assign(config.needs, user.needs)
+  }
+  if (project && block) {
+    // The block wins over the repository file too: a blocked name stays out, and may name a repository skill.
+    for (const name of block.blocked) {
+      if (name in project.skills) {
+        delete project.skills[name]
+        if (!block.blockedSkills.includes(name)) block.blockedSkills.push(name)
+      }
+    }
+    block.blockedSkills = block.blocked.filter((n) => block.blockedSkills.includes(n))
   }
   if (project) {
     const userSkills = new Set(user?.skillKeys)
@@ -457,6 +585,15 @@ export function parseConfig(
     Object.assign(config.needs, project.needs)
     const projectNeeds = Object.keys(project.needs)
     if (projectNeeds.length) config.projectNeeds = projectNeeds
+  }
+  if (block && root !== undefined) {
+    config.project = {
+      root: normRoot(root),
+      blocked: block.blocked,
+      blockedSkills: block.blockedSkills,
+      own: [...block.ownSkills.filter((n) => n in config.skills), ...block.ownNotes.filter((id) => config.notes.some((n) => n.id === id)), ...block.ownRules.filter((id) => config.rules.some((r) => r.id === id))],
+      ignored: block.ignored,
+    }
   }
   let replyOwner: string | undefined
   for (const [name, rule] of Object.entries(config.skills)) {

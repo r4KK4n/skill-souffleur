@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { parseConfig } from '../src/core/config.ts'
-import { applyChoice, candidates, cleanNeedText, CHOICE_LABEL, explicitOnly, injectedWarning, options, parsePicks, parseSkips, picksPrompt, setupSteps, SETUP_INTRO, INJECTED_HELP } from '../src/core/setup.ts'
+import { addSkillToProject, hasProjectKey, ignoreInProject, applyChoice, candidates, cleanNeedText, CHOICE_LABEL, explicitOnly, injectedWarning, options, parsePicks, parseSkips, picksPrompt, setupSteps, SETUP_INTRO, INJECTED_HELP } from '../src/core/setup.ts'
 
 const config = (user: unknown, project?: unknown) => parseConfig(JSON.stringify(user), project === undefined ? undefined : JSON.stringify(project)).config
 const doc = (c: unknown) => c as { mode?: string; skills: Record<string, Record<string, unknown>>; needs: Record<string, unknown> }
@@ -281,4 +281,51 @@ test('applyChoice strips for when a skill moves from always to need, and need to
   assert.deepEqual(doc(r.config).skills, { a: { need: 'n' } })
   const r2 = applyChoice({ skills: { a: { need: 'n', for: 'chat' } }, needs: { n: 'T.' } }, 'a', 'start')
   assert.deepEqual(doc(r2.config).skills, { a: { always: true, for: 'chat' } })
+})
+
+test('candidates leaves out skipped names', () => {
+  const c = config({ skills: { x: { always: true }, y: { always: true } } })
+  const out = candidates(c, ['x', 'y', 'o', 'z'], ['o'], ['z'], ['x', 'o'])
+  assert.deepEqual(out.map((k) => k.skill), ['y', 'z'])
+})
+
+test('need pruning counts needs used by any project block skill or note', () => {
+  const user = { skills: { a: { need: 'n1' } }, needs: { n1: 'One.', n2: 'Two.', n3: 'Three.', n4: 'Four.' }, projects: { '/w': { skills: { o: { need: 'n2' } }, notes: [{ id: 'q', text: 't', need: 'n3' }] } } }
+  const r = applyChoice(user, 'a', 'need', { key: 'n1', text: 'One.' })
+  assert.deepEqual(r.pruned, ['n4'])
+  assert.ok((r.config as { projects: unknown }).projects)
+})
+
+test('project helpers write only into projects[root] and never touch the standard', () => {
+  const user = { skills: { a: { need: 'n' } }, needs: { n: 'Standard text.' } }
+  assert.equal(hasProjectKey({ projects: { '/w/': {} } }, '/w'), true)
+  assert.equal(hasProjectKey(user, '/w'), false)
+  const same = addSkillToProject(user, '/w', 'o', 'need', { key: 'n', text: 'Standard text.' }).config as { skills: unknown; needs: unknown; projects: Record<string, unknown> }
+  assert.deepEqual(same.projects['/w'], { skills: { o: { need: 'n' } } })
+  assert.deepEqual(same.skills, user.skills)
+  const forked = addSkillToProject(user, '/w', 'o', 'need', { key: 'n', text: 'Other.' }).config as { needs: unknown; projects: Record<string, { skills: { o: { need: string } }; needs: Record<string, unknown> }> }
+  assert.deepEqual(forked.needs, user.needs)
+  assert.notEqual(forked.projects['/w']!.skills.o.need, 'n')
+  assert.deepEqual(Object.values(forked.projects['/w']!.needs), [{ for: 'work', what: 'Other.' }])
+  assert.deepEqual((ignoreInProject(user, '/w', 'x').config as { projects: unknown }).projects, { '/w': { ignored: ['x'] } })
+  const full = { projects: { '/w': { ignored: Array.from({ length: 20 }, (_, i) => `s${i}`) } } }
+  assert.match(ignoreInProject(full, '/w', 'x').note ?? '', /full/)
+})
+
+test('Everywhere refuses a skill that a project block uses as its own', () => {
+  const user = { skills: {}, projects: { '/w': { skills: { o: { always: true } } } } }
+  const r = applyChoice(user, 'o', 'start')
+  assert.deepEqual(r.config, user)
+  assert.match(r.note ?? '', /o/)
+  assert.match(r.note ?? '', /project/)
+})
+
+test('Everywhere may still change a standard skill that a block also redefines', () => {
+  const user = { skills: { x: { always: true } }, projects: { '/a': { block: ['x'], skills: { x: { need: 'n' } }, needs: { n: 'Own.' } } } }
+  const changed = applyChoice(user, 'x', 'need', { key: 'm', text: 'Std.' })
+  assert.equal(changed.note, undefined)
+  assert.deepEqual((changed.config as { skills: unknown }).skills, { x: { need: 'm' } })
+  const gone = applyChoice(user, 'x', 'none')
+  assert.equal(gone.note, undefined)
+  assert.deepEqual((gone.config as { skills: unknown }).skills, {})
 })

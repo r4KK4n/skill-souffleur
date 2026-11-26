@@ -541,3 +541,174 @@ test('only one chat skill can carry reply; the later one is an error and ignored
   assert.equal(r.config.skills.b?.reply, undefined)
   assert.ok(r.errors.some((e) => e.endsWith('b.reply: only one chat skill can carry reply; ignored')))
 })
+
+// --- project blocks ---
+
+const standard = {
+  skills: {
+    'chat-style': { always: true, for: 'chat' },
+    'writing-guide': { need: 'prose' },
+    'writing-check': { need: 'prose', gate: { tools: ['Write'], paths: ['**/*.md'] }, duty: { after: { tools: ['Write'], paths: ['**/*.md'] }, evidence: { tool: 'Bash', command: '*check*' } } },
+  },
+  needs: { prose: { for: 'readers', what: 'Writing text people read.' } },
+  notes: [{ id: 'n-one', text: 'Keep it short.' }, { id: 'n-two', text: 'Name the file.' }],
+  rules: [{ id: 'r-one', before: { tools: ['Write'] }, skill: 'writing-guide', source: 'user' }],
+}
+const withBlock = (block: unknown, root = '/work/a', extra: Record<string, unknown> = {}) => json({ ...standard, ...extra, projects: { [root]: block } })
+
+test('a block removes a skill everywhere it appears, only in its root', () => {
+  const user = withBlock({ block: ['chat-style', 'writing-check'] })
+  const a = parseConfig(user, undefined, '/work/a')
+  assert.deepEqual(a.errors, [])
+  assert.deepEqual(Object.keys(a.config.skills), ['writing-guide'])
+  assert.deepEqual(a.config.project, { root: '/work/a', blocked: ['chat-style', 'writing-check'], blockedSkills: ['chat-style', 'writing-check'], own: [], ignored: [] })
+  const b = parseConfig(user, undefined, '/work/b')
+  assert.deepEqual(Object.keys(b.config.skills), ['chat-style', 'writing-guide', 'writing-check'])
+  assert.equal(b.config.project, undefined)
+  assert.ok(b.config.skills['writing-check']!.gate)
+  assert.deepEqual(parseConfig(user, undefined).config.project, undefined)
+})
+
+test('the block root compares without a trailing slash', () => {
+  const user = withBlock({ block: ['chat-style'] }, '/work/a/')
+  assert.deepEqual(Object.keys(parseConfig(user, undefined, '/work/a').config.skills), ['writing-guide', 'writing-check'])
+  assert.equal(parseConfig(user, undefined, '/work/a/').config.project?.root, '/work/a')
+})
+
+test('blocking a skill drops the rules that need it and blocking an id drops a note or rule', () => {
+  const { config, errors } = parseConfig(withBlock({ block: ['writing-guide', 'n-two'] }), undefined, '/work/a')
+  assert.deepEqual(errors, [])
+  assert.deepEqual(config.rules, [])
+  assert.deepEqual(config.notes.map((n) => n.id), ['n-one'])
+  assert.deepEqual(config.project?.blockedSkills, ['writing-guide'])
+  const r = parseConfig(withBlock({ block: ['r-one'] }), undefined, '/work/a')
+  assert.deepEqual(r.config.rules, [])
+  assert.equal(Object.keys(r.config.skills).length, 3)
+})
+
+test('a name in the block that the standard lacks is kept and later standard additions stay blocked', () => {
+  const { config, errors } = parseConfig(withBlock({ block: ['future-skill'] }), undefined, '/work/a')
+  assert.deepEqual(errors, [])
+  assert.deepEqual(config.project, { root: '/work/a', blocked: ['future-skill'], blockedSkills: [], own: [], ignored: [] })
+  const later = JSON.stringify({ ...standard, skills: { ...standard.skills, 'future-skill': { need: 'prose' } }, projects: { '/work/a': { block: ['future-skill'] } } })
+  assert.ok(!('future-skill' in parseConfig(later, undefined, '/work/a').config.skills))
+  assert.ok('future-skill' in parseConfig(later, undefined, '/work/b').config.skills)
+})
+
+test('a block adds its own skills, needs, notes and rules', () => {
+  const block = {
+    skills: { 'local-skill': { need: 'local' } },
+    needs: { local: { for: 'work', what: 'Local work.' } },
+    notes: [{ id: 'n-local', text: 'Only here.', need: 'local' }],
+    rules: [{ id: 'r-local', before: { tools: ['Edit'] }, skill: 'local-skill', source: 'user' }],
+    ignored: ['other-skill'],
+  }
+  const a = parseConfig(withBlock(block), undefined, '/work/a')
+  assert.deepEqual(a.errors, [])
+  assert.equal(a.config.skills['local-skill']!.from, 'user')
+  assert.ok(a.config.needs.local)
+  assert.deepEqual(a.config.notes.map((n) => n.id), ['n-one', 'n-two', 'n-local'])
+  assert.deepEqual(a.config.rules.map((r) => r.id), ['r-one', 'r-local'])
+  assert.deepEqual(a.config.project, { root: '/work/a', blocked: [], blockedSkills: [], own: ['local-skill', 'n-local', 'r-local'], ignored: ['other-skill'] })
+  const b = parseConfig(withBlock(block), undefined, '/work/b')
+  assert.ok(!('local-skill' in b.config.skills) && !b.config.needs.local)
+  assert.deepEqual(b.config.notes.map((n) => n.id), ['n-one', 'n-two'])
+})
+
+test('an own entry may not reuse a standard name or id unless the standard one is blocked', () => {
+  const block = { skills: { 'writing-guide': { always: true } }, notes: [{ id: 'n-one', text: 'x' }], rules: [{ id: 'n-two', before: { tools: ['Edit'] }, skill: 'chat-style', source: 'user' }], needs: { prose: 'Again.' } }
+  const { config, errors } = parseConfig(withBlock(block), undefined, '/work/a')
+  assert.ok(errors.includes('projects["/work/a"].skills.writing-guide: already in the standard; block it first or rename; entry dropped'), errors.join('\n'))
+  assert.ok(errors.some((e) => e.includes('projects["/work/a"].notes.n-one: already in the standard')))
+  assert.ok(errors.some((e) => e.includes('projects["/work/a"].rules.n-two: already in the standard')))
+  assert.ok(errors.some((e) => e.includes('projects["/work/a"].needs.prose: already in the standard')))
+  assert.deepEqual(config.skills['writing-guide'], { from: 'user', need: 'prose' })
+  assert.deepEqual(config.notes.map((n) => n.id), ['n-one', 'n-two'])
+  const ok = parseConfig(withBlock({ block: ['writing-guide'], skills: { 'writing-guide': { always: true } } }), undefined, '/work/a')
+  assert.deepEqual(ok.errors, [])
+  assert.equal(ok.config.skills['writing-guide']!.always, true)
+  assert.equal(ok.config.skills['writing-guide']!.need, undefined)
+})
+
+test('notIn and where keep working beside a block', () => {
+  const user = json({ skills: { s1: { always: true, notIn: ['/work/a'] } }, notes: [{ id: 'w', text: 'here', where: '/work/a' }], projects: { '/work/a': { block: ['nothing'] } } })
+  const { config, errors } = parseConfig(user, undefined, '/work/a')
+  assert.deepEqual(errors, [])
+  assert.deepEqual(config.skills.s1!.notIn, ['/work/a'])
+  assert.equal(config.notes[0]!.where, '/work/a')
+})
+
+test('a malformed block drops only that block and an entry error drops only the entry', () => {
+  const bad = parseConfig(json({ ...standard, projects: { 'relative/root': { block: ['chat-style'] }, '/work/a': 'nope', '/work/b': { block: 'chat-style' }, '/work/c': { bogus: 1, block: ['chat-style'] } } }), undefined, '/work/a')
+  assert.equal(Object.keys(bad.config.skills).length, 3)
+  assert.equal(bad.config.project, undefined)
+  assert.ok(bad.errors.some((e) => e.includes('projects') && e.includes('relative/root')))
+  assert.ok(bad.errors.some((e) => e.includes('projects["/work/a"]')))
+  const b = parseConfig(json({ ...standard, projects: { '/work/b': { block: 'chat-style', skills: { ok: { always: true } } } } }), undefined, '/work/b')
+  assert.ok(b.errors.some((e) => e.includes('projects["/work/b"].block')))
+  assert.equal(Object.keys(b.config.skills).length, 4)
+  const c = parseConfig(json({ ...standard, projects: { '/work/c': { bogus: 1, block: ['chat-style'], skills: { x: { need: 'missing' } } } } }), undefined, '/work/c')
+  assert.ok(c.errors.some((e) => e.includes('bogus')))
+  assert.ok(c.errors.some((e) => e.includes('missing')))
+  assert.ok(!('chat-style' in c.config.skills) && !('x' in c.config.skills))
+})
+
+test('at most 50 roots and 20 names per list', () => {
+  const many: Record<string, unknown> = {}
+  for (let i = 0; i < 51; i++) many[`/r/${i}`] = { block: ['chat-style'] }
+  const { config, errors } = parseConfig(json({ ...standard, projects: many }), undefined, '/r/50')
+  assert.ok(errors.some((e) => /at most 50/.test(e)))
+  assert.ok('chat-style' in config.skills)
+  const long = parseConfig(withBlock({ block: Array.from({ length: 21 }, (_, i) => `s${i}`) }), undefined, '/work/a')
+  assert.ok(long.errors.some((e) => e.includes('projects["/work/a"].block')))
+  assert.equal(long.config.project?.blocked.length, 20)
+})
+
+test('a project file with projects cannot block or add anything', () => {
+  const project = json({ projects: { '/work/a': { block: ['chat-style'], skills: { evil: { always: true } } } } })
+  const { config, errors } = parseConfig(json(standard), project, '/work/a')
+  assert.ok(errors.includes('project config: projects is only allowed in the user config; ignored'), errors.join('\n'))
+  assert.equal(Object.keys(config.skills).length, 3)
+  assert.equal(config.project, undefined)
+})
+
+test('the block wins over the project file too: a blocked name stays out and can name a repo-file skill', () => {
+  const project = json({ skills: { 'writing-guide': { always: true }, 'repo-only': { always: true } } })
+  const { config, errors } = parseConfig(withBlock({ block: ['writing-guide', 'repo-only'] }), project, '/work/a')
+  assert.ok(!('writing-guide' in config.skills) && !('repo-only' in config.skills), errors.join('\n'))
+  assert.deepEqual(config.project?.blockedSkills, ['writing-guide', 'repo-only'])
+  const other = parseConfig(withBlock({ block: ['writing-guide'] }), project, '/work/b')
+  assert.equal(other.config.skills['writing-guide']!.from, 'user')
+  assert.ok('repo-only' in other.config.skills)
+})
+
+test('an invalid name in block or ignored drops only that name; over 20 keeps the first 20', () => {
+  const { config, errors } = parseConfig(withBlock({ block: ['chat-style', 'bad name!', 7, 'writing-guide'], ignored: ['ok', 'no good'] }), undefined, '/work/a')
+  assert.deepEqual(config.project?.blocked, ['chat-style', 'writing-guide'])
+  assert.deepEqual(config.project?.ignored, ['ok'])
+  assert.ok(!('chat-style' in config.skills))
+  assert.equal(errors.filter((e) => e.includes('projects["/work/a"].block')).length, 2)
+  assert.equal(errors.filter((e) => e.includes('projects["/work/a"].ignored')).length, 1)
+  const names = Array.from({ length: 22 }, (_, i) => `s${i}`)
+  const long = parseConfig(withBlock({ block: ['chat-style', ...names] }), undefined, '/work/a')
+  assert.equal(long.config.project?.blocked.length, 20)
+  assert.ok(!('chat-style' in long.config.skills))
+  assert.ok(long.errors.some((e) => e.includes('projects["/work/a"].block') && /20/.test(e)))
+  const notList = parseConfig(withBlock({ block: 'chat-style' }), undefined, '/work/a')
+  assert.deepEqual(notList.config.project?.blocked, [])
+})
+
+test('where on an own note or rule and notIn on an own skill are errors and drop the entry', () => {
+  const block = {
+    skills: { 'own-a': { always: true, notIn: ['/x'] }, 'own-b': { always: true } },
+    notes: [{ id: 'own-n', text: 'x', where: '/work/a' }, { id: 'own-m', text: 'y' }],
+    rules: [{ id: 'own-r', before: { tools: ['Edit'] }, skill: 'own-b', source: 'user', where: '/work/a' }],
+  }
+  const { config, errors } = parseConfig(withBlock(block), undefined, '/work/a')
+  assert.ok(!('own-a' in config.skills) && 'own-b' in config.skills)
+  assert.deepEqual(config.notes.map((n) => n.id), ['n-one', 'n-two', 'own-m'])
+  assert.deepEqual(config.rules.map((r) => r.id), ['r-one'])
+  assert.ok(errors.some((e) => e.includes('projects["/work/a"].skills.own-a') && e.includes('notIn')))
+  assert.ok(errors.some((e) => e.includes('projects["/work/a"].notes.own-n') && e.includes('where')))
+  assert.ok(errors.some((e) => e.includes('projects["/work/a"].rules.own-r') && e.includes('where')))
+})

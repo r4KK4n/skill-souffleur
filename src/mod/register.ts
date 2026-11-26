@@ -1,9 +1,9 @@
 import type { Register } from 'claude-code'
-import { excludedIn, isTrustedRoot, parseConfig } from '../core/config.ts'
+import { MAX_LIST, MAX_PROJECT_ROOTS, excludedIn, isTrustedRoot, normRoot, parseConfig } from '../core/config.ts'
 import { decide, initSession, normalizeSession } from '../core/decide.ts'
 import { MIGRATE_INTRO, describeHook, findHookOverlaps, findPassages, hookQuestion, hookSteps, isGuess, migrateSteps, passageLines, removeHook } from '../core/migrate.ts'
 import type { HookOverlap, Passage } from '../core/migrate.ts'
-import { CHOICE_LABEL, INJECTED_HELP, NOT_SET_UP, SETUP_INTRO, applyChoice, candidates, choiceOf, cleanNeedText, configProblem, currentChoice, describePlan, explicitOnly, injectedWarning, needKeyFor, options, parsePicks, parseSkips, picksPrompt, setupSteps } from '../core/setup.ts'
+import { CHOICE_LABEL, INJECTED_HELP, addSkillToProject, hasProjectKey, ignoreInProject, NOT_SET_UP, SETUP_INTRO, applyChoice, candidates, choiceOf, cleanNeedText, configProblem, currentChoice, describePlan, explicitOnly, injectedWarning, needKeyFor, options, parsePicks, parseSkips, picksPrompt, setupSteps } from '../core/setup.ts'
 import type { LoadChoice, NeedText, Plan, StartHooks, Suggestion } from '../core/setup.ts'
 import type { Action, CoreEvent, Session } from '../core/decide.ts'
 import { audienceOf, classifyDeliverable, needTexts } from '../core/needs.ts'
@@ -97,7 +97,7 @@ async function getLoaded($: Dollar): Promise<Loaded> {
   const cwd: string = await $.session.cwd()
   const userText = home ? await readOptional($, `${home}/.claude/souffleur.json`, errors, home) : undefined
   const projectText = await readOptional($, `${root}/.claude/souffleur.json`, errors, home)
-  const parsed = parseConfig(userText === undefined ? undefined : stripBom(userText), projectText === undefined ? undefined : stripBom(projectText))
+  const parsed = parseConfig(userText === undefined ? undefined : stripBom(userText), projectText === undefined ? undefined : stripBom(projectText), root)
   let tree = cwd
   try {
     const copy = await $.vcs.detect({ path: cwd })
@@ -414,7 +414,7 @@ const withNotes = (text: string, notes: string[]) => (notes.length ? `${text}\n\
  * It reads the files fresh, writes only the user file, and writes nothing when the file cannot be read or edited.
  * Where no dialog answers, it returns the recommendations and the config they give, and writes nothing.
  */
-async function runInit($: Dollar, l0: Loaded): Promise<string> {
+async function runInit($: Dollar, l0: Loaded, only?: string[]): Promise<string> {
   const notes: string[] = []
   const home: string | undefined = await $.env.get('HOME')
   if (!home) return 'Souffleur init: the home folder is unknown, so nothing was changed.'
@@ -437,12 +437,24 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
     if (problem) return stop(`${shown(configPath)} cannot be edited because ${problem}`)
   }
   const projectText = await readOptional($, `${l0.root}/.claude/souffleur.json`, notes, home)
-  const parsed = parseConfig(user.kind === 'ok' ? stripBom(user.text) : undefined, projectText === undefined ? undefined : stripBom(projectText))
-  const config = parsed.config
-  notes.push(...parsed.errors)
+  // init edits the standard: it reads the config without this root's block, and leaves out what the block names or adds.
+  const userSrc = user.kind === 'ok' ? stripBom(user.text) : undefined
+  const projectSrc = projectText === undefined ? undefined : stripBom(projectText)
+  const config = parseConfig(userSrc, projectSrc).config
+  const here = parseConfig(userSrc, projectSrc, l0.root)
+  notes.push(...here.errors)
+  // Raw keys, so an entry that failed validation is skipped as well.
+  const rawKey = isRecord(userDoc) && isRecord(userDoc.projects) ? Object.keys(userDoc.projects).find((k) => normRoot(k) === normRoot(l0.root)) : undefined
+  const rawBlock = rawKey === undefined ? undefined : ((userDoc as Record<string, Record<string, unknown>>).projects[rawKey])
+  const rawNames = (v: unknown): string[] => (isRecord(v) ? Object.keys(v) : [])
+  const rawIds = (v: unknown): string[] => (Array.isArray(v) ? v.flatMap((x) => (isRecord(x) && typeof x.id === 'string' ? [x.id] : [])) : [])
+  const skip = isRecord(rawBlock)
+    ? [...(Array.isArray(rawBlock.block) ? rawBlock.block.filter((n): n is string => typeof n === 'string') : []), ...rawNames(rawBlock.skills), ...rawIds(rawBlock.notes), ...rawIds(rawBlock.rules), ...(Array.isArray(rawBlock.ignored) ? rawBlock.ignored.filter((n): n is string => typeof n === 'string') : [])]
+    : []
+  skip.push(...(here.config.project?.blocked ?? []), ...(here.config.project?.own ?? []))
   const projectSkills: Record<string, unknown> = Object.fromEntries(Object.entries(config.skills).filter(([, r]) => r.from === 'project'))
 
-  const settings = await readSettings($, settingsPath, home)
+  const settings = only === undefined ? await readSettings($, settingsPath, home) : {}
   if (settings.error) notes.push(`${settings.error}, so its hooks were not checked.`)
   const described = await installedWithDescriptions($)
   const installed = described.map((x) => x.name)
@@ -450,14 +462,14 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
   const hooks = findHookOverlaps(settings.value, configured, installed.filter((n) => !configured.includes(n)))
   const reloadHooked = [...new Set(hooks.flatMap((o) => (o.skill !== undefined && installed.includes(o.skill) && !(o.skill in config.skills) ? [o.skill] : [])))]
   const startHooked = new Set(hooks.flatMap((o) => (o.event === 'SessionStart' && o.skill !== undefined ? [o.skill] : [])))
-  const passages = findPassages(await readStanding($, l0, home, notes), configured, Infinity)
+  const passages = only === undefined ? findPassages(await readStanding($, l0, home, notes), configured, Infinity) : []
 
   // One small-model call over the installed skills that have no need yet: unconfigured, hook-reloaded, or in the user file without one.
   // Skills whose description says they run only on an explicit request are not sent; they are advised against watching.
   const explicit = new Set(described.filter((x) => explicitOnly(x.description)).map((x) => x.name))
   const pool = described.filter((x) => {
     const rule = config.skills[x.name]
-    return !explicit.has(x.name) && (rule === undefined || (rule.from === 'user' && rule.need === undefined))
+    return (only === undefined || only.includes(x.name)) && !explicit.has(x.name) && (rule === undefined || (rule.from === 'user' && rule.need === undefined))
   })
   const skips = new Set(explicit)
   let picks: Suggestion[] = []
@@ -474,7 +486,9 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
     }
   }
 
-  const plans: Plan[] = candidates(config, installed, reloadHooked, picks.map((x) => x.skill)).map(({ skill, source }) => {
+  // Skills of this project that nothing names yet: asked again here, for this project or everywhere.
+  const ownHere = new Set((await projectInstalled($)).filter((n) => !(n in config.skills) && !skip.includes(n)))
+  const plans: Plan[] = candidates(config, installed, reloadHooked, [...picks.map((x) => x.skill), ...ownHere], skip).filter((c) => only === undefined || only.includes(c.skill)).map(({ skill, source }) => {
     const current = currentChoice(config.skills[skill])
     const pick = picks.find((x) => x.skill === skill)
     const need = pick ? { need: pick.need } : {}
@@ -483,8 +497,9 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
     return { skill, source, ...(current === undefined ? {} : { current }), recommended: current ?? (skips.has(skill) ? 'none' : 'need'), ...need }
   })
   const watched = new Set(plans.map((p) => p.skill))
-  const unwatched = installed.filter((name) => !watched.has(name))
+  const unwatched = installed.filter((name) => !watched.has(name) && !skip.includes(name))
   const toAsk = plans.filter((p) => p.source !== 'project')
+  const setUp: string[] = []
 
   /** The line for an injected result: the plugin's SessionStart hooks decide which one. */
   const injectedLine = async (skill: string) => injectedWarning(skill, await pluginStartHooks($, home, skill))
@@ -542,6 +557,20 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
         need = choice === 'need' ? prop.need : undefined
       }
 
+      // A project's own skill: "Don't watch" ignores it here; any other answer asks where it applies.
+      let scope: 'project' | 'everywhere' = 'everywhere'
+      if (ownHere.has(p.skill)) {
+        if (choice === 'none') scope = 'project'
+        else {
+          const where = await $.ui.ask(`Where should ${p.skill} apply? This project only keeps it out of your other projects; Everywhere adds it to your standard.`, { options: ['This project only', 'Everywhere'], header: 'Souffleur' })
+          if (where === 'This project only') scope = 'project'
+          else if (where !== 'Everywhere') {
+            done.push(`${p.skill}: skipped, no answer about where it applies. Nothing was written for it.`)
+            continue
+          }
+        }
+      }
+
       // Read again: the file may have changed since the scan, and earlier answers are already in it.
       const now2 = await readState($, configPath, home)
       if (now2.kind === 'error') {
@@ -566,7 +595,12 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
           break
         }
       }
-      const r = applyChoice(doc, p.skill, choice, need, projectSkills)
+      const r =
+        scope === 'everywhere'
+          ? applyChoice(doc, p.skill, choice, need, projectSkills)
+          : choice === 'none'
+            ? ignoreInProject(doc, l0.root, p.skill)
+            : addSkillToProject(doc, l0.root, p.skill, choice === 'need' ? 'need' : choice, need)
       if (r.note) done.push(r.note)
       const label = choice === 'none' ? 'not watched' : CHOICE_LABEL[choice]
       if (r.note || JSON.stringify(r.config) === JSON.stringify(doc) || (now2.kind === 'missing' && choice === 'none')) {
@@ -579,8 +613,14 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
         }
         continue
       }
+      if (!backedUp && now2.kind === 'ok') {
+        await $.fs.write(`${configPath}.bak-${Date.now()}`, now2.text)
+        backedUp = true
+      }
       await $.fs.write(configPath, `${JSON.stringify(r.config, null, 2)}\n`)
       wrote = true
+      const need2 = choice === 'need' ? `for ${need?.text ?? 'its description'}` : choice === 'start' ? 'from the start' : choice === 'injected' ? 'as its plugin injects it' : ''
+      setUp.push(choice === 'none' ? `${p.skill}: ${scope === 'project' ? 'ignored here' : 'not watched'}` : `${p.skill}: watched ${need2.replace(/\.$/, '')} ${scope === 'project' ? 'in this project' : 'everywhere'}`)
       loaded = undefined // the session reads the new file on its next event
       done.push(`${p.skill}: ${label}.`)
       if (choice === 'injected') {
@@ -609,6 +649,10 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
     if (wrote) await safe($, 'installed', undefined, () => refreshInstalled($))
   }
 
+  if (only !== undefined) {
+    const problems = done.filter((d) => /Stopped|skipped|Nothing was written|not changed|already a skill/.test(d))
+    return setUp.length ? [...setUp, ...problems].join('\n') : 'Souffleur: nothing set up; /souffleur init asks again.'
+  }
   const out = ['Souffleur init', '', ...(toAsk.length || done.length ? done.map((d) => `- ${d}`) : ['- Nothing to ask: no skill is configured yet and none looks worth watching.'])]
   const project = plans.filter((p) => p.source === 'project')
   if (project.length) out.push('', `Set only in the project file, so init leaves ${project.length === 1 ? 'it' : 'them'} alone: ${project.map((p) => p.skill).join(', ')}.`)
@@ -763,6 +807,228 @@ async function withStoredDeclined($: Dollar, s: Session): Promise<Session> {
   } catch {
     return s
   }
+}
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
+const BLOCK_NAME = /^[A-Za-z0-9:_-]{1,64}$/
+let backedUp = false
+
+/**
+ * `/souffleur block <name>` and `unblock <name>`: edits `projects[<this root>].block` in the user file.
+ * Reads fresh, stops on a read error or a file that cannot be edited, keeps every other key, and saves
+ * `souffleur.json.bak-<epoch ms>` before the first write of this process.
+ */
+async function runBlock($: Dollar, l0: Loaded, verb: 'block' | 'unblock', name: string): Promise<string> {
+  const home: string | undefined = await $.env.get('HOME')
+  if (!home) return 'Souffleur: the home folder is unknown, so nothing was written.'
+  if (name === '') return `Souffleur: usage /souffleur ${verb} <skill, note or rule name>.`
+  if (!BLOCK_NAME.test(name) || name === '__proto__') return `Souffleur: ${JSON.stringify(name.slice(0, 80))} is not a valid name.`
+  const path = `${home}/.claude/souffleur.json`
+  const st = await readState($, path, home)
+  if (st.kind === 'error') return `Souffleur: could not read ${shownPath(home, path)} (${st.why}), so nothing was written.`
+  if (st.kind === 'missing') return 'Souffleur: there is no ~/.claude/souffleur.json yet, so there is no standard to block in. Run /souffleur init.'
+  let doc: unknown
+  try {
+    doc = parseJson(st.text)
+  } catch (err) {
+    return `Souffleur: ${shownPath(home, path)} is not valid JSON (${scrub(home, message(err))}), so nothing was written.`
+  }
+  const problem = configProblem(doc)
+  if (problem) return `Souffleur: ${shownPath(home, path)} cannot be edited because ${problem}, so nothing was written.`
+  const root = normRoot(l0.root)
+  if (!/^(\/|[A-Za-z]:[\\/])/.test(root)) return 'Souffleur: the project root is unknown, so nothing was written.'
+  const base = doc as Record<string, unknown>
+  if (base.projects !== undefined && !isRecord(base.projects)) return `Souffleur: "projects" in ${shownPath(home, path)} is not an object, so nothing was written.`
+  const projects: Record<string, unknown> = { ...(base.projects as Record<string, unknown> | undefined) }
+  const key = Object.keys(projects).find((k) => normRoot(k) === root) ?? root
+  if (projects[key] !== undefined && !isRecord(projects[key])) return `Souffleur: the block for ${root} in ${shownPath(home, path)} is not an object, so nothing was written.`
+  const block: Record<string, unknown> = { ...(projects[key] as Record<string, unknown> | undefined) }
+  if (block.block !== undefined && !(Array.isArray(block.block) && block.block.every((n) => typeof n === 'string'))) return `Souffleur: "block" for ${root} is not a list of names, so nothing was written.`
+  const names: string[] = [...((block.block as string[] | undefined) ?? [])]
+  const projectText = await readOptional($, `${l0.root}/.claude/souffleur.json`, [], home)
+  const std = standardNames(parseConfig(stripBom(st.text), projectText === undefined ? undefined : stripBom(projectText)).config)
+  if (!std.has(name) && !names.includes(name)) return `Souffleur: ${name} is not in your standard or this project's block.`
+  if (verb === 'block') {
+    if (names.includes(name)) return `Souffleur: ${name} is already blocked in ${root}.`
+    if (names.length >= MAX_LIST) return `Souffleur: the block of ${root} already has ${MAX_LIST} names, so nothing was written.`
+    if (!(key in projects) && Object.keys(projects).length >= MAX_PROJECT_ROOTS) return `Souffleur: at most ${MAX_PROJECT_ROOTS} project blocks are read, so nothing was written.`
+    names.push(name)
+    block.block = names
+  } else {
+    if (!names.includes(name)) return `Souffleur: ${name} is not blocked in ${root}.`
+    const left = names.filter((n) => n !== name)
+    if (left.length) block.block = left
+    else delete block.block
+  }
+  if (Object.keys(block).length) projects[key] = block
+  else delete projects[key]
+  const next: Record<string, unknown> = { ...base }
+  if (Object.keys(projects).length) next.projects = projects
+  else delete next.projects
+  // Read once more right before the write: another session or the user may have saved the file since.
+  const again = await readState($, path, home)
+  if (again.kind !== 'ok' || again.text !== st.text) return `Souffleur: ${shownPath(home, path)} changed since it was read, so nothing was written.`
+  try {
+    if (!backedUp) {
+      await $.fs.write(`${path}.bak-${Date.now()}`, st.text)
+      backedUp = true
+    }
+    await $.fs.write(path, `${JSON.stringify(next, null, 2)}\n`)
+  } catch (err) {
+    return `Souffleur: could not write ${shownPath(home, path)} (${scrub(home, message(err))}).`
+  }
+  loaded = undefined // the next event reads the new block
+  await apply($, (l) => ({ type: 'config', now: now(), errors: l.errors }))
+  return verb === 'block' ? `Souffleur: ${name} blocked in ${root}; other projects keep it.` : `Souffleur: ${name} unblocked in ${root}; the standard applies here again.`
+}
+
+/** Every skill name, note id and rule id of a config (the standard when it was read without a root). */
+function standardNames(c: Config): Set<string> {
+  return new Set([...Object.keys(c.skills), ...c.notes.map((n) => n.id), ...c.rules.map((r) => r.id)])
+}
+
+/** `/souffleur project`: what applies here, as a few short lines. Empty lines are left out. */
+async function runProject($: Dollar, l: Loaded): Promise<string> {
+  const home: string | undefined = await $.env.get('HOME')
+  const st = home ? await readState($, `${home}/.claude/souffleur.json`, home) : ({ kind: 'missing' } as FileState)
+  const std = parseConfig(st.kind === 'ok' ? stripBom(st.text) : undefined, undefined).config
+  const c = l.config
+  const root = normRoot(l.root)
+  const p = c.project
+  const own = new Set(p?.own ?? [])
+  const known = standardNames(std)
+  const blocked = (p?.blocked ?? []).map((n) => (known.has(n) ? n : `${n} (not in standard)`))
+  for (const r of std.rules) if (r.skill !== undefined && (p?.blockedSkills ?? []).includes(r.skill) && !(p?.blocked ?? []).includes(r.id)) blocked.push(`rule ${r.id} (its skill ${r.skill} is blocked)`)
+  const here = (where: string | undefined) => where === undefined || normRoot(where) === root
+  const userSkills = Object.entries(c.skills).filter(([n, r]) => r.from === 'user' && !own.has(n))
+  const offSkills = userSkills.filter(([, r]) => excludedIn(r, root)).map(([n]) => n)
+  const notes = c.notes.filter((n) => !own.has(n.id))
+  const rules = c.rules.filter((r) => !own.has(r.id))
+  const off = [...offSkills, ...notes.filter((n) => !here(n.where)).map((n) => n.id), ...rules.filter((r) => !here(r.where)).map((r) => r.id)]
+  const mine = [...(p?.own ?? [])].map((n) => `${n in c.skills ? 'skill' : c.notes.some((x) => x.id === n) ? 'note' : 'rule'} ${n}`)
+  const repo = Object.entries(c.skills).filter(([, r]) => r.from === 'project').map(([n]) => n)
+  const lines = [`Souffleur: project ${root}`]
+  if (blocked.length) lines.push(`Blocked here: ${blocked.join(', ')}`)
+  if (mine.length) lines.push(`This project only: ${mine.join(', ')}`)
+  if (off.length) lines.push(`Off here by notIn/where: ${off.join(', ')}`)
+  lines.push(`Standard: ${userSkills.length - offSkills.length} skills, ${notes.filter((n) => here(n.where)).length} notes, ${rules.filter((r) => here(r.where)).length} rules apply here`)
+  if (repo.length) lines.push(`Repository file: ${repo.join(', ')}`)
+  return lines.join('\n')
+}
+
+/** The installed skills that come from the open project (`source` `projectSettings`), when the listing is complete. */
+async function projectInstalled($: Dollar): Promise<string[]> {
+  try {
+    const skills = (await $.session.usage({ breakdown: 'summary' }))?.context?.breakdown?.skills
+    const listed: { name: string; source?: string }[] | undefined = skills?.skillFrontmatter
+    if (!listed?.length) return []
+    if (typeof skills.totalSkills === 'number' && typeof skills.includedSkills === 'number' && skills.includedSkills < skills.totalSkills) return []
+    return [...new Set(listed.filter((x) => x.source === 'projectSettings' || x.source === 'project').map((x) => x.name))]
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Changes the user file through the same careful path as `block`: read fresh, stop on a read error or a file that cannot be edited,
+ * read again right before the write, save `souffleur.json.bak-<epoch ms>` before the first write of a session, then reload.
+ */
+async function editUserFile($: Dollar, change: (doc: unknown) => { config: unknown; note?: string }): Promise<{ ok: boolean; text: string }> {
+  const home: string | undefined = await $.env.get('HOME')
+  if (!home) return { ok: false, text: 'the home folder is unknown, so nothing was written' }
+  const path = `${home}/.claude/souffleur.json`
+  const st = await readState($, path, home)
+  if (st.kind !== 'ok') return { ok: false, text: st.kind === 'error' ? `could not read ${shownPath(home, path)} (${st.why}), so nothing was written` : 'there is no user file, so nothing was written' }
+  let doc: unknown
+  try {
+    doc = parseJson(st.text)
+  } catch (err) {
+    return { ok: false, text: `${shownPath(home, path)} is not valid JSON (${scrub(home, message(err))}), so nothing was written` }
+  }
+  const problem = configProblem(doc)
+  if (problem) return { ok: false, text: `${shownPath(home, path)} cannot be edited because ${problem}, so nothing was written` }
+  const r = change(doc)
+  if (r.note) return { ok: false, text: r.note }
+  const again = await readState($, path, home)
+  if (again.kind !== 'ok' || again.text !== st.text) return { ok: false, text: `${shownPath(home, path)} changed since it was read, so nothing was written` }
+  try {
+    if (!backedUp) {
+      await $.fs.write(`${path}.bak-${Date.now()}`, st.text)
+      backedUp = true
+    }
+    await $.fs.write(path, `${JSON.stringify(r.config, null, 2)}\n`)
+  } catch (err) {
+    return { ok: false, text: `could not write ${shownPath(home, path)} (${scrub(home, message(err))})` }
+  }
+  loaded = undefined
+  await apply($, (l) => ({ type: 'config', now: now(), errors: l.errors }))
+  return { ok: true, text: 'written' }
+}
+
+/** Set once the question about the project's own skills was handled in this session. */
+let ownHandled = false
+const OWN_NOW = 'Set up now'
+const OWN_IGNORE = 'Ignore all here'
+const OWN_LATER = 'Later'
+
+/**
+ * At the first turn end of a session in a repository whose root has no block yet: one dialog about the installed project skills
+ * that nothing names. `Set up now` runs init's round for them, `Ignore all here` writes them to `ignored`, anything else
+ * (`Later`, a dismissal, a timeout, no dialog) writes nothing and sets no stop, so the next session asks again.
+ * Where no dialog opens, one notice names the count.
+ */
+async function askOwnSkills($: Dollar, dialog: boolean): Promise<void> {
+  if (ownHandled) return
+  const { l, session } = await current($)
+  if (session.paused || session.proposals.length || !l.setUp) return
+  let repo: unknown
+  try {
+    repo = await $.session.repo()
+  } catch {
+    return
+  }
+  if (!repo) return
+  ownHandled = true
+  const home: string | undefined = await $.env.get('HOME')
+  if (!home) return
+  const st = await readState($, `${home}/.claude/souffleur.json`, home)
+  if (st.kind !== 'ok') return
+  let doc: unknown
+  try {
+    doc = parseJson(st.text)
+  } catch {
+    return
+  }
+  if (configProblem(doc) || hasProjectKey(doc, l.root)) return
+  const names = (await projectInstalled($)).filter((n) => !(n in l.config.skills))
+  if (!names.length) return
+  const notice = () => void say($, l, `Souffleur: this project has ${names.length} skills not in your config. /souffleur init asks about them.`)
+  if (!dialog) return notice()
+  const shown = names.slice(0, 5).join(', ') + (names.length > 5 ? ', …' : '')
+  const question = `This project has ${names.length} skill${names.length === 1 ? '' : 's'} not in your config: ${shown}. Set ${names.length === 1 ? 'it' : 'them'} up now?`
+  let answer: unknown
+  try {
+    const asking = Promise.resolve().then(() => $.ui.ask(question, { options: [OWN_NOW, OWN_IGNORE, OWN_LATER], header: 'Souffleur' }))
+    asking.catch(() => undefined) // a late rejection after a timeout is nobody's business
+    answer = await Promise.race([asking, $.clock.sleep(ASK_WAIT_MS).then(() => Promise.reject(new TimedOut()))])
+  } catch (err) {
+    // Dismissed or timed out: ask again next session. Nobody can answer: say so once.
+    if (!(err instanceof TimedOut) && !DISMISSED.test(message(err))) notice()
+    return
+  }
+  if (answer === OWN_NOW) {
+    say($, l, await runInit($, l, names))
+    return
+  }
+  if (answer !== OWN_IGNORE) return
+  const kept = names.slice(0, MAX_LIST)
+  const r = await editUserFile($, (d) => {
+    let config: unknown = d
+    for (const name of kept) config = ignoreInProject(config, l.root, name).config
+    return { config }
+  })
+  if (!r.ok) say($, l, `Souffleur: ${r.text}.`)
+  else if (names.length > kept.length) say($, l, `Souffleur: the ignored list of this project holds ${MAX_LIST} names; ${names.length - kept.length} skills stay unasked. /souffleur init asks about them.`)
 }
 
 /**
@@ -1257,6 +1523,8 @@ export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
     await safe($, 'session.start', undefined, async () => {
       loaded = undefined
+      ownHandled = false
+      backedUp = false // a session start is a fresh run: the first change saves a new backup
       const l = await getLoaded($)
       const id: string = await $.session.id()
       const version = (await $.session.version()).version
@@ -1281,7 +1549,7 @@ export const register: Register = (on) => {
     await pruneStore($, await $.session.id())
     await safe($, 'installed', undefined, () => refreshInstalled($))
     await safe($, 'command.register', undefined, async () => {
-      await $.command.register({ name: 'souffleur', description: 'Show which skills Souffleur keeps loaded', argumentHint: '[status | need <name> | drop <name> | pause | resume | init | migrate | rule <text> | review | accept <id> | decline <id>]' })
+      await $.command.register({ name: 'souffleur', description: 'Show which skills Souffleur keeps loaded', argumentHint: '[status | need <name> | drop <name> | pause | resume | init | migrate | rule <text> | review | accept <id> | decline <id> | block <name> | unblock <name> | project]' })
     })
     interactive = e.isInteractive === true
     lastPromptKind = undefined
@@ -1455,9 +1723,12 @@ export const register: Register = (on) => {
           // A dialog was tried and nobody can answer: no new attempt, only a notice for a proposal not shown yet.
           const { l, session } = await current($)
           noticeFirst($, l, session)
+          if (!session.proposals.length) await askOwnSkills($, false)
           return
         }
+        const hadProposals = (await current($)).session.proposals.length > 0
         const line = await askFirst($, true)
+        if (!hadProposals && line === undefined && !noDialog && !askStopped) await askOwnSkills($, interactive || lastPromptKind !== 'sdk')
         if (line !== undefined) {
           try {
             $.ui.toast(line)
@@ -1478,6 +1749,17 @@ export const register: Register = (on) => {
           loaded = undefined // read the files again: another session may have changed them
           const { l } = await current($)
           return verb0 === 'init' ? runInit($, l) : runMigrate($, l)
+        })
+        if (text !== undefined) return { text }
+        return next(e)
+      }
+      if (verb0 === 'block' || verb0 === 'unblock' || verb0 === 'project') {
+        if (!isUserOrigin(e)) return { text: `Souffleur: only the user can run /souffleur ${verb0}; a plugin or the model cannot.` }
+        const rest = (e.args ?? '').trim().slice(verb0.length).trim()
+        const text = await safe($, `command.run.${verb0}`, undefined as string | undefined, async () => {
+          loaded = undefined
+          const { l } = await current($)
+          return verb0 === 'project' ? runProject($, l) : runBlock($, l, verb0, rest)
         })
         if (text !== undefined) return { text }
         return next(e)

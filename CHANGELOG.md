@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-26
+
+- Once per session, in a repository with no project block yet, Souffleur asks one question about the project's own skills that your config does not name: set them up now (init's round, for this project or everywhere), ignore them all here, or later. Where no dialog opens it shows one notice. Nothing is written for `Later`, a dismissal or a timeout.
+
+- `/souffleur block <name>`, `unblock <name>` and `project` change and show the per-project block of the open repository.
+
+- The user file can hold per-project blocks (`projects`) that block named skills, notes and rules in one repository and add entries for it only, while everything else stays the shared standard. `/souffleur` names the project, shows blocked skills as `blocked here` and reads `absent` as `not needed yet`.
+
 ## [0.1.9] - 2026-11-26
 
 - `/souffleur review` and `/souffleur rule` no longer hang on a dialog that nobody answers: after two minutes they return `no answer within two minutes; the proposal stays queued`, the dialog stays open and a late tap still counts once (#54).

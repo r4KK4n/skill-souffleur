@@ -174,3 +174,21 @@ test('shapePrompt lists needs by their text', () => {
   assert.match(prompt, /ui: Building a screen\./)
   assert.doesNotMatch(prompt, /\[object Object\]/)
 })
+
+test('a proposal whose id is blocked in the open root is a duplicate', () => {
+  const p = prop({ kind: 'note', text: 'Keep it short.' }, 'user')
+  const c: Config = { ...config, project: { root: '/work/a', blocked: [p.entry.id], blockedSkills: [], own: [], ignored: [] } }
+  assert.equal(enqueue(c, fresh(), p).status, 'duplicate')
+  assert.equal(enqueue(config, fresh(), p).status, 'queued')
+})
+
+test('addEntry everywhere refuses an id that a project block uses for its own entry', () => {
+  const doc = { notes: [], projects: { '/work/a': { notes: [{ id: 'taken', text: 'x' }], rules: [{ id: 'taken-r', before: { tools: ['Edit'] }, skill: 's' }] } } }
+  const note = { id: 'taken', text: 'y', source: 'user' } as Note
+  const r = addEntry(doc, 'note', note)
+  assert.deepEqual(r.config, doc)
+  assert.match(r.note ?? '', /taken/)
+  const rule = { id: 'taken-r', source: 'user', before: { tools: ['Edit'] }, skill: 's' } as unknown as Rule
+  assert.match(addEntry(doc, 'rule', rule).note ?? '', /taken-r/)
+  assert.equal(addEntry(doc, 'note', { ...note, id: 'free' }).note, undefined)
+})

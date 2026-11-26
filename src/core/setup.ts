@@ -1,3 +1,4 @@
+import { MAX_LIST, normRoot } from './config.ts'
 import type { Config, SkillRule } from './types.ts'
 
 /** What `/souffleur init` works with. Pure functions only: the adapter reads, asks and writes. */
@@ -76,14 +77,14 @@ export function choiceOf(label: string): LoadChoice | 'stop' | undefined {
  * model's picks. A skill that only a project file configures comes last and is listed, not asked:
  * `init` writes the user file.
  */
-export function candidates(config: Config, installed: string[], reloadHooked: string[], picked: string[]): Candidate[] {
+export function candidates(config: Config, installed: string[], reloadHooked: string[], picked: string[], skip: readonly string[] = []): Candidate[] {
   const out: Candidate[] = []
-  const has = (skill: string) => out.some((c) => c.skill === skill)
-  for (const [skill, rule] of Object.entries(config.skills)) if (rule.from === 'user') out.push({ skill, source: 'user' })
+  const has = (skill: string) => out.some((c) => c.skill === skill) || skip.includes(skill)
+  for (const [skill, rule] of Object.entries(config.skills)) if (rule.from === 'user' && !skip.includes(skill)) out.push({ skill, source: 'user' })
   const known = (skill: string) => !(skill in config.skills) && !has(skill) && installed.includes(skill)
   for (const skill of reloadHooked) if (known(skill)) out.push({ skill, source: 'hook' })
   for (const skill of picked) if (known(skill)) out.push({ skill, source: 'model' })
-  for (const [skill, rule] of Object.entries(config.skills)) if (rule.from === 'project') out.push({ skill, source: 'project' })
+  for (const [skill, rule] of Object.entries(config.skills)) if (rule.from === 'project' && !skip.includes(skill)) out.push({ skill, source: 'project' })
   return out
 }
 
@@ -128,6 +129,67 @@ function forkKey(needs: Record<string, unknown>, key: string, skill: string): st
   return candidate
 }
 
+
+/** The raw block of `root` in a user file (its key may differ by a trailing slash), created when absent. The input is not changed. */
+function openBlock(userConfig: unknown, root: string): { doc: Record<string, unknown>; projects: Record<string, unknown>; key: string; block: Record<string, unknown> } {
+  const doc: Record<string, unknown> = isObject(userConfig) ? { ...userConfig } : { mode: 'observe' }
+  const projects: Record<string, unknown> = isObject(doc.projects) ? { ...doc.projects } : {}
+  const key = Object.keys(projects).find((k) => normRoot(k) === normRoot(root)) ?? normRoot(root)
+  const block: Record<string, unknown> = isObject(projects[key]) ? { ...(projects[key] as Record<string, unknown>) } : {}
+  return { doc, projects, key, block }
+}
+
+const closeBlock = (o: ReturnType<typeof openBlock>): unknown => {
+  o.projects[o.key] = o.block
+  return { ...o.doc, projects: o.projects }
+}
+
+/** True when the user file has a `projects` key for this root (any value). */
+export function hasProjectKey(userConfig: unknown, root: string): boolean {
+  return isObject(userConfig) && isObject(userConfig.projects) && Object.keys(userConfig.projects).some((k) => normRoot(k) === normRoot(root))
+}
+
+/** The user file with the skill under `projects[root].ignored`. A full list leaves the file as it was and says so. */
+export function ignoreInProject(userConfig: unknown, root: string, skill: string): { config: unknown; note?: string } {
+  const o = openBlock(userConfig, root)
+  const list = Array.isArray(o.block.ignored) ? (o.block.ignored as unknown[]) : []
+  if (list.includes(skill)) return { config: closeBlock(o) }
+  if (list.length >= MAX_LIST) return { config: userConfig, note: `${skill}: the ignored list of this project is full (${MAX_LIST} names), so nothing was written for it.` }
+  o.block.ignored = [...list, skill]
+  return { config: closeBlock(o) }
+}
+
+/**
+ * The user file with the skill added to `projects[root].skills`, kept as `choice` says. A need text the standard already
+ * uses under another meaning is forked to a free key; the need is written into the block unless the standard has it unchanged.
+ */
+export function addSkillToProject(userConfig: unknown, root: string, skill: string, choice: 'start' | 'injected' | 'need', need?: NeedText): { config: unknown; note?: string } {
+  const o = openBlock(userConfig, root)
+  const skills: Record<string, unknown> = isObject(o.block.skills) ? { ...o.block.skills } : {}
+  if (!(skill in skills) && Object.keys(skills).length >= MAX_LIST) return { config: userConfig, note: `${skill}: this project's block already holds ${MAX_LIST} skills, so nothing was written for it.` }
+  const needText = (n: unknown): string | undefined => (typeof n === 'string' ? n : isObject(n) && typeof n.what === 'string' ? n.what : undefined)
+  if (choice === 'start') skills[skill] = { always: true }
+  else if (choice === 'injected') skills[skill] = { always: true, startup: 'injected' }
+  else {
+    const want = need ?? { key: needKeyFor(skill), text: `The task calls for ${skill}.` }
+    const std = isObject(o.doc.needs) ? o.doc.needs : {}
+    const own: Record<string, unknown> = isObject(o.block.needs) ? { ...o.block.needs } : {}
+    let key = want.key
+    if (key in std && needText(std[key]) === want.text) {
+      // the standard has exactly this need: use it
+    } else if (key in own && needText(own[key]) === want.text) {
+      // the block already has it
+    } else {
+      if (key in std || key in own) key = forkKey({ ...std, ...own }, key, skill)
+      own[key] = { for: 'work', what: want.text }
+      o.block.needs = own
+    }
+    skills[skill] = { need: key }
+  }
+  o.block.skills = skills
+  return { config: closeBlock(o) }
+}
+
 /**
  * Applies one answer to the user config and returns the new config; the input is not changed.
  * Keeps every other key, and a gate or duty when the kind changes. `none` on an entry with a gate or
@@ -144,6 +206,10 @@ export function applyChoice(
 ): { config: unknown; note?: string; pruned?: string[] } {
   const problem = configProblem(userConfig)
   if (problem) return { config: userConfig, note: `${skill}: the config file was not changed because ${problem}.` }
+  const inStandard = isObject(userConfig) && isObject(userConfig.skills) && skill in userConfig.skills
+  if (!inStandard && isObject(userConfig) && isObject(userConfig.projects) && Object.values(userConfig.projects).some((b) => isObject(b) && isObject(b.skills) && skill in b.skills)) {
+    return { config: userConfig, note: `${skill} is already a skill of a project block, so it was not added to the standard. Rename or remove it there first.` }
+  }
   if (need && (!NEED_KEY.test(need.key) || cleanNeedText(need.text) !== need.text)) {
     return { config: userConfig, note: `${skill}: the description was skipped because it is not one line of 1 to 200 characters.` }
   }
@@ -183,7 +249,10 @@ export function applyChoice(
   }
 
   const notes = Array.isArray(doc.notes) ? doc.notes : []
-  const used = new Set([...Object.values(skills), ...Object.values(projectSkills), ...notes].flatMap((r) => (isObject(r) && typeof r.need === 'string' ? [r.need] : [])))
+  // A block's own skills and notes keep their needs alive too.
+  const blocks = isObject(doc.projects) ? Object.values(doc.projects).filter(isObject) : []
+  const inBlocks = blocks.flatMap((b) => [...(isObject(b.skills) ? Object.values(b.skills) : []), ...(Array.isArray(b.notes) ? b.notes : [])])
+  const used = new Set([...Object.values(skills), ...Object.values(projectSkills), ...notes, ...inBlocks].flatMap((r) => (isObject(r) && typeof r.need === 'string' ? [r.need] : [])))
   const pruned: string[] = []
   for (const key of Object.keys(needs)) {
     if (used.has(key)) continue

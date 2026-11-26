@@ -44,6 +44,8 @@ type Opts = {
   skipCompact?: boolean
   /** Installed skill names `$.session.usage` lists. */
   skills?: string[]
+  /** Installed skills whose source is the project (`projectSettings`). */
+  projectSkills?: string[]
   /** What the small model answers to the init prompt. */
   proposals?: string
   /** The labels the user picks, in order; 'reject' makes every dialog reject, as in a `-p` run. */
@@ -187,11 +189,12 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   on('session.usage', () => {
     if (opts.hangUsage) return new Promise(() => {}) as never
     if (opts.failUsage) throw new Error('usage unavailable')
-    const names = opts.listOnly ? [] : (opts.skills ?? [])
+    const projectNames = opts.listOnly ? [] : (opts.projectSkills ?? [])
+    const names = opts.listOnly ? [] : [...(opts.skills ?? []), ...projectNames]
     return {
       value: {
         startedAt: 0,
-        context: { window: 1, breakdown: { skills: { totalSkills: names.length + (opts.incomplete ? 1 : 0), includedSkills: names.length, tokens: 0, skillFrontmatter: names.map((name) => ({ name, source: 'plugin', tokens: 1 })) } } },
+        context: { window: 1, breakdown: { skills: { totalSkills: names.length + (opts.incomplete ? 1 : 0), includedSkills: names.length, tokens: 0, skillFrontmatter: names.map((name) => ({ name, source: projectNames.includes(name) ? 'projectSettings' : 'plugin', tokens: 1 })) } } },
         rateLimits: [],
         cost: {},
       },
@@ -452,7 +455,7 @@ test('skill loaded by a subagent does not mark the main ledger', async ($, on) =
   })
   await start($)
   await $.tool.call({ tool: 'Agent', prompt: 'skills: writing-guide', description: 'd', subagent_type: 'general-purpose' } as never)
-  expect(await table($)).toMatch(/writing-guide \| absent/)
+  expect(await table($)).toMatch(/writing-guide \| not needed yet/)
 })
 
 test('new session id after clear starts a fresh ledger', async ($, on) => {
@@ -462,7 +465,7 @@ test('new session id after clear starts a fresh ledger', async ($, on) => {
   expect(await table($)).toMatch(/writing-guide \| loaded/)
   await $.command.run({ command: 'clear', args: '' })
   w.setId('s2')
-  expect(await table($)).toMatch(/writing-guide \| absent/)
+  expect(await table($)).toMatch(/writing-guide \| not needed yet/)
   const r = await $.prompt.submit({ text: 'fresh' })
   expect(r.context?.join('\n')).toMatch(/writing-guide/)
 })
@@ -633,7 +636,7 @@ test('the /souffleur command shows its arguments in the typeahead', async ($, on
   registeredCommands.length = 0
   world(on, { [USER_FILE]: ALWAYS })
   await start($)
-  expect(JSON.stringify(registeredCommands)).toContain('"argumentHint":"[status | need <name> | drop <name> | pause | resume | init | migrate | rule <text> | review | accept <id> | decline <id>]"')
+  expect(JSON.stringify(registeredCommands)).toContain('"argumentHint":"[status | need <name> | drop <name> | pause | resume | init | migrate | rule <text> | review | accept <id> | decline <id> | block <name> | unblock <name> | project]"')
 })
 
 // ---- review fixes ----
@@ -842,7 +845,7 @@ test('init applies at once: a new skill shows in the table and the status line',
   expect(text).not.toMatch(/next session/)
   expect(w.statuses.at(-1)).toBe('observe · 0 loaded')
   const t = await table($)
-  expect(t).toMatch(/\| ui-checklist \| absent \|/)
+  expect(t).toMatch(/\| ui-checklist \| not needed yet \|/)
   expect(t).not.toMatch(/not set up/)
 })
 
@@ -949,14 +952,14 @@ test('session.start on a reload gives a skill added to the config a ledger entry
   await start($)
   w.files[USER_FILE] = JSON.stringify({ skills: { 'writing-guide': { always: true }, 'ui-checklist': { always: true } } })
   await start($)
-  expect(await table($)).toMatch(/\| ui-checklist \| absent \|/)
+  expect(await table($)).toMatch(/\| ui-checklist \| not needed yet \|/)
 })
 
 test('a stored session that lacks a configured skill is healed on its first event', async ($, on) => {
   const config = parseConfig(ALWAYS, undefined).config
   const old = { ...initSession(config, 's1', 1, 'startup'), ledger: {} }
   world(on, { [USER_FILE]: ALWAYS }, { stored: { 'session:s1': old } })
-  expect(await table($)).toMatch(/\| writing-guide \| absent \|/)
+  expect(await table($)).toMatch(/\| writing-guide \| not needed yet \|/)
 })
 
 test('a skill listing that never answers does not hold the prompt back', async ($, on) => {
@@ -2906,4 +2909,393 @@ test('a typed rule whose dialog is dismissed still stops proposals', async ($, o
   await run($, 'rule Always say hi')
   expect(d.asked.length).toBe(1)
   expect(String((await propose($, note('Keep commits small.'))).result)).toBe(STOPPED)
+})
+
+test('a skill blocked in this root is left out of the system section and shown as blocked here', async ($, on) => {
+  const cfg = JSON.stringify({
+    mode: 'enforce',
+    skills: { 'terse:terse-mode': { always: true, for: 'chat' }, 'writing-guide': { always: true } },
+    projects: { '/work/proj': { block: ['terse:terse-mode'] }, '/work/other': { block: ['writing-guide'] } },
+  })
+  world(on, { [USER_FILE]: cfg })
+  on('prompt.compose', () => ({ sections: [] }))
+  await start($)
+  const r = await $.prompt.compose(COMPOSE)
+  const text = r.sections.find((s: { id: string }) => s.id === 'souffleur')?.text as string
+  expect(text).not.toMatch(/terse:terse-mode|Replies in this chat/)
+  expect(text).toMatch(/writing-guide/)
+  const t = await table($)
+  expect(t).toMatch(/^Project: \/work\/proj \(block: 1 blocked, 0 own\)$/m)
+  expect(t).toMatch(/\| terse:terse-mode \| blocked here \|/)
+})
+
+test('init works on the standard: names in this root block or own are neither asked nor rewritten', async ($, on) => {
+  const user = JSON.stringify({
+    skills: { x: { always: true }, 'writing-guide': { always: true } },
+    projects: { '/work/proj': { block: ['x'], skills: { o: { always: true } } } },
+  })
+  const w = world(on, { [USER_FILE]: user }, { skills: ['x', 'o', 'writing-guide'], answers: ['When the task needs it', 'When the task needs it', 'When the task needs it'] })
+  await start($)
+  await run($, 'init')
+  expect(w.asked.length).toBe(1)
+  expect(w.asked[0]).toMatch(/writing-guide/)
+  const written = JSON.parse(w.writes.filter((x) => x.path === USER_FILE).at(-1)!.text)
+  expect(written.skills.x).toEqual({ always: true })
+  expect(written.skills.o).toBeUndefined()
+  expect(written.projects['/work/proj'].skills.o).toEqual({ always: true })
+  expect(written.projects['/work/proj'].block).toEqual(['x'])
+})
+
+// --- /souffleur block, unblock, project ---
+
+const BLOCKABLE = JSON.stringify({
+  mode: 'enforce',
+  skills: { 'terse:terse-mode': { always: true, for: 'chat' }, 'writing-guide': { always: true } },
+  rules: [{ id: 'r-wg', before: { tools: ['Write'] }, skill: 'writing-guide', source: 'user' }],
+  notes: [{ id: 'n-one', text: 'Keep it short.' }],
+})
+const userWrites = (w: World) => w.writes.filter((x) => x.path === USER_FILE)
+const sectionText = async ($: any) => {
+  const r = await $.prompt.compose(COMPOSE)
+  return r.sections.find((s: { id: string }) => s.id === 'souffleur')?.text as string
+}
+
+test('block writes the block, backs the file up once and applies at once', async ($, on) => {
+  const w = world(on, { [USER_FILE]: BLOCKABLE })
+  on('prompt.compose', () => ({ sections: [] }))
+  await start($)
+  expect(await sectionText($)).toMatch(/terse:terse-mode/)
+  expect(await run($, 'block terse:terse-mode')).toBe('Souffleur: terse:terse-mode blocked in /work/proj; other projects keep it.')
+  const backups = w.writes.filter((x) => /souffleur\.json\.bak-\d+$/.test(x.path))
+  expect(backups.length).toBe(1)
+  expect(backups[0]!.text).toBe(BLOCKABLE)
+  const written = JSON.parse(userWrites(w).at(-1)!.text)
+  expect(written.projects['/work/proj'].block).toEqual(['terse:terse-mode'])
+  expect(written.skills['terse:terse-mode']).toEqual({ always: true, for: 'chat' })
+  expect(await sectionText($)).not.toMatch(/terse:terse-mode/)
+  expect(await table($)).toMatch(/\| terse:terse-mode \| blocked here \|/)
+  await run($, 'block writing-guide')
+  expect(w.writes.filter((x) => /\.bak-/.test(x.path)).length).toBe(1)
+})
+
+test('unblock restores the standard entry and its always-on line without a restart', async ($, on) => {
+  const w = world(on, { [USER_FILE]: JSON.stringify({ ...JSON.parse(BLOCKABLE), projects: { '/work/proj': { block: ['terse:terse-mode'], skills: { own: { always: true } } } } }) })
+  on('prompt.compose', () => ({ sections: [] }))
+  await start($)
+  expect(await sectionText($)).not.toMatch(/terse:terse-mode/)
+  expect(await run($, 'unblock terse:terse-mode')).toBe('Souffleur: terse:terse-mode unblocked in /work/proj; the standard applies here again.')
+  expect(await sectionText($)).toMatch(/terse:terse-mode/)
+  const written = JSON.parse(userWrites(w).at(-1)!.text)
+  expect(written.projects['/work/proj']).toEqual({ skills: { own: { always: true } } })
+  expect(await table($)).not.toMatch(/blocked here/)
+})
+
+test('unblock of the last name removes the whole empty block', async ($, on) => {
+  const w = world(on, { [USER_FILE]: JSON.stringify({ ...JSON.parse(BLOCKABLE), projects: { '/work/proj': { block: ['writing-guide'] }, '/work/other': { block: ['n-one'] } } }) })
+  await start($)
+  await run($, 'unblock writing-guide')
+  expect(JSON.parse(userWrites(w).at(-1)!.text).projects).toEqual({ '/work/other': { block: ['n-one'] } })
+})
+
+test('block and unblock answer for unknown names, and write nothing', async ($, on) => {
+  const w = world(on, { [USER_FILE]: BLOCKABLE })
+  await start($)
+  expect(await run($, 'unblock nothing-here')).toBe("Souffleur: nothing-here is not in your standard or this project's block.")
+  expect(await run($, 'block nothing-here')).toBe("Souffleur: nothing-here is not in your standard or this project's block.")
+  expect(await run($, 'block bad name!')).toMatch(/not a valid name/)
+  expect(await run($, 'block')).toMatch(/usage/i)
+  expect(w.writes.length).toBe(0)
+})
+
+test('block and unblock only act when the user typed them', async ($, on) => {
+  const w = world(on, { [USER_FILE]: BLOCKABLE })
+  await start($)
+  for (const args of ['block writing-guide', 'unblock writing-guide', 'project']) {
+    const r = await $.command.run({ command: 'souffleur', args, origin: { kind: 'plugin', name: 'other' } } as never)
+    expect(String(r.text)).toMatch(/only the user can run/i)
+  }
+  expect(w.writes.length).toBe(0)
+})
+
+test('block stops when the file cannot be edited', async ($, on) => {
+  const w = world(on, { [USER_FILE]: '{ nope' })
+  await start($)
+  expect(await run($, 'block writing-guide')).toMatch(/nothing was written/)
+  expect(w.writes.length).toBe(0)
+})
+
+test('project shows the short form', async ($, on) => {
+  const user = JSON.stringify({
+    ...JSON.parse(BLOCKABLE),
+    skills: { ...JSON.parse(BLOCKABLE).skills, 'off-skill': { always: true, notIn: ['/work/proj'] } },
+    notes: [...JSON.parse(BLOCKABLE).notes, { id: 'n-far', text: 'Elsewhere.', where: '/elsewhere' }],
+    projects: { '/work/proj': { block: ['writing-guide', 'later-skill'], skills: { own: { always: true } }, notes: [{ id: 'n-own', text: 'Only here.' }] } },
+  })
+  world(on, { [USER_FILE]: user, [PROJECT_FILE]: JSON.stringify({ skills: { 'repo-a': { always: true } } }) })
+  await start($)
+  expect(await run($, 'project')).toBe(
+    [
+      'Souffleur: project /work/proj',
+      'Blocked here: writing-guide, later-skill (not in standard), rule r-wg (its skill writing-guide is blocked)',
+      'This project only: skill own, note n-own',
+      'Off here by notIn/where: off-skill, n-far',
+      'Standard: 1 skills, 1 notes, 0 rules apply here',
+      'Repository file: repo-a',
+    ].join('\n'),
+  )
+})
+
+test('project without a block says only what applies', async ($, on) => {
+  world(on, { [USER_FILE]: BLOCKABLE })
+  await start($)
+  expect(await run($, 'project')).toBe(['Souffleur: project /work/proj', 'Standard: 2 skills, 1 notes, 1 rules apply here'].join('\n'))
+})
+
+test('block accepts a skill only the repository file defines', async ($, on) => {
+  const w = world(on, { [USER_FILE]: BLOCKABLE, [PROJECT_FILE]: JSON.stringify({ skills: { 'repo-a': { always: true } } }) })
+  await start($)
+  expect(await run($, 'block repo-a')).toMatch(/repo-a blocked in/)
+  expect(JSON.parse(userWrites(w).at(-1)!.text).projects['/work/proj'].block).toEqual(['repo-a'])
+})
+
+test('a new session start saves a new backup, in any test order', async ($, on) => {
+  const w = world(on, { [USER_FILE]: BLOCKABLE })
+  await start($)
+  await run($, 'block writing-guide')
+  await start($)
+  await run($, 'unblock writing-guide')
+  expect(w.writes.filter((x) => /\.bak-\d+$/.test(x.path)).length).toBe(2)
+})
+
+test('init skips block names found under a root key with a trailing slash', async ($, on) => {
+  const user = JSON.stringify({ skills: { 'writing-guide': { always: true } }, projects: { '/work/proj/': { block: ['blocked-one'], skills: { 'own-ok': { always: true } } } } })
+  const w = world(on, { [USER_FILE]: user }, { skills: ['writing-guide', 'blocked-one', 'own-ok'], answers: ['From the start'] })
+  await start($)
+  const text = await run($, 'init')
+  expect(w.asked.length).toBe(1)
+  expect(text).not.toMatch(/blocked-one|own-ok/)
+})
+
+test('init leaves names of this root block out of its not-watched summary and skips raw block keys', async ($, on) => {
+  const user = JSON.stringify({
+    skills: { 'writing-guide': { always: true } },
+    projects: { '/work/proj': { block: ['blocked-one'], skills: { 'bad skill name': { always: true }, 'own-ok': { always: true } } } },
+  })
+  const w = world(on, { [USER_FILE]: user }, { skills: ['writing-guide', 'blocked-one', 'own-ok', 'bad skill name', 'other-skill'], answers: ['From the start'] })
+  await start($)
+  const text = await run($, 'init')
+  expect(w.asked.length).toBe(1)
+  expect(text).toMatch(/other-skill/)
+  expect(text).not.toMatch(/blocked-one|own-ok/)
+})
+
+// --- ask once about a project's own skills ---
+
+const MAIN = '/work/main'
+const STD = JSON.stringify({ mode: 'enforce', skills: { 'writing-guide': { always: true } } })
+const rootBlock = (w: World) => JSON.parse(userWrites(w).at(-1)!.text).projects?.[MAIN]
+const NOTICE2 = 'Souffleur: this project has 2 skills not in your config. /souffleur init asks about them.'
+
+test('one dialog names the skills; Set up now runs the init round and writes only into the block', async ($, on) => {
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, skills: ['writing-guide'], projectSkills: ['proj-skill', 'second-skill'], answers: ['Set up now', 'When the task needs it', 'This project only', "Don't watch"] })
+  await start($)
+  await turnEnd($)
+  expect(w.asked[0]).toMatch(/This project has 2 skills not in your config: proj-skill, second-skill\. Set them up now\?/)
+  expect(w.options[0]).toEqual(['Set up now', 'Ignore all here', 'Later'])
+  expect(w.asked.some((q) => /where/i.test(q) && /proj-skill/.test(q))).toBe(true)
+  expect(w.asked.some((q) => /writing-guide/.test(q))).toBe(false)
+  const written = JSON.parse(userWrites(w).at(-1)!.text)
+  expect(written.skills).toEqual({ 'writing-guide': { always: true } })
+  expect(written.projects[MAIN].skills['proj-skill'].need).toBeTruthy()
+  expect(written.projects[MAIN].ignored).toEqual(['second-skill'])
+  await turnEnd($)
+  expect(w.asked.filter((q) => /not in your config/.test(q)).length).toBe(1)
+})
+
+test('Ignore all here writes every name to ignored and nothing else', async ($, on) => {
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['a-skill', 'b-skill'], answers: ['Ignore all here'] })
+  await start($)
+  await turnEnd($)
+  expect(w.asked.length).toBe(1)
+  expect(rootBlock(w)).toEqual({ ignored: ['a-skill', 'b-skill'] })
+})
+
+test('more than 20 names: the first 20 are ignored, the rest stay unasked, one error line', async ($, on) => {
+  const names = Array.from({ length: 22 }, (_, i) => `s${String(i).padStart(2, '0')}`)
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: names, answers: ['Ignore all here'] })
+  await start($)
+  await turnEnd($)
+  expect(rootBlock(w).ignored.length).toBe(20)
+  expect(w.logs.filter((l) => /ignored list/.test(l)).length).toBe(1)
+})
+
+test('Later writes nothing, sets no stop, and asks again at the next session only', async ($, on) => {
+  const w = world(on, { [USER_FILE]: JSON.stringify({ mode: 'enforce', skills: { 'dev-workflow': { always: true } } }) }, { repoRoot: MAIN, projectSkills: ['proj-skill'], answers: ['Later', 'Yes, everywhere', 'Later'] })
+  await start($)
+  await turnEnd($)
+  await turnEnd($)
+  expect(w.asked.length).toBe(1)
+  expect(w.writes.length).toBe(0)
+  await propose($, AGENT_RULE)
+  await turnEnd($)
+  expect(w.asked.length).toBe(2)
+  expect(w.asked[1]).toMatch(/Add rule/)
+  await start($)
+  await turnEnd($)
+  expect(w.asked.length).toBe(3)
+  expect(w.asked[2]).toMatch(/not in your config/)
+})
+
+test('a dismissed own-skill dialog writes nothing and proposals are still asked', async ($, on) => {
+  const w = world(on, { [USER_FILE]: JSON.stringify({ mode: 'enforce', skills: { 'dev-workflow': { always: true } } }) }, { repoRoot: MAIN, projectSkills: ['proj-skill'], answers: ['__undefined__', 'Yes, everywhere'] })
+  await start($)
+  await turnEnd($)
+  expect(w.writes.length).toBe(0)
+  await propose($, AGENT_RULE)
+  await turnEnd($)
+  expect(w.asked.length).toBe(2)
+  expect(userWrites(w).length).toBe(1)
+})
+
+test('a timed out own-skill dialog writes nothing, and a late tap is ignored', async ($, on) => {
+  let tap: (label: string) => void = () => {}
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['proj-skill'], holdAsk: new Promise<string>((r) => { tap = r }) })
+  await start($)
+  const t = turnEnd($)
+  await new Promise((r) => setTimeout(r, 50))
+  await w.clock.advance(120_000)
+  await t
+  tap('Ignore all here')
+  await new Promise((r) => setTimeout(r, 50))
+  expect(w.writes.length).toBe(0)
+  await turnEnd($)
+  expect(w.asked.length).toBe(1)
+})
+
+test('where no dialog opens one notice names the count and nothing is written', async ($, on) => {
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['a-skill', 'b-skill'], answers: 'reject' })
+  await start($)
+  await turnEnd($)
+  await turnEnd($)
+  expect(w.logs.filter((l) => l === NOTICE2).length).toBe(1)
+  expect(w.writes.length).toBe(0)
+})
+
+test('a waiting proposal is asked first and the own skills wait for the next turn end', async ($, on) => {
+  const w = world(on, { [USER_FILE]: JSON.stringify({ mode: 'enforce', skills: { 'dev-workflow': { always: true } } }) }, { repoRoot: MAIN, projectSkills: ['proj-skill'], answers: ['Yes, everywhere', 'Later'] })
+  await start($)
+  await propose($, AGENT_RULE)
+  await turnEnd($)
+  expect(w.asked.length).toBe(1)
+  expect(w.asked[0]).not.toMatch(/proj-skill/)
+  await turnEnd($)
+  expect(w.asked.length).toBe(2)
+  expect(w.asked[1]).toMatch(/proj-skill/)
+})
+
+test('own-skill questions never come outside a repository, with a key present, or for names already known', async ($, on) => {
+  const outside = world(on, { [USER_FILE]: STD }, { projectSkills: ['proj-skill'], answers: ['Ignore all here'] })
+  await start($)
+  await turnEnd($)
+  expect(outside.asked.length).toBe(0)
+  expect(outside.writes.length).toBe(0)
+})
+
+test('a root with a key, and names in the standard or ignored, are not asked about', async ($, on) => {
+  const keyed = world(on, { [USER_FILE]: JSON.stringify({ skills: {}, projects: { [`${MAIN}/`]: {} } }) }, { repoRoot: MAIN, projectSkills: ['proj-skill'], answers: ['Ignore all here'] })
+  await start($)
+  await turnEnd($)
+  expect(keyed.asked.length).toBe(0)
+  expect(keyed.writes.length).toBe(0)
+})
+
+test('names the standard or the repository file already has are not asked about', async ($, on) => {
+  const w = world(on, { [USER_FILE]: STD, [`${MAIN}/.claude/souffleur.json`]: JSON.stringify({ skills: { 'repo-skill': { always: true } } }) }, { repoRoot: MAIN, projectSkills: ['writing-guide', 'repo-skill'], answers: ['Ignore all here'] })
+  await start($)
+  await turnEnd($)
+  expect(w.asked.length).toBe(0)
+  expect(w.writes.length).toBe(0)
+})
+
+test('init asks again about a project skill, offers this project or everywhere, and skips ignored names', async ($, on) => {
+  const here = world(on, { [USER_FILE]: JSON.stringify({ mode: 'enforce', skills: {} }) }, { repoRoot: MAIN, projectSkills: ['proj-skill', 'old-skill'], answers: ['When the task needs it', 'This project only', "Don't watch"] })
+  await start($)
+  await run($, 'init')
+  expect(here.asked.some((q) => /where/i.test(q) && /proj-skill/.test(q))).toBe(true)
+  const w1 = JSON.parse(userWrites(here).at(-1)!.text)
+  expect(w1.skills['proj-skill']).toBeUndefined()
+  expect(w1.projects[MAIN].skills['proj-skill'].need).toBeTruthy()
+  expect(w1.projects[MAIN].ignored).toEqual(['old-skill'])
+})
+
+test('init does not ask again about a name ignored here', async ($, on) => {
+  const user = JSON.stringify({ mode: 'enforce', skills: {}, projects: { [MAIN]: { ignored: ['old-skill'] } } })
+  const w = world(on, { [USER_FILE]: user }, { repoRoot: MAIN, projectSkills: ['old-skill'], answers: [] })
+  await start($)
+  await run($, 'init')
+  expect(w.asked.join('\n')).not.toMatch(/old-skill/)
+})
+
+test('init Everywhere puts the project skill into the standard', async ($, on) => {
+  const w = world(on, { [USER_FILE]: JSON.stringify({ mode: 'enforce', skills: {} }) }, { repoRoot: MAIN, projectSkills: ['proj-skill'], answers: ['From the start', 'Everywhere'] })
+  await start($)
+  await run($, 'init')
+  const written = JSON.parse(userWrites(w).at(-1)!.text)
+  expect(written.skills['proj-skill']).toEqual({ always: true })
+  expect(written.projects?.[MAIN]?.skills).toBeUndefined()
+})
+
+// --- last fix round ---
+
+test('a session that reports no interactive prompt (Remote Control) still gets the project question', async ($, on) => {
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['proj-skill'], answers: ['Ignore all here'] })
+  await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: false })
+  await $.prompt.submit({ text: 'hello', origin: { kind: 'bridge' } } as never)
+  await turnEnd($)
+  expect(w.asked.length).toBe(1)
+  expect(rootBlock(w)).toEqual({ ignored: ['proj-skill'] })
+})
+
+test('a headless sdk session gets the notice instead of the dialog', async ($, on) => {
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['proj-skill'], answers: ['Ignore all here'] })
+  await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: false })
+  await $.prompt.submit({ text: 'hello', origin: { kind: 'sdk' } } as never)
+  await turnEnd($)
+  expect(w.asked.length).toBe(0)
+  expect(w.logs.some((l) => /this project has 1 skills? not in your config/.test(l))).toBe(true)
+  expect(w.writes.length).toBe(0)
+})
+
+test('Set up now reports only what it wrote, with its scope', async ($, on) => {
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['proj-skill', 'second-skill'], answers: ['Set up now', 'When the task needs it', 'This project only', "Don't watch"] })
+  await start($)
+  await turnEnd($)
+  const report = w.logs.find((l) => /proj-skill: watched for/.test(l)) ?? ''
+  expect(report).toMatch(/proj-skill: watched for .* in this project/)
+  expect(report).toMatch(/second-skill: ignored here/)
+  expect(report).not.toMatch(/Souffleur init|Installed and not watched|migrate|New entries apply/)
+})
+
+test('Set up now with nothing written says so in one line', async ($, on) => {
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['proj-skill'], answers: ['Set up now', 'Stop'] })
+  await start($)
+  await turnEnd($)
+  expect(w.logs).toContain('Souffleur: nothing set up; /souffleur init asks again.')
+})
+
+test('init saves one backup per session like the other writers', async ($, on) => {
+  const user = JSON.stringify({ mode: 'enforce', skills: {} })
+  const w = world(on, { [USER_FILE]: user }, { repoRoot: MAIN, projectSkills: ['a-skill', 'b-skill'], answers: ['From the start', 'Everywhere', 'From the start', 'Everywhere'] })
+  await start($)
+  await run($, 'init')
+  const backups = w.writes.filter((x) => /souffleur\.json\.bak-\d+$/.test(x.path))
+  expect(backups.length).toBe(1)
+  expect(backups[0]!.text).toBe(user)
+})
+
+test('block works on a user file that starts with a byte order mark', async ($, on) => {
+  const w = world(on, { [USER_FILE]: `\ufeff${BLOCKABLE}` })
+  await start($)
+  expect(await run($, 'block writing-guide')).toMatch(/blocked in/)
+  expect(JSON.parse(userWrites(w).at(-1)!.text).projects['/work/proj'].block).toEqual(['writing-guide'])
 })

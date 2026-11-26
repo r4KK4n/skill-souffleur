@@ -4,7 +4,7 @@ Keeps Claude Code skills loaded and in use for the whole session, including afte
 
 In a theatre, the souffleur sits out of sight at the edge of the stage and gives an actor the line they forgot, at the moment they need it. Souffleur does the same for skills: when compaction drops a skill the current task needs, it brings the skill back.
 
-> **Status:** version 0.1.9, released as tag `v0.1.9` (see [Install](#install) and the [roadmap](#roadmap)).
+> **Status:** version 0.2.0, released as tag `v0.2.0` (see [Install](#install) and the [roadmap](#roadmap)).
 >
 > **Early access.** Souffleur is a Claude Code mod: TypeScript that runs inside Claude Code through its mod API, shipped and installed as a plugin. Anthropic still changes that API between releases, so an update of Claude Code can break Souffleur until it is adapted. It is provided as is, with no guarantee of fixes or dates. [docs/compatibility.md](docs/compatibility.md) lists the versions each behaviour was checked on.
 
@@ -81,7 +81,7 @@ An installed plugin reaches a running session only after `/reload-plugins` or a 
 
 ```
 claude plugin uninstall skill-souffleur@skill-souffleur
-git clone --branch v0.1.9 https://github.com/r4KK4n/skill-souffleur ~/.claude/skills/skill-souffleur
+git clone --branch v0.2.0 https://github.com/r4KK4n/skill-souffleur ~/.claude/skills/skill-souffleur
 ```
 
 Update to a newer release:
@@ -126,6 +126,14 @@ If you edit a config file by hand, new entries apply after `/souffleur` (it read
 - `/souffleur` or `/souffleur status` shows the mode, one row per skill with its state, the active needs, open duties, and the calls that `observe` mode would have denied.
 - `/souffleur need <name>` turns a need on for this session, even when no prompt matched it. A need a prompt started ends by itself after 20 prompts in a row that did not match it (prompts of three words or fewer do not count); a need set this way ends only with `drop`.
 - `/souffleur drop <name>` turns a need off again.
+- `/souffleur block <name>` and `/souffleur unblock <name>` turn a skill, note or rule of your standard off or on in this project only; other projects keep it. `/souffleur project` shows what applies here in a few lines: what is blocked, what is only for this project, what `notIn` or `where` turns off, and how many standard skills, notes and rules apply. The blocks live in the `projects` key of `~/.claude/souffleur.json`, keyed by the project's main folder (`"projects": { "/work/app": { "block": ["writing-guide"] } }`); the first change in a run saves `souffleur.json.bak-<time>` beside it.
+- Per-project blocks. The top level of `~/.claude/souffleur.json` is the standard for every project. To change it for one repository only, add a block under `projects`, keyed by the repository's main folder:
+
+  ```json
+  { "projects": { "/work/app": { "block": ["writing-guide"], "skills": { "app-lint": { "always": true } }, "ignored": ["old-helper"] } } }
+  ```
+
+  `block` turns standard skills, notes or rules off there; `skills`, `needs`, `notes` and `rules` add entries for that project only; `ignored` lists project skills you do not want to be asked about. A project file in the repository cannot hold `projects`. Souffleur writes to a block only after your answer: `/souffleur block` and `unblock`, the one question about a project's own skills (`Ignore all here` fills `ignored`), and `/souffleur init`, which offers `This project only` or `Everywhere` for a skill that only this project has. Before the first write of a session it saves `souffleur.json.bak-<time>` beside the file.
 - `/souffleur pause` switches Souffleur off for this session: no restore requests, no need detection (so no classifier calls), no turn-end questions, no reading of skill texts, and no gate, duty, rule or brief denial. The ledger keeps tracking loads and compactions. `/souffleur resume` undoes it. A pause belongs to the running session and is not carried over when you resume a session.
 - `/souffleur init` asks, skill by skill, how Souffleur should keep each one and writes your answers to `~/.claude/souffleur.json`. See [Setting up your skills](#setting-up-your-skills).
 - `/souffleur migrate` goes through your old reload hooks and offers to turn them off. See [Coming from your own hooks](#coming-from-your-own-hooks).
@@ -255,7 +263,7 @@ Costs:
 - [x] Needs by deliverable
 - [x] Reply check
 - [x] Short notices in the transcript for start, compaction and problems
-- [x] Release tags `v0.1.0` to `v0.1.9`
+- [x] Release tags `v0.1.0` to `v0.2.0`
 - [x] Updates that reach running sessions (install from a folder)
 
 ## Contributing

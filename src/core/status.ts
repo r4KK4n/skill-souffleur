@@ -19,12 +19,15 @@ export function renderTable(config: Config, s: Session, now: number, root?: stri
   const lines = [`Mode: ${config.mode}${s.paused ? ' (paused)' : ''}. Times in UTC.`]
   const notice = versionNotice(s.version)
   if (notice) lines.push(notice)
+  const p = config.project
+  if (p && p.blocked.length + p.own.length > 0) lines.push(`Project: ${p.root} (block: ${p.blocked.length} blocked, ${p.own.length} own)`)
   lines.push('')
   lines.push('| Skill | State | Since | Reason |', '| --- | --- | --- | --- |')
   for (const [name, e] of Object.entries(s.ledger)) {
     const state = config.skills[name] !== undefined && excludedIn(config.skills[name]!, root) ? 'excluded in this project' : e.state
-    lines.push(`| ${cell(name)} | ${state} | ${clock(e.since)} | ${cell(e.reason)} |`)
+    lines.push(`| ${cell(name)} | ${state === 'absent' ? 'not needed yet' : state} | ${clock(e.since)} | ${cell(e.reason)} |`)
   }
+  for (const name of p?.blockedSkills ?? []) if (!(name in s.ledger)) lines.push(`| ${cell(name)} | blocked here | | removed from the standard in this project |`)
   if (!isTrustedRoot(config, root) && Object.values(config.skills).some((r) => r.from === 'project')) {
     lines.push('', 'The project file defines skills, but this project is not trusted (trustProjects in the user file): they are listed here and neither requested nor allowed to deny a call.')
   }
