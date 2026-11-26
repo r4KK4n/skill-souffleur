@@ -3,7 +3,7 @@ import { excludedIn, isTrustedRoot, normRoot, parseConfig } from '../core/config
 import { decide, initSession, normalizeSession } from '../core/decide.ts'
 import { MIGRATE_INTRO, describeHook, findHookOverlaps, findPassages, hookQuestion, hookSteps, isGuess, migrateSteps, passageLines, removeHook } from '../core/migrate.ts'
 import type { HookOverlap, Passage } from '../core/migrate.ts'
-import { CHOICE_LABEL, INJECTED_HELP, NOT_SET_UP, SETUP_INTRO, applyChoice, candidates, choiceOf, cleanNeedText, configProblem, currentChoice, describePlan, explicitOnly, injectedWarning, needKeyFor, options, parsePicks, parseSkips, picksPrompt, setupSteps } from '../core/setup.ts'
+import { CHOICE_LABEL, INJECTED_HELP, addSkillToProject, hasProjectKey, ignoreInProject, touchProject, NOT_SET_UP, SETUP_INTRO, applyChoice, candidates, choiceOf, cleanNeedText, configProblem, currentChoice, describePlan, explicitOnly, injectedWarning, needKeyFor, options, parsePicks, parseSkips, picksPrompt, setupSteps } from '../core/setup.ts'
 import type { LoadChoice, NeedText, Plan, StartHooks, Suggestion } from '../core/setup.ts'
 import type { Action, CoreEvent, Session } from '../core/decide.ts'
 import { audienceOf, classifyDeliverable, needTexts } from '../core/needs.ts'
@@ -449,7 +449,7 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
   const rawNames = (v: unknown): string[] => (isRecord(v) ? Object.keys(v) : [])
   const rawIds = (v: unknown): string[] => (Array.isArray(v) ? v.flatMap((x) => (isRecord(x) && typeof x.id === 'string' ? [x.id] : [])) : [])
   const skip = isRecord(rawBlock)
-    ? [...(Array.isArray(rawBlock.block) ? rawBlock.block.filter((n): n is string => typeof n === 'string') : []), ...rawNames(rawBlock.skills), ...rawIds(rawBlock.notes), ...rawIds(rawBlock.rules)]
+    ? [...(Array.isArray(rawBlock.block) ? rawBlock.block.filter((n): n is string => typeof n === 'string') : []), ...rawNames(rawBlock.skills), ...rawIds(rawBlock.notes), ...rawIds(rawBlock.rules), ...(Array.isArray(rawBlock.ignored) ? rawBlock.ignored.filter((n): n is string => typeof n === 'string') : [])]
     : []
   skip.push(...(here.config.project?.blocked ?? []), ...(here.config.project?.own ?? []))
   const projectSkills: Record<string, unknown> = Object.fromEntries(Object.entries(config.skills).filter(([, r]) => r.from === 'project'))
@@ -486,7 +486,9 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
     }
   }
 
-  const plans: Plan[] = candidates(config, installed, reloadHooked, picks.map((x) => x.skill), skip).map(({ skill, source }) => {
+  // Skills of this project that nothing names yet: asked again here, for this project or everywhere.
+  const ownHere = new Set((await projectInstalled($)).filter((n) => !(n in config.skills) && !skip.includes(n)))
+  const plans: Plan[] = candidates(config, installed, reloadHooked, [...picks.map((x) => x.skill), ...ownHere], skip).map(({ skill, source }) => {
     const current = currentChoice(config.skills[skill])
     const pick = picks.find((x) => x.skill === skill)
     const need = pick ? { need: pick.need } : {}
@@ -554,6 +556,20 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
         need = choice === 'need' ? prop.need : undefined
       }
 
+      // A project's own skill: "Don't watch" ignores it here; any other answer asks where it applies.
+      let scope: 'project' | 'everywhere' = 'everywhere'
+      if (ownHere.has(p.skill)) {
+        if (choice === 'none') scope = 'project'
+        else {
+          const where = await $.ui.ask(`Where should ${p.skill} apply? This project only keeps it out of your other projects; Everywhere adds it to your standard.`, { options: ['This project only', 'Everywhere'], header: 'Souffleur' })
+          if (where === 'This project only') scope = 'project'
+          else if (where !== 'Everywhere') {
+            done.push(`${p.skill}: skipped, no answer about where it applies. Nothing was written for it.`)
+            continue
+          }
+        }
+      }
+
       // Read again: the file may have changed since the scan, and earlier answers are already in it.
       const now2 = await readState($, configPath, home)
       if (now2.kind === 'error') {
@@ -578,7 +594,12 @@ async function runInit($: Dollar, l0: Loaded): Promise<string> {
           break
         }
       }
-      const r = applyChoice(doc, p.skill, choice, need, projectSkills)
+      const r =
+        scope === 'everywhere'
+          ? applyChoice(doc, p.skill, choice, need, projectSkills)
+          : choice === 'none'
+            ? ignoreInProject(doc, l0.root, p.skill)
+            : addSkillToProject(doc, l0.root, p.skill, choice === 'need' ? 'need' : choice, need)
       if (r.note) done.push(r.note)
       const label = choice === 'none' ? 'not watched' : CHOICE_LABEL[choice]
       if (r.note || JSON.stringify(r.config) === JSON.stringify(doc) || (now2.kind === 'missing' && choice === 'none')) {
@@ -882,6 +903,137 @@ async function runProject($: Dollar, l: Loaded): Promise<string> {
   lines.push(`Standard: ${userSkills.length - offSkills.length} skills, ${notes.filter((n) => here(n.where)).length} notes, ${rules.filter((r) => here(r.where)).length} rules apply here`)
   if (repo.length) lines.push(`Repository file: ${repo.join(', ')}`)
   return lines.join('\n')
+}
+
+/** The installed skills that come from the open project (`source` `projectSettings`), when the listing is complete. */
+async function projectInstalled($: Dollar): Promise<string[]> {
+  try {
+    const skills = (await $.session.usage({ breakdown: 'summary' }))?.context?.breakdown?.skills
+    const listed: { name: string; source?: string }[] | undefined = skills?.skillFrontmatter
+    if (!listed?.length) return []
+    if (typeof skills.totalSkills === 'number' && typeof skills.includedSkills === 'number' && skills.includedSkills < skills.totalSkills) return []
+    return [...new Set(listed.filter((x) => x.source === 'projectSettings' || x.source === 'project').map((x) => x.name))]
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Changes the user file through the same careful path as `block`: read fresh, stop on a read error or a file that cannot be edited,
+ * read again right before the write, save `souffleur.json.bak-<epoch ms>` before the first write of a session, then reload.
+ */
+async function editUserFile($: Dollar, change: (doc: unknown) => { config: unknown; note?: string }): Promise<{ ok: boolean; text: string }> {
+  const home: string | undefined = await $.env.get('HOME')
+  if (!home) return { ok: false, text: 'the home folder is unknown, so nothing was written' }
+  const path = `${home}/.claude/souffleur.json`
+  const st = await readState($, path, home)
+  if (st.kind !== 'ok') return { ok: false, text: st.kind === 'error' ? `could not read ${shownPath(home, path)} (${st.why}), so nothing was written` : 'there is no user file, so nothing was written' }
+  let doc: unknown
+  try {
+    doc = parseJson(st.text)
+  } catch (err) {
+    return { ok: false, text: `${shownPath(home, path)} is not valid JSON (${scrub(home, message(err))}), so nothing was written` }
+  }
+  const problem = configProblem(doc)
+  if (problem) return { ok: false, text: `${shownPath(home, path)} cannot be edited because ${problem}, so nothing was written` }
+  const r = change(doc)
+  if (r.note) return { ok: false, text: r.note }
+  const again = await readState($, path, home)
+  if (again.kind !== 'ok' || again.text !== st.text) return { ok: false, text: `${shownPath(home, path)} changed since it was read, so nothing was written` }
+  try {
+    if (!backedUp) {
+      await $.fs.write(`${path}.bak-${Date.now()}`, st.text)
+      backedUp = true
+    }
+    await $.fs.write(path, `${JSON.stringify(r.config, null, 2)}\n`)
+  } catch (err) {
+    return { ok: false, text: `could not write ${shownPath(home, path)} (${scrub(home, message(err))})` }
+  }
+  loaded = undefined
+  await apply($, (l) => ({ type: 'config', now: now(), errors: l.errors }))
+  return { ok: true, text: 'written' }
+}
+
+/** Set once the question about the project's own skills was handled in this session. */
+let ownHandled = false
+const OWN_ADD = 'Add to this project'
+const OWN_START = 'Add, from the start'
+const OWN_IGNORE = 'Ignore here'
+
+/**
+ * At a turn end in a repository whose root has no block yet: asks once about the installed project skills that nothing names,
+ * one dialog each, or, where no dialog opens, shows one notice. Every outcome leaves a block key (possibly `{}`) in the user file.
+ */
+async function askOwnSkills($: Dollar, dialog: boolean): Promise<void> {
+  if (ownHandled) return
+  const { l, session } = await current($)
+  if (session.paused || session.proposals.length || !l.setUp) return
+  let repo: unknown
+  try {
+    repo = await $.session.repo()
+  } catch {
+    return
+  }
+  if (!repo) return
+  ownHandled = true
+  const home: string | undefined = await $.env.get('HOME')
+  if (!home) return
+  const st = await readState($, `${home}/.claude/souffleur.json`, home)
+  if (st.kind !== 'ok') return
+  let doc: unknown
+  try {
+    doc = parseJson(st.text)
+  } catch {
+    return
+  }
+  if (configProblem(doc) || hasProjectKey(doc, l.root)) return
+  const names = (await projectInstalled($)).filter((n) => !(n in l.config.skills))
+  if (!names.length) return
+  const root = l.root
+  const picked: { name: string; how: 'need' | 'start' | 'ignore' }[] = []
+  let opened = dialog
+  let dismissed = false
+  if (dialog) {
+    const described = new Map((await installedWithDescriptions($)).map((x) => [x.name, x.description]))
+    for (const name of names) {
+      let answer: unknown
+      try {
+        const desc = described.get(name)
+        const question = `This project has its own skill ${name}${desc ? ` (${desc.slice(0, 160)})` : ''} that your config does not name. Add it for this project only, or ignore it here? Nothing is added to your other projects.`
+        const asking = Promise.resolve().then(() => $.ui.ask(question, { options: [OWN_ADD, OWN_START, OWN_IGNORE], header: 'Souffleur' }))
+        answer = await Promise.race([asking, $.clock.sleep(ASK_WAIT_MS).then(() => Promise.reject(new TimedOut()))])
+      } catch (err) {
+        if (DISMISSED.test(message(err))) dismissed = true
+        else opened = picked.length > 0
+        break
+      }
+      if (typeof answer !== 'string' || answer.trim() === '') {
+        dismissed = true
+        break
+      }
+      picked.push({ name, how: answer === OWN_START ? 'start' : answer === OWN_ADD ? 'need' : 'ignore' })
+    }
+    if (!picked.length && !dismissed) {
+      noDialog = true
+      askStopped = true
+    }
+  }
+  if (dismissed) await markStopped($, { ask: true })
+  const r = await editUserFile($, (d) => {
+    let config: unknown = touchProject(d, root)
+    for (const { name, how } of picked) {
+      const next = how === 'ignore' ? ignoreInProject(config, root, name) : addSkillToProject(config, root, name, how, { key: needKeyFor(name), text: `The task calls for ${name}.` })
+      if (next.note) return { config: d, note: next.note }
+      config = next.config
+    }
+    return { config }
+  })
+  if (!r.ok) {
+    say($, l, `Souffleur: ${r.text}.`)
+    return
+  }
+  if (!opened && !picked.length && !dismissed) say($, l, `Souffleur: this project has ${names.length} skills not in your config. /souffleur init asks about them.`)
+  else if (picked.length) await safe($, 'installed', undefined, () => refreshInstalled($))
 }
 
 /**
@@ -1376,6 +1528,7 @@ export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
     await safe($, 'session.start', undefined, async () => {
       loaded = undefined
+      ownHandled = false
       backedUp = false // a session start is a fresh run: the first change saves a new backup
       const l = await getLoaded($)
       const id: string = await $.session.id()
@@ -1575,9 +1728,13 @@ export const register: Register = (on) => {
           // A dialog was tried and nobody can answer: no new attempt, only a notice for a proposal not shown yet.
           const { l, session } = await current($)
           noticeFirst($, l, session)
+          if (!session.proposals.length) await askOwnSkills($, false)
           return
         }
+        const hadProposals = (await current($)).session.proposals.length > 0
         const line = await askFirst($, true)
+        if (!hadProposals && line === undefined && !noDialog && !askStopped) await askOwnSkills($, true)
+        else if (!hadProposals && noDialog) await askOwnSkills($, false)
         if (line !== undefined) {
           try {
             $.ui.toast(line)

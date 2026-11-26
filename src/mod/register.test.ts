@@ -44,6 +44,8 @@ type Opts = {
   skipCompact?: boolean
   /** Installed skill names `$.session.usage` lists. */
   skills?: string[]
+  /** Installed skills whose source is the project (`projectSettings`). */
+  projectSkills?: string[]
   /** What the small model answers to the init prompt. */
   proposals?: string
   /** The labels the user picks, in order; 'reject' makes every dialog reject, as in a `-p` run. */
@@ -187,11 +189,12 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   on('session.usage', () => {
     if (opts.hangUsage) return new Promise(() => {}) as never
     if (opts.failUsage) throw new Error('usage unavailable')
-    const names = opts.listOnly ? [] : (opts.skills ?? [])
+    const projectNames = opts.listOnly ? [] : (opts.projectSkills ?? [])
+    const names = opts.listOnly ? [] : [...(opts.skills ?? []), ...projectNames]
     return {
       value: {
         startedAt: 0,
-        context: { window: 1, breakdown: { skills: { totalSkills: names.length + (opts.incomplete ? 1 : 0), includedSkills: names.length, tokens: 0, skillFrontmatter: names.map((name) => ({ name, source: 'plugin', tokens: 1 })) } } },
+        context: { window: 1, breakdown: { skills: { totalSkills: names.length + (opts.incomplete ? 1 : 0), includedSkills: names.length, tokens: 0, skillFrontmatter: names.map((name) => ({ name, source: projectNames.includes(name) ? 'projectSettings' : 'plugin', tokens: 1 })) } } },
         rateLimits: [],
         cost: {},
       },
@@ -3084,4 +3087,115 @@ test('init leaves names of this root block out of its not-watched summary and sk
   expect(w.asked.length).toBe(1)
   expect(text).toMatch(/other-skill/)
   expect(text).not.toMatch(/blocked-one|own-ok/)
+})
+
+// --- ask once about a project's own skills ---
+
+const MAIN = '/work/main'
+const STD = JSON.stringify({ mode: 'enforce', skills: { 'writing-guide': { always: true } } })
+const rootBlock = (w: World) => JSON.parse(userWrites(w).at(-1)!.text).projects?.[MAIN]
+const NOTICE2 = 'Souffleur: this project has 2 skills not in your config. /souffleur init asks about them.'
+
+test('the first turn end asks once about a project skill and writes it into this project only', async ($, on) => {
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, skills: ['writing-guide'], projectSkills: ['proj-skill'], answers: ['Add to this project'] })
+  await start($)
+  await turnEnd($)
+  expect(w.asked.length).toBe(1)
+  expect(w.asked[0]).toMatch(/proj-skill/)
+  const written = JSON.parse(userWrites(w).at(-1)!.text)
+  expect(written.skills).toEqual({ 'writing-guide': { always: true } })
+  expect(written.projects[MAIN].skills['proj-skill'].need).toBeTruthy()
+  expect(w.writes.filter((x) => /\.bak-/.test(x.path)).length).toBe(1)
+  await turnEnd($)
+  expect(w.asked.length).toBe(1)
+  expect(await table($)).toMatch(/proj-skill/)
+})
+
+test('Ignore here lists the skill under ignored and adds no skill', async ($, on) => {
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['proj-skill'], answers: ['Ignore here'] })
+  await start($)
+  await turnEnd($)
+  expect(rootBlock(w)).toEqual({ ignored: ['proj-skill'] })
+})
+
+test('a dismissed dialog asks nothing more and still writes the key', async ($, on) => {
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['a-skill', 'b-skill'], answers: ['__undefined__'] })
+  await start($)
+  await turnEnd($)
+  await turnEnd($)
+  expect(w.asked.length).toBe(1)
+  expect(rootBlock(w)).toEqual({})
+})
+
+test('where no dialog opens one notice names the count and the key is written', async ($, on) => {
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['a-skill', 'b-skill'], answers: 'reject' })
+  await start($)
+  await turnEnd($)
+  await turnEnd($)
+  expect(w.logs.filter((l) => l === NOTICE2).length).toBe(1)
+  expect(rootBlock(w)).toEqual({})
+})
+
+test('a waiting proposal is asked first and the own skills wait for the next turn end', async ($, on) => {
+  const w = world(on, { [USER_FILE]: JSON.stringify({ mode: 'enforce', skills: { 'dev-workflow': { always: true } } }) }, { repoRoot: MAIN, projectSkills: ['proj-skill'], answers: ['Yes, everywhere', 'Ignore here'] })
+  await start($)
+  await propose($, AGENT_RULE)
+  await turnEnd($)
+  expect(w.asked.length).toBe(1)
+  expect(w.asked[0]).not.toMatch(/proj-skill/)
+  await turnEnd($)
+  expect(w.asked.length).toBe(2)
+  expect(w.asked[1]).toMatch(/proj-skill/)
+})
+
+test('own-skill questions never come outside a repository, with a key present, or for names already known', async ($, on) => {
+  const outside = world(on, { [USER_FILE]: STD }, { projectSkills: ['proj-skill'], answers: ['Ignore here'] })
+  await start($)
+  await turnEnd($)
+  expect(outside.asked.length).toBe(0)
+  expect(outside.writes.length).toBe(0)
+})
+
+test('a root with a key, and names in the standard or ignored, are not asked about', async ($, on) => {
+  const keyed = world(on, { [USER_FILE]: JSON.stringify({ skills: {}, projects: { [`${MAIN}/`]: {} } }) }, { repoRoot: MAIN, projectSkills: ['proj-skill'], answers: ['Ignore here'] })
+  await start($)
+  await turnEnd($)
+  expect(keyed.asked.length).toBe(0)
+  expect(keyed.writes.length).toBe(0)
+})
+
+test('names the standard or the repository file already has are not asked about', async ($, on) => {
+  const w = world(on, { [USER_FILE]: STD, [`${MAIN}/.claude/souffleur.json`]: JSON.stringify({ skills: { 'repo-skill': { always: true } } }) }, { repoRoot: MAIN, projectSkills: ['writing-guide', 'repo-skill'], answers: ['Ignore here'] })
+  await start($)
+  await turnEnd($)
+  expect(w.asked.length).toBe(0)
+  expect(w.writes.length).toBe(0)
+})
+
+test('init asks again about a project skill, offers this project or everywhere, and skips ignored names', async ($, on) => {
+  const here = world(on, { [USER_FILE]: JSON.stringify({ mode: 'enforce', skills: {} }) }, { repoRoot: MAIN, projectSkills: ['proj-skill', 'old-skill'], answers: ['When the task needs it', 'This project only', "Don't watch"] })
+  await start($)
+  await run($, 'init')
+  expect(here.asked.some((q) => /where/i.test(q) && /proj-skill/.test(q))).toBe(true)
+  const w1 = JSON.parse(userWrites(here).at(-1)!.text)
+  expect(w1.skills['proj-skill']).toBeUndefined()
+  expect(w1.projects[MAIN].skills['proj-skill'].need).toBeTruthy()
+  expect(w1.projects[MAIN].ignored).toEqual(['old-skill'])
+})
+
+test('init does not ask again about a name ignored here', async ($, on) => {
+  const user = JSON.stringify({ mode: 'enforce', skills: {}, projects: { [MAIN]: { ignored: ['old-skill'] } } })
+  const w = world(on, { [USER_FILE]: user }, { repoRoot: MAIN, projectSkills: ['old-skill'], answers: [] })
+  await start($)
+  await run($, 'init')
+  expect(w.asked.join('\n')).not.toMatch(/old-skill/)
+})
+
+test('init Everywhere puts the project skill into the standard', async ($, on) => {
+  const w = world(on, { [USER_FILE]: JSON.stringify({ mode: 'enforce', skills: {} }) }, { repoRoot: MAIN, projectSkills: ['proj-skill'], answers: ['From the start', 'Everywhere'] })
+  await start($)
+  await run($, 'init')
+  const written = JSON.parse(userWrites(w).at(-1)!.text)
+  expect(written.skills['proj-skill']).toEqual({ always: true })
+  expect(written.projects?.[MAIN]?.skills).toBeUndefined()
 })

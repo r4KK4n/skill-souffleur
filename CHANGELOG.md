@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- At the first turn end in a repository, Souffleur asks once about the project's own skills that your config does not name (add for this project, or ignore here), or shows one notice where no dialog opens. `/souffleur init` asks again and offers this project or everywhere.
+
 - `/souffleur block <name>`, `unblock <name>` and `project` change and show the per-project block of the open repository.
 
 - The user file can hold per-project blocks (`projects`) that block named skills, notes and rules in one repository and add entries for it only, while everything else stays the shared standard. `/souffleur` names the project, shows blocked skills as `blocked here` and reads `absent` as `not needed yet`.

@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { parseConfig } from '../src/core/config.ts'
-import { applyChoice, candidates, cleanNeedText, CHOICE_LABEL, explicitOnly, injectedWarning, options, parsePicks, parseSkips, picksPrompt, setupSteps, SETUP_INTRO, INJECTED_HELP } from '../src/core/setup.ts'
+import { addSkillToProject, hasProjectKey, ignoreInProject, touchProject, applyChoice, candidates, cleanNeedText, CHOICE_LABEL, explicitOnly, injectedWarning, options, parsePicks, parseSkips, picksPrompt, setupSteps, SETUP_INTRO, INJECTED_HELP } from '../src/core/setup.ts'
 
 const config = (user: unknown, project?: unknown) => parseConfig(JSON.stringify(user), project === undefined ? undefined : JSON.stringify(project)).config
 const doc = (c: unknown) => c as { mode?: string; skills: Record<string, Record<string, unknown>>; needs: Record<string, unknown> }
@@ -294,4 +294,21 @@ test('need pruning counts needs used by any project block skill or note', () => 
   const r = applyChoice(user, 'a', 'need', { key: 'n1', text: 'One.' })
   assert.deepEqual(r.pruned, ['n4'])
   assert.ok((r.config as { projects: unknown }).projects)
+})
+
+test('project helpers write only into projects[root] and never touch the standard', () => {
+  const user = { skills: { a: { need: 'n' } }, needs: { n: 'Standard text.' } }
+  assert.deepEqual(touchProject(user, '/w/'), { ...user, projects: { '/w': {} } })
+  assert.equal(hasProjectKey({ projects: { '/w/': {} } }, '/w'), true)
+  assert.equal(hasProjectKey(user, '/w'), false)
+  const same = addSkillToProject(user, '/w', 'o', 'need', { key: 'n', text: 'Standard text.' }).config as { skills: unknown; needs: unknown; projects: Record<string, unknown> }
+  assert.deepEqual(same.projects['/w'], { skills: { o: { need: 'n' } } })
+  assert.deepEqual(same.skills, user.skills)
+  const forked = addSkillToProject(user, '/w', 'o', 'need', { key: 'n', text: 'Other.' }).config as { needs: unknown; projects: Record<string, { skills: { o: { need: string } }; needs: Record<string, unknown> }> }
+  assert.deepEqual(forked.needs, user.needs)
+  assert.notEqual(forked.projects['/w']!.skills.o.need, 'n')
+  assert.deepEqual(Object.values(forked.projects['/w']!.needs), [{ for: 'work', what: 'Other.' }])
+  assert.deepEqual((ignoreInProject(user, '/w', 'x').config as { projects: unknown }).projects, { '/w': { ignored: ['x'] } })
+  const full = { projects: { '/w': { ignored: Array.from({ length: 20 }, (_, i) => `s${i}`) } } }
+  assert.match(ignoreInProject(full, '/w', 'x').note ?? '', /full/)
 })
