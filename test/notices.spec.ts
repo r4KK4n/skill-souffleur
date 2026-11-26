@@ -54,6 +54,45 @@ test('second compaction unions', () => {
   const reloaded = withLedger(r1.session, skillLoaded(r1.session.ledger, 'writing-check', T + 2, 'x'))
   const r2 = notices(config, reloaded, cutOf(reloaded))
   assert.deepEqual(r2.lines, ['Souffleur: cut by compaction: writing-guide, writing-check; asked the model to reload them.'])
+  const both = withLedger(r2.session, skillLoaded(skillLoaded(r2.session.ledger, 'writing-guide', T + 3, 'x'), 'writing-check', T + 3, 'x'))
+  const r3 = notices(config, r2.session, both)
+  assert.deepEqual(r3.lines, ['Souffleur: reloaded: writing-guide, writing-check.'])
+  assert.deepEqual(notices(config, r3.session, r3.session).lines, [])
+})
+
+test('absent after loaded is no compaction cut', () => {
+  const before = loadedBoth()
+  const after = withLedger(before, { ...before.ledger, 'writing-guide': { state: 'absent', since: T, reason: '', requests: 0 } })
+  assert.deepEqual(notices(config, before, after).lines, [])
+})
+
+test('a cut skill that became unavailable does not block reloaded', () => {
+  const before = loadedBoth()
+  const r1 = notices(config, before, cutOf(before))
+  const l = r1.session.ledger
+  const next = withLedger(r1.session, {
+    ...l,
+    'writing-guide': { state: 'unavailable', since: T + 2, reason: '', requests: 2 },
+    'writing-check': { ...l['writing-check']!, state: 'loaded' },
+  })
+  const r2 = notices(config, r1.session, next)
+  assert.ok(r2.lines.includes('Souffleur: reloaded: writing-check.'))
+  assert.deepEqual(r2.session.noticed?.cut, [])
+})
+
+test('a cut again while another is pending names the whole union once', () => {
+  const before = loadedBoth()
+  const r1 = notices(config, before, cutOf(before))
+  const aBack = withLedger(r1.session, skillLoaded(r1.session.ledger, 'writing-guide', T + 2, 'x'))
+  const r2 = notices(config, r1.session, aBack)
+  assert.deepEqual(r2.lines, [])
+  const r3 = notices(config, r2.session, cutOf(r2.session))
+  assert.deepEqual(r3.lines, ['Souffleur: cut by compaction: writing-guide, writing-check; asked the model to reload them.'])
+})
+
+test('degraded line drops one trailing period of the error', () => {
+  const s: Session = { ...fresh(), errors: ['tool_name missing.'] }
+  assert.equal(problemKeys(config, s).get('degraded'), 'Souffleur: degraded: tool_name missing. Details: /souffleur.')
 })
 
 test('reloaded once all loaded', () => {

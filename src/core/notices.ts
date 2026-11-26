@@ -22,7 +22,7 @@ export function problemKeys(config: Config, s: Session, root?: string): Map<stri
   for (const [name, e] of Object.entries(s.ledger)) {
     if (e.state === 'unavailable') out.set(`missing:${name}`, `${PREFIX}${name} did not load after two requests.`)
   }
-  if (s.errors.length > 0) out.set('degraded', `${PREFIX}degraded: ${s.errors.at(-1)}. Details: /souffleur.`)
+  if (s.errors.length > 0) out.set('degraded', `${PREFIX}degraded: ${s.errors.at(-1)!.replace(/\.$/, '')}. Details: /souffleur.`)
   const version = versionNotice(s.version)
   if (version) out.set('version', `${PREFIX}${version}`)
   if (!isTrustedRoot(config, root) && Object.values(config.skills).some((r) => r.from === 'project')) {
@@ -40,13 +40,17 @@ export function notices(config: Config, before: Session, after: Session, root?: 
   const was = before.noticed ?? { cut: [], problems: [] }
   const state = (s: Session, name: SkillName) => s.ledger[name]?.state
 
-  const cut: SkillName[] = [...was.cut]
+  // Names still cut stay; one that became unavailable, left the config or is not installed here cannot come back.
+  const cut: SkillName[] = was.cut.filter((name) => ['stale', 'restoring', 'loaded'].includes(state(after, name) ?? ''))
+  let newlyCut = false
   for (const name of Object.keys(before.ledger)) {
-    const now = state(after, name)
-    if (state(before, name) === 'loaded' && (now === 'stale' || now === 'absent') && !cut.includes(name)) cut.push(name)
+    if (state(before, name) === 'loaded' && state(after, name) === 'stale') {
+      newlyCut = true
+      if (!cut.includes(name)) cut.push(name)
+    }
   }
   let nextCut = cut
-  if (cut.length > was.cut.length) {
+  if (newlyCut) {
     lines.push(`${PREFIX}cut by compaction: ${cut.join(', ')}; asked the model to reload them.`)
   } else if (cut.length > 0 && cut.every((name) => state(after, name) === 'loaded')) {
     lines.push(`${PREFIX}reloaded: ${cut.join(', ')}.`)
