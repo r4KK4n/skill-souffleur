@@ -229,7 +229,7 @@ Costs:
 - [x] `/souffleur init` per skill and `/souffleur migrate` for old hooks
 - [x] Install guide
 - [x] Short notices in the transcript for start, compaction and problems
-- [ ] Release tag `v0.1.0` (the code is ready and installable from the repository; the maintainer tags it)
+- [ ] Release tag `v0.1.1` (version 0.1.1 is ready and installable from the repository; no tag exists yet, the maintainer tags it)
 
 ## Contributing
 

@@ -73,6 +73,8 @@ type Opts = {
   skillCalls?: string[]
   /** The whole request of every skill read. */
   skillRequests?: Record<string, unknown>[]
+  /** `$.tool.list` never shows the tool, throws, answers a non-array, or never answers. */
+  listMode?: 'hidden' | 'throws' | 'junk' | 'hangs'
   /** `$.ui.log` throws. */
   failLog?: boolean
   /** An Agent tool call stays open until this resolves, as a running subagent keeps it open. */
@@ -112,12 +114,19 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   const toasts: string[] = []
   on('tool.register', (_, e) => {
     if (opts.failToolRegister) throw new Error('refused')
+    toolGone = false
     tools.push(e as { name: string })
     return { value: { tool: `mcp__skill-souffleur__${e.name}` } } as never
   })
   let toolGone = false
   const logs: string[] = []
-  on('tool.list', () => ({ value: toolGone ? [] : tools.map((t) => ({ name: `mcp__skill-souffleur__${t.name}`, description: '', mcp: true })) }) as never)
+  on('tool.list', () => {
+    if (opts.listMode === 'throws') throw new Error('list failed')
+    if (opts.listMode === 'junk') return { value: 'nope' } as never
+    if (opts.listMode === 'hangs') return new Promise(() => {}) as never
+    if (opts.listMode === 'hidden') return { value: [] } as never
+    return { value: toolGone ? [] : tools.map((t) => ({ name: `mcp__skill-souffleur__${t.name}`, description: '', mcp: true })) } as never
+  })
   on('ui.log', (_, e) => {
     if (opts.failLog) throw new Error('no transcript here')
     logs.push(e.text)
@@ -1820,6 +1829,7 @@ test('after /clear the new session logs its start line and no diff against the o
 test('a missing propose tool is registered again and announced once', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS })
   await start($)
+  await $.prompt.submit({ text: 'first' })
   w.logs.length = 0
   w.dropTool()
   await $.prompt.submit({ text: 'hello' })
@@ -1841,6 +1851,7 @@ test('notices false writes no line and still reconnects the tool', async ($, on)
   await start($)
   await skillLoaded($, 'writing-guide')
   await $.session.compact({ trigger: 'manual' })
+  await $.prompt.submit({ text: 'first' })
   w.dropTool()
   await $.prompt.submit({ text: 'hello' })
   expect(w.logs).toEqual([])
@@ -1850,8 +1861,100 @@ test('notices false writes no line and still reconnects the tool', async ($, on)
 test('a throwing ui.log does not break session start or the prompt', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS }, { failLog: true })
   await start($)
+  await $.prompt.submit({ text: 'first' })
   w.dropTool()
   const r = await $.prompt.submit({ text: 'hello' })
   expect(r.context?.join('\n')).toMatch(/writing-guide/)
   expect(w.tools).toHaveLength(2)
+  expect(w.statuses.at(-1)).not.toMatch(/degraded/)
+})
+
+test('start with a broken user file logs the degraded line once', async ($, on) => {
+  const w = world(on, { [USER_FILE]: '{bad' })
+  await start($)
+  await $.prompt.submit({ text: 'hello' })
+  expect(w.logs.filter((l) => /degraded/.test(l))).toHaveLength(1)
+})
+
+test('resume repeats neither the degraded line nor a cut line', async ($, on) => {
+  const w = world(on, { [USER_FILE]: '{bad', 'x': '' })
+  await start($)
+  await start($)
+  expect(w.logs.filter((l) => /degraded/.test(l))).toHaveLength(1)
+})
+
+test('resume after a cut repeats no cut line', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  await skillLoaded($, 'writing-guide')
+  await $.session.compact({ trigger: 'manual' })
+  expect(w.logs.filter((l) => /cut by compaction/.test(l))).toHaveLength(1)
+  await start($)
+  expect(w.logs.filter((l) => /cut by compaction/.test(l))).toHaveLength(1)
+})
+
+test('a skill that stays unavailable writes a problem line, and loading it later writes reloaded', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  await skillLoaded($, 'writing-guide')
+  await $.session.compact({ trigger: 'manual' })
+  w.logs.length = 0
+  await skillLoaded($, 'writing-guide')
+  expect(w.logs).toEqual(['Souffleur: reloaded: writing-guide.'])
+})
+
+test('a skill that did not load after two requests writes one problem line', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  for (let i = 0; i < 6; i++) await $.prompt.submit({ text: `p${i}` })
+  expect(w.logs.filter((l) => /did not load after two requests/.test(l))).toHaveLength(1)
+})
+
+test('a tool the list never shows is registered once, silently', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS }, { listMode: 'hidden' })
+  await start($)
+  w.logs.length = 0
+  await $.prompt.submit({ text: 'one' })
+  await $.prompt.submit({ text: 'two' })
+  expect(w.tools).toHaveLength(2)
+  expect(w.logs).toEqual([])
+})
+
+test('a tool seen once and then missing is announced each time it comes back', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  await $.prompt.submit({ text: 'one' })
+  w.logs.length = 0
+  w.dropTool()
+  await $.prompt.submit({ text: 'two' })
+  await $.prompt.submit({ text: 'three' })
+  expect(w.logs.filter((l) => /reconnected/.test(l))).toEqual(['Souffleur: tool reconnected.'])
+  expect(w.tools).toHaveLength(2)
+})
+
+test('a throwing tool list does not break the prompt or record an error', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS }, { listMode: 'throws' })
+  await start($)
+  const r = await $.prompt.submit({ text: 'hello' })
+  expect(r.context?.join('\n')).toMatch(/writing-guide/)
+  expect(w.statuses.at(-1)).not.toMatch(/degraded/)
+  expect(w.tools).toHaveLength(1)
+})
+
+test('a non-array tool list is skipped without an error', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS }, { listMode: 'junk' })
+  await start($)
+  await $.prompt.submit({ text: 'hello' })
+  expect(w.statuses.at(-1)).not.toMatch(/degraded/)
+  expect(w.tools).toHaveLength(1)
+})
+
+test('a tool list that never answers does not hold the prompt back', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS }, { listMode: 'hangs' })
+  await start($)
+  const p = $.prompt.submit({ text: 'hello' })
+  await w.clock.advance(300)
+  const r = await p
+  expect(r.context?.join('\n')).toMatch(/writing-guide/)
+  expect(w.tools).toHaveLength(1)
 })

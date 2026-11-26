@@ -144,11 +144,11 @@ async function persist($: Dollar, l: Loaded, s0: Session, quiet = false): Promis
   if (!quiet && latest && latest.id === s0.id) ({ lines, session: next } = notices(l.config, latest, s0, l.root))
   const s: Session = { ...next, rev: (next.rev ?? 0) + 1, touched: now() }
   latest = s
+  for (const line of lines) say($, l, line)
   // A broken file shows as degraded; only a clean start without a user file says "not set up".
   $.ui.status(!l.setUp && !s.errors.length ? NOT_SET_UP : statusLine(s, l.config.mode, sectionNotes(l.config, l.root).leftOut.length))
   await $.state.set(REF, s)
   await $.store.set(`session:${s.id}`, s)
-  for (const line of lines) say($, l, line)
 }
 
 /** Stored copies of sessions not touched for this long are removed at session start. */
@@ -1082,15 +1082,31 @@ async function queuePassages($: Dollar, passages: Passage[], projectFiles: Set<s
   return { queued, skipped }
 }
 
-/** The propose tool's server can drop between turns while the hooks go on: register it again and say so. */
+/** The own tool showed in `$.tool.list()` at least once in this process (the list may never show it). */
+let toolSeen = false
+/** The silent retry for a tool the list never showed has been spent. */
+let silentRetried = false
+
+/**
+ * The propose tool's server can drop between turns while the hooks go on. Missing after it was seen: register again and
+ * say so. Missing and never seen: the list may not show our own tool, so try once, silently.
+ */
 async function reconnectTool($: Dollar): Promise<void> {
-  let listed: { name: string }[]
+  let listed: unknown
   try {
-    listed = await $.tool.list()
+    listed = await Promise.race([$.tool.list(), $.clock.sleep(LIST_BUDGET_MS).then(() => undefined)])
   } catch {
     return
   }
-  if (listed.some((t) => t.name === PROPOSE_TOOL)) return
+  if (!Array.isArray(listed)) return
+  if (listed.some((t) => t?.name === PROPOSE_TOOL)) {
+    toolSeen = true
+    return
+  }
+  if (!toolSeen && silentRetried) return
+  const announce = toolSeen
+  toolSeen = false
+  silentRetried = true
   try {
     await $.tool.register(REGISTER_PROPOSE)
   } catch {
@@ -1098,7 +1114,7 @@ async function reconnectTool($: Dollar): Promise<void> {
     return
   }
   proposeReady = true
-  say($, await getLoaded($), 'Souffleur: tool reconnected.')
+  if (announce) say($, await getLoaded($), 'Souffleur: tool reconnected.')
 }
 
 export const register: Register = (on) => {
@@ -1117,10 +1133,12 @@ export const register: Register = (on) => {
         s = decide(l.config, { ...before, errors: [] }, { type: 'start', now: now(), start: 'resume', version }).session
         s = decide(l.config, s, { type: 'config', now: now(), errors: l.errors }).session
       } else s = await freshSession($, l, id, 'startup')
-      // What is wrong at the start is told by the start line and the status, not again as news.
-      s = notices(l.config, s, s, l.root).session
+      // Problems that hold at the start are news once; a resumed session's stored `noticed` keeps them from repeating.
+      const first = notices(l.config, s, s, l.root)
+      s = first.session
       await persist($, l, s, true)
       say($, l, startNotice(l.config, s, l.setUp, PLUGIN_VERSION))
+      for (const line of first.lines) say($, l, line)
     })
     await pruneStore($, await $.session.id())
     await safe($, 'installed', undefined, () => refreshInstalled($))
@@ -1130,6 +1148,8 @@ export const register: Register = (on) => {
     interactive = e.isInteractive === true
     askStopped = false
     proposeReady = false
+    toolSeen = false
+    silentRetried = false
     try {
       await $.tool.register(REGISTER_PROPOSE)
       proposeReady = true
