@@ -1,5 +1,5 @@
 import { AUDIENCES } from './types.ts'
-import type { Audience, Config, Need, Match, Mode, NeedName, Note, Origin, Rule, SkillName, SkillRule } from './types.ts'
+import type { Audience, Config, Need, Match, Mode, NeedName, Note, Origin, ReplyLimits, Rule, SkillName, SkillRule } from './types.ts'
 
 type FileConfig = {
   mode?: Mode
@@ -205,10 +205,28 @@ function parseNeed(value: unknown, name: string, soft: (m: string) => void): Nee
   return isObject(value) ? { for: audience, what: text } : { for: 'work', what: text, noAudience: true }
 }
 
+/** `{ maxChars: 200-20000, headings: 0-20 }`, both optional; anything else is soft-rejected whole. */
+function parseReply(v: unknown, where: string, soft: (m: string) => void): ReplyLimits | undefined {
+  if (!isObject(v)) return void soft(`${where}: must be an object with maxChars and headings; ignored`)
+  const unknown = Object.keys(v).filter((k) => k !== 'maxChars' && k !== 'headings')
+  if (unknown.length) return void soft(`${where}: unknown key ${show(unknown[0])}; ignored`)
+  const out: ReplyLimits = {}
+  const int = (value: unknown, lo: number, hi: number): value is number => typeof value === 'number' && Number.isInteger(value) && value >= lo && value <= hi
+  if (v.maxChars !== undefined) {
+    if (!int(v.maxChars, 200, 20000)) return void soft(`${where}.maxChars: must be an integer from 200 to 20000; ignored`)
+    out.maxChars = v.maxChars
+  }
+  if (v.headings !== undefined) {
+    if (!int(v.headings, 0, 20)) return void soft(`${where}.headings: must be an integer from 0 to 20; ignored`)
+    out.headings = v.headings
+  }
+  return out
+}
+
 function parseRule(v: unknown, where: string, source: Origin, soft: (m: string) => void, name: string): Omit<SkillRule, 'from'> {
   check(isObject(v), where, 'must be an object')
   const obj = v as Record<string, unknown>
-  onlyKeys(obj, ['always', 'startup', 'need', 'gate', 'duty', 'for', 'notIn'], where)
+  onlyKeys(obj, ['always', 'startup', 'need', 'gate', 'duty', 'for', 'notIn', 'reply'], where)
   const rule: Omit<SkillRule, 'from'> = {}
   if (obj.always !== undefined) {
     check(typeof obj.always === 'boolean', `${where}.always`, 'must be true or false')
@@ -228,6 +246,13 @@ function parseRule(v: unknown, where: string, source: Origin, soft: (m: string) 
     if (!isAudience(obj.for)) soft(`${name}.for: ${FOR_ERROR}`)
     else if (rule.always !== true) soft(`${name}.for: only for always-on skills; ignored`)
     else rule.for = obj.for
+  }
+  if (obj.reply !== undefined) {
+    if (rule.always !== true || rule.for !== 'chat') soft(`${name}.reply: only for an always-on skill with "for": "chat"; ignored`)
+    else {
+      const reply = parseReply(obj.reply, `${name}.reply`, soft)
+      if (reply !== undefined) rule.reply = reply
+    }
   }
   if (obj.notIn !== undefined) {
     const list = obj.notIn

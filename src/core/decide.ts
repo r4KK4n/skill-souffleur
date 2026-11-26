@@ -3,6 +3,7 @@ import { compacted, initLedger, markInstalled, requested, skillLoaded, syncLedge
 import type { Ledger } from './ledger.ts'
 import { audienceOf, neededSkills, type Deliverable } from './needs.ts'
 import type { Proposal } from './proposals.ts'
+import { checkReply, replySkill, reminderLine } from './reply.ts'
 import { checkRules, contextNotes, ruleKind, ruleSkillNames } from './rules.ts'
 import { renderTable } from './status.ts'
 import type { Audience, Config, NeedName, SkillName } from './types.ts'
@@ -55,6 +56,8 @@ export type Session = {
   touched?: number
   /** What notices already told the user: skills cut by compaction, and problem keys shown. */
   noticed?: { cut: SkillName[]; problems: string[] }
+  /** The reply check of the chat skill: replies checked, replies over the limit, violations in a row, user prompts since the last reminder, and the reminder waiting for a prompt. */
+  replyCheck?: { total: number; over: number; streak: number; sinceReminder: number; pending?: string }
 }
 
 export type CoreEvent =
@@ -68,6 +71,8 @@ export type CoreEvent =
   | { type: 'command'; now: number; args: string; root?: string }
   | { type: 'typed'; now: number; name: string }
   | { type: 'agentDone'; now: number }
+  /** A main-session turn ended with this answer. `fromCommand`: the turn's prompt was a typed command. */
+  | { type: 'reply'; now: number; answer: string; fromCommand: boolean; aborted: boolean; root?: string }
   /** A learn call (the small model reading a skill text) ended: `ok` is false when it failed or gave no usable answer. */
   | { type: 'learned'; now: number; ok: boolean }
   /** The config was read again (after `/souffleur init`): the ledger follows it, and `errors` replace the old config errors. */
@@ -186,6 +191,8 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
       return { session: { ...s, ledger: syncLedger(s.ledger, config, e.now, ruleSkillNames(config)), ruleSkills: s.ruleSkills.filter((n) => ruleSkillNames(config).includes(n)), openRules: s.openRules.filter((o) => config.rules.some((r) => r.id === o.id)), needs: Object.fromEntries(Object.entries(s.needs).filter(([name]) => name in config.needs)), duties: s.duties.filter((d) => d.skill in config.skills), errors: [...s.errors.filter((m) => !m.startsWith('config: ')), ...e.errors.map((m) => `config: ${m}`)].slice(-KEEP) }, actions: [] }
     case 'installed':
       return { session: { ...s, ledger: markInstalled(s.ledger, e.names, e.now) }, actions: [] }
+    case 'reply':
+      return { session: onReply(config, s, e), actions: [] }
     case 'agentDone':
       return { session: { ...s, subagentsRunning: Math.max(0, s.subagentsRunning - 1) }, actions: [] }
     case 'learned':
@@ -222,6 +229,32 @@ function onCompact(config: Config, s: Session, e: Extract<CoreEvent, { type: 'co
   // Texts for others and screens wait for the next signal; chat and work needs are requested on the next prompt as before.
   const needs = Object.fromEntries(Object.entries(s.needs).map(([name, n]) => [name, isOutward(config, name) && n.reason !== 'command' ? { ...n, dormant: true } : n]))
   return { ...s, needs, ledger: compacted(s.ledger, e.now), compactedSincePrompt: true, notesSent: s.notesSent.filter((id) => !needNotes.has(id)) }
+}
+
+/** User prompts between two reminders about long replies. */
+const REMINDER_EVERY = 5
+
+/** Counts one checked reply. A violation queues the reminder; in `enforce` a second one in a row marks the chat skill stale. Never denies. */
+function onReply(config: Config, s: Session, e: Extract<CoreEvent, { type: 'reply' }>): Session {
+  if (e.fromCommand || e.aborted || s.paused) return s
+  const rule = replySkill(config, e.root)
+  if (rule === undefined) return s
+  const r = checkReply(e.answer, rule.limits)
+  if (r.skip) return s
+  const old = s.replyCheck ?? { total: 0, over: 0, streak: 0, sinceReminder: REMINDER_EVERY }
+  const { pending: _p, ...rest } = old
+  let rc: NonNullable<Session['replyCheck']> = { ...rest, total: old.total + 1 }
+  let ledger = s.ledger
+  if (!r.over) rc = { ...rc, streak: 0 }
+  else {
+    rc = { ...rc, over: old.over + 1, streak: old.streak + 1, pending: reminderLine(rule.name, rule.limits, r) }
+    const row = ledger[rule.name]
+    if (config.mode === 'enforce' && rc.streak >= 2 && row?.state === 'loaded') {
+      ledger = { ...ledger, [rule.name]: { ...row, state: 'stale', since: e.now, reason: 'two replies in a row over the limit', requests: 0 } }
+      rc.streak = 0
+    }
+  }
+  return { ...s, ledger, replyCheck: rc }
 }
 
 const DELIVERABLE_OF: Partial<Record<Audience, Deliverable>> = { readers: 'text-for-others', users: 'screen' }
@@ -279,7 +312,9 @@ function restore(config: Config, s: Session, now: number, trusted: boolean, root
   })
   const wanted = missing.filter((name) => s.ledger[name]!.requests < MAX_REQUESTS)
   const giveUp = missing.filter((name) => s.ledger[name]!.requests >= MAX_REQUESTS)
-  const why = wanted.some((name) => { const e = s.ledger[name]!; return e.state === 'stale' || (e.state === 'restoring' && e.lastCompactAt !== undefined) }) ? 'Compaction cut or dropped their text. The note that skills invoked earlier must not be run again does not apply to them: invoke them again.' : ''
+  const cut = wanted.some((name) => { const e = s.ledger[name]!; return (e.state === 'stale' && e.lastCompactAt !== undefined) || (e.state === 'restoring' && e.lastCompactAt !== undefined) })
+  const slipped = !cut && wanted.some((name) => s.ledger[name]!.state === 'stale')
+  const why = cut ? 'Compaction cut or dropped their text. The note that skills invoked earlier must not be run again does not apply to them: invoke them again.' : slipped ? 'Your last two replies went over its limits. The note that skills invoked earlier must not be run again does not apply to them: invoke them again.' : ''
   const chat = Object.entries(config.skills)
     .filter(([name, rule]) => rule.always === true && audienceOf(config, name) === 'chat' && s.ledger[name]?.state !== 'not installed here' && (trusted || rule.from !== 'project') && !excludedIn(rule, root))
     .map(([name]) => name)
@@ -377,6 +412,14 @@ function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'pro
     const ids = notes.map((n) => n.id)
     next.notesSent = [...next.notesSent, ...ids.filter((id) => !next.notesSent.includes(id))]
     next.freshNotes = next.freshNotes.filter((id) => !ids.includes(id) && config.notes.some((n) => n.id === id))
+  }
+  if (next.replyCheck !== undefined) {
+    const rc = { ...next.replyCheck, sinceReminder: next.replyCheck.sinceReminder + 1 }
+    next.replyCheck = rc
+    if (rc.pending !== undefined && rc.sinceReminder >= REMINDER_EVERY && !s.paused && replySkill(config, e.root) !== undefined && add(rc.pending)) {
+      const { pending: _p, ...rest } = rc
+      next.replyCheck = { ...rest, sinceReminder: 0 }
+    }
   }
   next.revise = next.revise.filter((text) => !add(text))
   next.duties = next.duties.map((d) => {

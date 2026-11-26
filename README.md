@@ -102,7 +102,7 @@ Create `~/.claude/souffleur.json`, or let `/souffleur init` write it for you:
 {
   "mode": "observe",
   "skills": {
-    "terse:terse-mode": { "always": true, "for": "chat" },
+    "terse:terse-mode": { "always": true, "for": "chat", "reply": { "maxChars": 800, "headings": 0 } },
     "writing-guide": { "need": "prose" },
     "ui-checklist": { "need": "ui" }
   },
@@ -114,6 +114,8 @@ Create `~/.claude/souffleur.json`, or let `/souffleur init` write it for you:
 ```
 
 Each need names who receives the output its skills shape, in `for`: `chat` (your replies in the session), `readers` (texts other people read), `users` (what users of a product see) or `work` (how the agent works, nobody reads it). `what` is the description of 1 to 200 characters that the classifier uses for `work` needs; a `readers` or `users` need starts from what the prompt produces (a text for others, a screen) or from tool evidence, and its `what` is not matched. A need with `for: "chat"` starts only with `/souffleur need` and gets a config warning. The name `none` is reserved and dropped. The old form, a plain string, still works and counts as `work`. An always-on skill carries `for` itself; `for` on any other skill is an error and ignored. An object need with an invalid or missing `for` counts as `work` and reports an error. A skill in the user file can list `"notIn": ["/path/to/repo"]`: in those project roots it is excluded. `notIn` is compared without trailing slashes and is only read from the user file. The request to load skills names each skill with its audience, so a writing skill for docs does not change your replies in the chat; a skill excluded by `notIn` is not requested or gated there, and `/souffleur` shows it as `excluded in this project`. `/souffleur` lists under "Audience not set:" a need written as a plain string (`<need>: no audience set; add "for" to it in ~/.claude/souffleur.json`) and an always-on skill without `for` (`<skill>: always on without "for"; add "for": "chat" if it shapes your replies in this chat`).
+
+An always-on skill with `"for": "chat"` can add `"reply": { "maxChars": 800, "headings": 0 }` (`maxChars` 200 to 20000, `headings` 0 to 20, both optional). After each answer in the main session Souffleur measures the reply without code blocks and counts heading lines. When a reply is over a limit, the next prompt carries one reminder line (at most once per five prompts), and `/souffleur` shows `<skill>: <v> of <t> replies over the limit`. In `enforce`, two replies in a row over the limit mark the skill `stale`, so it is requested again. Nothing is denied. Replies to typed commands, aborted turns and replies that are mostly code are not checked.
 
 A skill with `"always": true` is needed from the first turn. A skill with `"need"` is needed once its need starts: a `work` need when a prompt starts that kind of work, a `readers` or `users` need when a prompt asks for a text or a screen, or when a matching tool call (a gated path, `gh issue`, `gh pr`) shows one is being made. After a compaction or a resume, Souffleur asks the model to load the `chat`, `work` and always-on skills again. `readers` and `users` needs wait, together with their notes, until the next prompt or tool call that asks for their deliverable; `/souffleur` shows them as waiting since compaction. A project can add its own `.claude/souffleur.json`, but it cannot change your entries or your mode. Its skills and needs are report only until you list the project root in `trustProjects` in your user file: for any other project Souffleur neither asks the model to load them nor names them in the system prompt, and they cannot deny a call. `/souffleur` still lists them. A project file may define 20 skills and 10 needs at most; more get an error that names the cap. Roots in `trustProjects` are compared without trailing slashes.
 
@@ -251,7 +253,7 @@ Costs:
 - [x] Install guide
 - [x] Skill audiences (`for`, `notIn`)
 - [x] Needs by deliverable
-- [ ] Reply check
+- [x] Reply check
 - [x] Short notices in the transcript for start, compaction and problems
 - [x] Release tags `v0.1.0` to `v0.1.5`
 - [x] Updates that reach running sessions (install from a folder)

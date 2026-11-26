@@ -7,6 +7,8 @@ export type Audience = 'chat' | 'readers' | 'users' | 'work'
 export const AUDIENCES: readonly Audience[] = ['chat', 'readers', 'users', 'work']
 /** `what` is the classifier text. `noAudience` marks the old string form, which counts as `work`. */
 export type Need = { for: Audience; what: string; noAudience?: true }
+/** Limits for the chat replies of an always-on chat skill. A missing field is no limit. */
+export type ReplyLimits = { maxChars?: number; headings?: number }
 export type SkillRule = {
   /** Set by the parser from the file the entry came from; never read from JSON. */
   from: Origin
@@ -15,6 +17,8 @@ export type SkillRule = {
   for?: Audience
   /** Main repository roots where the skill is off. Only the user file sets it. */
   notIn?: string[]
+  /** Only with `always` and `for: "chat"`. */
+  reply?: ReplyLimits
   startup?: 'injected'
   need?: NeedName
   gate?: Match

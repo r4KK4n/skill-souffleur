@@ -1186,3 +1186,123 @@ test('the compaction sentence appears only after a compaction', () => {
   const cut = run(c, [aPrompt('text-for-others', 'write the readme for the project now', ['prose']), loadSkill('writing-guide'), compact(), aPrompt('text-for-others', 'write the readme for the project again', ['prose'])])
   assert.match(ctx(cut.out[3]!), /Compaction cut/)
 })
+
+// --- reply check ---
+
+const replyCfg = (mode: 'observe' | 'enforce' = 'enforce', reply: { maxChars?: number; headings?: number } = { maxChars: 100, headings: 0 }): Config =>
+  cfg({ mode, skills: { 'terse:terse-mode': { always: true, for: 'chat', from: 'user', reply }, ...base.skills } })
+const LONG = 'word '.repeat(60)
+const reply = (answer: string, extra: Partial<Extract<CoreEvent, { type: 'reply' }>> = {}): CoreEvent => ({ type: 'reply', now: at(), answer, fromCommand: false, aborted: false, ...extra })
+const loaded = (c: Config, extra: CoreEvent[] = []) => run(c, [loadSkill('terse:terse-mode'), ...extra]).s
+
+test('reply: a violation is counted and the next prompt carries one reminder line', () => {
+  const c = replyCfg()
+  const r = run(c, [loadSkill('terse:terse-mode'), reply(`# Head\n${LONG}`), prompt('next')])
+  assert.deepEqual(r.s.replyCheck && { total: r.s.replyCheck.total, over: r.s.replyCheck.over }, { total: 1, over: 1 })
+  assert.match(ctx(r.out.at(-1)!), /^Souffleur: your last reply had 307 characters and 1 headings \(limit 100 characters, 0 headings\)\. Replies in this chat follow terse:terse-mode\.$/m)
+  assert.equal(r.s.replyCheck?.pending, undefined)
+})
+
+test('reply: without a headings limit the headings part is omitted, without maxChars the characters part', () => {
+  const a = run(replyCfg('enforce', { maxChars: 100 }), [loadSkill('terse:terse-mode'), reply(LONG), prompt('x')])
+  assert.match(ctx(a.out.at(-1)!), /Souffleur: your last reply had 300 characters \(limit 100 characters\)\. Replies in this chat follow terse:terse-mode\./)
+  const b = run(replyCfg('enforce', { headings: 1 }), [loadSkill('terse:terse-mode'), reply('# a\n## b\nok'), prompt('x')])
+  assert.match(ctx(b.out.at(-1)!), /Souffleur: your last reply had 2 headings \(limit 1 headings\)\. Replies in this chat follow terse:terse-mode\./)
+})
+
+test('reply: a reply within the limits is counted but gives no reminder and clears a waiting one', () => {
+  const c = replyCfg()
+  const r = run(c, [loadSkill('terse:terse-mode'), reply(LONG), reply('short'), prompt('x')])
+  assert.equal(r.s.replyCheck?.total, 2)
+  assert.equal(r.s.replyCheck?.over, 1)
+  assert.equal(r.s.replyCheck?.streak, 0)
+  assert.doesNotMatch(ctx(r.out.at(-1)!), /last reply/)
+})
+
+test('reply: a long reply that is mostly a code block is not a violation', () => {
+  const answer = `ok\n\`\`\`ts\n${'x'.repeat(3000)}\n\`\`\`\n`
+  const r = run(replyCfg(), [loadSkill('terse:terse-mode'), reply(answer), prompt('x')])
+  assert.equal(r.s.replyCheck?.over ?? 0, 0)
+  assert.doesNotMatch(ctx(r.out.at(-1)!), /last reply/)
+})
+
+test('reply: a reply to a typed command, an aborted turn and a paused session are not checked', () => {
+  const c = replyCfg()
+  for (const e of [reply(LONG, { fromCommand: true }), reply(LONG, { aborted: true })]) {
+    const r = run(c, [loadSkill('terse:terse-mode'), e, prompt('x')])
+    assert.equal(r.s.replyCheck, undefined)
+    assert.doesNotMatch(ctx(r.out.at(-1)!), /last reply/)
+  }
+  const paused = run(c, [loadSkill('terse:terse-mode'), command('pause'), reply(LONG), prompt('x')])
+  assert.equal(paused.s.replyCheck, undefined)
+  assert.doesNotMatch(ctx(paused.out.at(-1)!), /last reply/)
+})
+
+test('reply: six violating replies in a row remind on prompts 1 and 6 only', () => {
+  const c = replyCfg()
+  let s = loaded(c)
+  const reminded: boolean[] = []
+  for (let i = 0; i < 6; i++) {
+    s = decide(c, s, reply(LONG)).session
+    const r = decide(c, s, prompt(`p${i + 1}`))
+    s = r.session
+    reminded.push(/last reply/.test(ctx(r.actions)))
+  }
+  assert.deepEqual(reminded, [true, false, false, false, false, true])
+  assert.equal(s.replyCheck?.total, 6)
+  assert.equal(s.replyCheck?.over, 6)
+})
+
+test('reply: the reminder is context, not a notice, and notices false does not change it', () => {
+  const c = { ...replyCfg(), notices: false }
+  const r = run(c, [loadSkill('terse:terse-mode'), reply(LONG), prompt('x')])
+  assert.match(ctx(r.out.at(-1)!), /last reply/)
+  assert.deepEqual(r.out.at(-1)!.map((a) => a.kind).filter((k) => k !== 'context'), [])
+})
+
+test('reply: enforce marks the chat skill stale after two violations in a row; observe does not', () => {
+  const enforce = run(replyCfg('enforce'), [loadSkill('terse:terse-mode'), reply(LONG)])
+  assert.equal(enforce.s.ledger['terse:terse-mode']?.state, 'loaded')
+  const two = run(replyCfg('enforce'), [loadSkill('terse:terse-mode'), reply(LONG), reply(LONG)])
+  assert.equal(two.s.ledger['terse:terse-mode']?.state, 'stale')
+  const ask = one(replyCfg('enforce'), [prompt('go')], two.s)
+  assert.match(ctx(ask), /- terse:terse-mode: for your replies in this chat\./)
+  assert.equal(decide(replyCfg('enforce'), two.s, prompt('go')).session.ledger['terse:terse-mode']?.state, 'restoring')
+  const obs = run(replyCfg('observe'), [loadSkill('terse:terse-mode'), reply(LONG), reply(LONG)])
+  assert.equal(obs.s.ledger['terse:terse-mode']?.state, 'loaded')
+  const broken = run(replyCfg('enforce'), [loadSkill('terse:terse-mode'), reply(LONG), reply('ok'), reply(LONG)])
+  assert.equal(broken.s.ledger['terse:terse-mode']?.state, 'loaded')
+})
+
+test('reply: nothing is ever denied by the reply check', () => {
+  const r = run(replyCfg('enforce'), [loadSkill('terse:terse-mode'), reply(LONG), reply(LONG), tool('Bash', { command: 'ls' })])
+  assert.deepEqual(denies(r.out.at(-1)!), [])
+})
+
+test('reply: counts survive a resume and a reload, and restart on a clear', () => {
+  const c = replyCfg()
+  const s = run(c, [loadSkill('terse:terse-mode'), reply(LONG)]).s
+  for (const start of ['resume', 'reload'] as const) {
+    const back = decide(c, s, { type: 'start', now: at(), start }).session
+    assert.equal(back.replyCheck?.over, 1)
+    assert.equal(back.replyCheck?.total, 1)
+    assert.equal(JSON.parse(JSON.stringify(back)).replyCheck.over, 1)
+  }
+  assert.equal(decide(c, s, { type: 'start', now: at(), start: 'clear' }).session.replyCheck, undefined)
+})
+
+test('reply: a config without reply does no counting and no reminder', () => {
+  const r = run(withAlways, [loadSkill('terse:terse-mode'), reply(LONG), prompt('x')])
+  assert.equal(r.s.replyCheck, undefined)
+  assert.doesNotMatch(ctx(r.out.at(-1)!), /last reply/)
+})
+
+test('reply: a chat skill excluded in this root or a project skill of an untrusted root is not checked', () => {
+  const c = replyCfg()
+  c.skills['terse:terse-mode']!.notIn = ['/work/a']
+  assert.equal(decide(c, loaded(c), reply(LONG, { root: '/work/a' })).session.replyCheck, undefined)
+  assert.equal(decide(c, loaded(c), reply(LONG, { root: '/work/b' })).session.replyCheck?.over, 1)
+  const p = replyCfg()
+  p.skills['terse:terse-mode']!.from = 'project'
+  assert.equal(decide(p, loaded(p), reply(LONG, { root: '/work/b' })).session.replyCheck, undefined)
+})

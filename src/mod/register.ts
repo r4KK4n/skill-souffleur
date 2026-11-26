@@ -47,6 +47,8 @@ let askAtTurnEnd = false
 let noDialog = false
 /** The origin kind of the last prompt of the person; under `claude -p` that is `sdk`, and no later prompt can carry a reply. */
 let lastPromptKind: string | undefined
+/** The last prompt of the person was a typed command: its reply is not checked against the chat skill's limits. */
+let lastPromptCommand = false
 /** How long the dialog at a turn end may stay open before it counts as a rejection. */
 const ASK_WAIT_MS = 120_000
 /** The proposals a notice showed (kept after the offer ended), so each proposal gets one notice. */
@@ -1246,6 +1248,7 @@ export const register: Register = (on) => {
     })
     interactive = e.isInteractive === true
     lastPromptKind = undefined
+    lastPromptCommand = false
     askStopped = false
     shownHash = undefined
     noticed.clear()
@@ -1289,6 +1292,7 @@ export const register: Register = (on) => {
   on('prompt.submit', async ($, e, next) => {
     const fromUser = isFromUser(e)
     if (fromUser) lastPromptKind = e.origin?.kind
+    if (fromUser || (e.command !== undefined && isUserOrigin(e))) lastPromptCommand = e.command !== undefined
     if (fromUser) await safe($, 'tool.reconnect', undefined, () => reconnectTool($))
     // Only a prompt of the person (composer or bridge, no command) answers; any prompt of the person ends the offer.
     if (e.command !== undefined && isUserOrigin(e)) shownHash = undefined
@@ -1390,6 +1394,11 @@ export const register: Register = (on) => {
   // At the end of a turn: one question about the first waiting proposal; where no dialog opens, a notice with a reply hint.
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
+    if (e.agentId === undefined && e.reason === 'answer') {
+      await safe($, 'turn.reply', undefined, async () => {
+        await apply($, (l) => ({ type: 'reply', now: now(), answer: e.answer, fromCommand: lastPromptCommand, aborted: e.isAborted, root: l.root }))
+      })
+    }
     if (e.agentId === undefined && e.reason === 'answer' && (!askStopped || askAtTurnEnd || noDialog)) {
       await safe($, 'turn.complete', undefined, async () => {
         if ((await current($)).session.paused) return

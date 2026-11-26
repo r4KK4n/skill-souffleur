@@ -1,3 +1,4 @@
+import { replySkill } from './reply.ts'
 import type { Session } from './decide.ts'
 import { contextNotes, sectionNotes } from './rules.ts'
 import { excludedIn, isTrustedRoot } from './config.ts'
@@ -54,6 +55,8 @@ export function renderTable(config: Config, s: Session, now: number, root?: stri
     return [`- ${g.n}× ${heads(g.newest).join('; ')} (${clock(g.first)}–${clock(g.last)})`, ...indent(g.newest)]
   })
   if (denied.length) lines.push('', 'Would have denied:', ...denied)
+  const chat = replySkill(config, root)
+  if (chat !== undefined && s.replyCheck !== undefined && s.replyCheck.total > 0) lines.push('', 'Reply check:', `- ${chat.name}: ${s.replyCheck.over} of ${s.replyCheck.total} replies over the limit`)
   if (s.proposals.length) lines.push('', `Open proposals (${s.proposals.length}), /souffleur review asks about them:`, ...s.proposals.map((p) => `- ${p.entry.id}`))
   const leftOut = sectionNotes(config, root).leftOut
   if (leftOut.length) lines.push('', `Notes left out of the system prompt (2,000 character limit): ${leftOut.map((n) => n.id).join(', ')}`)
