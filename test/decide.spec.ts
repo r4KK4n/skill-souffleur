@@ -324,6 +324,60 @@ test('resume keeps the ledger, clear starts a fresh session', () => {
   assert.equal(cleared.id, s.id)
 })
 
+test('resume resets per-process counters', () => {
+  const s0 = run(withAlways, [prompt(), loadSkill('terse:terse-mode')]).s
+  const s: Session = {
+    ...s0,
+    subagentsRunning: 2,
+    mainSkillCalls: ['x'],
+    agentDenied: true,
+    learnCalls: ['y'],
+    fieldDenied: ['f'],
+    needs: { ui: { since: 1, reason: 'kept' } },
+    proposals: [{ id: 'p1' } as never],
+    noticed: { cut: ['terse:terse-mode'], problems: ['p'] },
+    openRules: [{ id: 'r', by: 'b', denied: false, told: false }],
+    duties: [{ skill: 'ui-checklist', openedAt: 1, by: 'b', denied: false }],
+    ruleSkills: ['terse:terse-mode'],
+  }
+  const resumed = decide(withAlways, s, { type: 'start', now: at(), start: 'resume' }).session
+  assert.equal(resumed.subagentsRunning, 0)
+  assert.deepEqual(resumed.mainSkillCalls, [])
+  assert.equal(resumed.agentDenied, false)
+  assert.deepEqual(resumed.learnCalls, [])
+  assert.deepEqual(resumed.fieldDenied, [])
+  assert.deepEqual(resumed.ledger, s.ledger)
+  assert.deepEqual(resumed.needs, s.needs)
+  assert.deepEqual(resumed.proposals, s.proposals)
+  assert.deepEqual(resumed.noticed, s.noticed)
+  assert.deepEqual(resumed.openRules, s.openRules)
+  assert.deepEqual(resumed.duties, s.duties)
+  assert.deepEqual(resumed.ruleSkills, s.ruleSkills)
+})
+
+test('reload keeps per-run counters', () => {
+  const s0 = run(withAlways, [prompt(), loadSkill('terse:terse-mode')]).s
+  const s: Session = { ...s0, subagentsRunning: 2, mainSkillCalls: ['x'], agentDenied: true, learnCalls: ['y'], fieldDenied: ['f'] }
+  const reloaded = decide(withAlways, s, { type: 'start', now: at(), start: 'reload' }).session
+  assert.equal(reloaded.subagentsRunning, 2)
+  assert.deepEqual(reloaded.mainSkillCalls, ['x'])
+  assert.equal(reloaded.agentDenied, true)
+  assert.deepEqual(reloaded.learnCalls, ['y'])
+  assert.deepEqual(reloaded.fieldDenied, ['f'])
+  assert.deepEqual(reloaded.ledger, s.ledger)
+})
+
+test('startup still gives a fresh session', () => {
+  const s0 = run(withAlways, [prompt(), loadSkill('terse:terse-mode')]).s
+  const s: Session = { ...s0, subagentsRunning: 2, mainSkillCalls: ['x'], agentDenied: true, learnCalls: ['y'] }
+  const fresh = decide(withAlways, s, { type: 'start', now: at(), start: 'startup' }).session
+  assert.equal(fresh.subagentsRunning, 0)
+  assert.deepEqual(fresh.mainSkillCalls, [])
+  assert.equal(fresh.agentDenied, false)
+  assert.equal(fresh.learnCalls, undefined)
+  assert.equal(fresh.ledger['terse:terse-mode']!.state, 'absent')
+})
+
 test('session survives JSON round trip', () => {
   const events: CoreEvent[] = [
     { type: 'start', now: at(), start: 'startup', version: '2.1.332' },
@@ -522,4 +576,42 @@ test('the Skill call that loads a gated skill is not denied', () => {
 test('trustProjects with a trailing slash still trusts the root in a tool call', () => {
   const c = cfg({ trustProjects: ['/work/p/'], skills: { 'p-gate': { always: true, from: 'project', gate: { tools: ['Write'] } } } })
   assert.equal(denies(one(c, [withRoot(prompt()), withRoot(tool('Write', { path: '/work/p/a' }))])).length, 1)
+})
+
+test('recovered removes errors of that hook only', () => {
+  const { s } = run(cfg({ mode: 'observe' }), [
+    { type: 'error', now: at(), where: 'prompt.submit', message: 'a' },
+    { type: 'error', now: at(), where: 'tool.call', message: 'b' },
+    { type: 'error', now: at(), where: 'prompt.submit', message: 'c' },
+    { type: 'recovered', now: at(), where: 'prompt.submit' },
+  ])
+  assert.deepEqual(s.errors, ['tool.call: b'])
+})
+
+test('recovered leaves config, learn and classifier errors and their counters', () => {
+  const failed = (): CoreEvent => ({ type: 'prompt', now: at(), text: 'x', fromUser: true, matched: [], classifierFailed: true })
+  const events: CoreEvent[] = [
+    { type: 'config', now: at(), errors: ['bad'] },
+    { type: 'learned', now: at(), ok: false },
+    { type: 'learned', now: at(), ok: false },
+    { type: 'learned', now: at(), ok: false },
+    failed(),
+    failed(),
+    failed(),
+  ]
+  const before = run(cfg({ mode: 'observe' }), events).s
+  assert.equal(before.errors.length, 3)
+  for (const where of ['prompt.submit', 'config', 'learn', 'classify', 'classifier']) {
+    const after = decide(cfg({ mode: 'observe' }), before, { type: 'recovered', now: at(), where }).session
+    assert.deepEqual(after.errors, before.errors, where)
+    assert.equal(after.learnFails, 3)
+    assert.equal(after.classifyFails, 3)
+  }
+})
+
+test('recovered with no matching error returns the same errors', () => {
+  const before = run(cfg({ mode: 'observe' }), [{ type: 'error', now: at(), where: 'tool.call', message: 'b' }]).s
+  const after = decide(cfg({ mode: 'observe' }), before, { type: 'recovered', now: at(), where: 'prompt.submit' })
+  assert.equal(after.session.errors, before.errors)
+  assert.deepEqual(after.actions, [])
 })

@@ -6,6 +6,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- Fixed: field rules no longer see the event metadata of a tool call (`tool`, `tool_use_id`, `agentId`, `requestMeta`) as arguments, so a field rule named like one of them no longer passes without that argument (#40).
+- Fixed: a resume in a new process resets the per-run counters (subagents running, main skill calls, denied agent and field rules, pending learn calls), so a stale count no longer blocks or misreads the resumed session; a reload in the same process keeps them (#32).
+- Fixed: a hook error clears once that hook works again, so one transient failure no longer keeps the status `degraded` until restart. Config errors and the classifier and learn failure counts keep their own lifecycle (#35).
 - Notices: short `Souffleur:` lines in the transcript for session start, compaction and problems, once per event and for the main session only. `"notices": false` in the user file turns them off.
 - The propose tool is registered again on a user prompt when it dropped out of the tool list. The line `Souffleur: tool reconnected.` appears only when the tool was seen and then went missing; a tool the list never showed is registered again silently, once per process.
 - Version `0.1.1`.

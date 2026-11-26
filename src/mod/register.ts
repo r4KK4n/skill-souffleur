@@ -15,7 +15,7 @@ import { statusLine } from '../core/status.ts'
 import type { Config, Note, Rule } from '../core/types.ts'
 import { notices, startNotice } from '../core/notices.ts'
 import { PLUGIN_VERSION } from './version.ts'
-import { isFromUser, isUserOrigin, toolFields } from './map.ts'
+import { isFromUser, isUserOrigin, presentArgs, toolFields } from './map.ts'
 
 // The hooks' `$` is the engine interface; the adapter calls only documented members.
 type Dollar = any
@@ -198,7 +198,13 @@ function apply($: Dollar, make: (l: Loaded) => CoreEvent): Promise<{ actions: Ac
 /** Runs the adapter's own work. A throw becomes an `error` event and `fallback`; it never reaches the event. */
 async function safe<T>($: Dollar, where: string, fallback: T, work: () => Promise<T>): Promise<T> {
   try {
-    return await work()
+    const result = await work()
+    try {
+      if (latest?.errors.some((m) => m.startsWith(`${where}: `))) await apply($, () => ({ type: 'recovered', now: now(), where }))
+    } catch {
+      // Clearing failed; the error stays until the next success.
+    }
+    return result
   } catch (err) {
     try {
       await apply($, () => ({ type: 'error', now: now(), where, message: message(err) }))
@@ -1130,7 +1136,7 @@ export const register: Register = (on) => {
       let s: Session
       if (before) {
         // Resume or reload: the ledger stays, what the config said last time does not.
-        s = decide(l.config, { ...before, errors: [] }, { type: 'start', now: now(), start: 'resume', version }).session
+        s = decide(l.config, { ...before, errors: [] }, { type: 'start', now: now(), start: held?.id === id ? 'reload' : 'resume', version }).session
         s = decide(l.config, s, { type: 'config', now: now(), errors: l.errors }).session
       } else s = await freshSession($, l, id, 'startup')
       // Problems that hold at the start are news once; a resumed session's stored `noticed` keeps them from repeating.
@@ -1169,12 +1175,12 @@ export const register: Register = (on) => {
 
   on('session.compact', async ($, e, next) => {
     const agentId = e.agentId === undefined ? {} : { agentId: e.agentId }
-    await safe($, 'session.compact', undefined, async () => {
+    await safe($, 'session.compact.before', undefined, async () => {
       await apply($, () => ({ type: 'compact', now: now(), phase: 'before', trigger: e.trigger, ...agentId }))
     })
     // The engine always sends the messages; the test kit's compaction call sends none, and next() refuses that.
     const r = await next(Array.isArray(e.messages) ? e : { ...e, messages: [{ role: 'user' as const, text: '', toolUses: [] }] })
-    await safe($, 'session.compact', undefined, async () => {
+    await safe($, 'session.compact.after', undefined, async () => {
       const skipped = 'skip' in r && r.skip !== undefined
       await apply($, () => ({ type: 'compact', now: now(), phase: 'after', trigger: e.trigger, skipped, ...agentId }))
     })
@@ -1229,7 +1235,7 @@ export const register: Register = (on) => {
         now: now(),
         tool: e.tool,
         ...fields,
-        present: Object.entries(e).filter(([, v]) => v !== undefined && v !== null && v !== '').map(([k]) => k),
+        present: presentArgs(e),
         ...(e.agentId === undefined ? {} : { agentId: e.agentId }),
         root: l.root,
         tree: l.tree,
@@ -1243,7 +1249,7 @@ export const register: Register = (on) => {
       r = await next(e)
     } finally {
       if (e.tool === 'Agent' && e.agentId === undefined) {
-        await safe($, 'tool.call', undefined, async () => {
+        await safe($, 'tool.done', undefined, async () => {
           await apply($, () => ({ type: 'agentDone', now: now() }))
         })
       }
@@ -1281,7 +1287,7 @@ export const register: Register = (on) => {
     if (e.command === 'souffleur') {
       const verb0 = (e.args ?? '').trim().split(/\s+/)[0]
       if (verb0 === 'init' || verb0 === 'migrate') {
-        const text = await safe($, 'command.run', undefined as string | undefined, async () => {
+        const text = await safe($, `command.run.${verb0}`, undefined as string | undefined, async () => {
           loaded = undefined // read the files again: another session may have changed them
           const { l } = await current($)
           return verb0 === 'init' ? runInit($, l) : runMigrate($, l)
@@ -1292,7 +1298,7 @@ export const register: Register = (on) => {
       if (verb0 === 'rule' || verb0 === 'review' || verb0 === 'accept' || verb0 === 'decline') {
         if (!isUserOrigin(e)) return { text: `Souffleur: only the user can run /souffleur ${verb0}; a plugin or the model cannot.` }
         const rest = (e.args ?? '').trim().slice(verb0.length).trim()
-        const text = await safe($, 'command.run', undefined as string | undefined, async () => {
+        const text = await safe($, `command.run.${verb0}`, undefined as string | undefined, async () => {
           loaded = undefined
           return verb0 === 'rule' ? runRule($, rest) : verb0 === 'review' ? runReview($) : verb0 === 'accept' ? runAccept($, rest.split(/\s+/).filter(Boolean)) : runDecline($, rest.split(/\s+/).filter(Boolean))
         })
@@ -1312,7 +1318,7 @@ export const register: Register = (on) => {
       if (reply !== undefined) return { text: reply }
       return next(e)
     }
-    await safe($, 'command.run', undefined, async () => {
+    await safe($, 'command.typed', undefined, async () => {
       await apply($, () => ({ type: 'typed', now: now(), name: e.command }))
     })
     return next(e)

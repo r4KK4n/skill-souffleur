@@ -295,6 +295,74 @@ test('a hook error passes the event through and shows degraded', async ($, on) =
   expect(w.statuses.at(-1)).toBe('degraded, see /souffleur')
 })
 
+test('a hook that works again clears its error and logs back to normal', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  let fail = false
+  let held: unknown
+  on('state.get', () => {
+    if (fail) {
+      fail = false
+      return { value: { value: { id: 's1' }, version: 0 } }
+    }
+    return { value: { value: held, version: 0 } }
+  })
+  on('state.set', (_, e) => {
+    held = e.value
+    return { value: { isSet: true, version: 1 } }
+  })
+  await start($)
+  fail = true
+  await $.prompt.submit({ text: 'hello there' })
+  expect(w.statuses.at(-1)).toBe('degraded, see /souffleur')
+  await $.prompt.submit({ text: 'and again' })
+  expect(w.statuses.at(-1)).not.toMatch(/degraded/)
+  expect(w.logs).toContain('Souffleur: back to normal.')
+})
+
+test('hook A error survives hook B success', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  let fail = false
+  let held: unknown
+  on('state.get', () => {
+    if (fail) {
+      fail = false
+      return { value: { value: { id: 's1' }, version: 0 } }
+    }
+    return { value: { value: held, version: 0 } }
+  })
+  on('state.set', (_, e) => {
+    held = e.value
+    return { value: { isSet: true, version: 1 } }
+  })
+  await start($)
+  fail = true
+  await $.prompt.submit({ text: 'hello there' }) // prompt.submit fails
+  expect(w.statuses.at(-1)).toBe('degraded, see /souffleur')
+  await $.tool.call({ tool: 'Read', path: 'a.txt' } as never) // tool.call works
+  expect(w.statuses.at(-1)).toBe('degraded, see /souffleur')
+})
+
+test('a failed pre-step of an Agent call is not wiped by the agentDone step', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  let fail = false
+  let held: unknown
+  on('state.get', () => {
+    if (fail) {
+      fail = false
+      return { value: { value: { id: 's1' }, version: 0 } }
+    }
+    return { value: { value: held, version: 0 } }
+  })
+  on('state.set', (_, e) => {
+    held = e.value
+    return { value: { isSet: true, version: 1 } }
+  })
+  await start($)
+  fail = true
+  await $.tool.call({ tool: 'Agent', prompt: 'x', description: 'd', subagent_type: 'general-purpose' } as never)
+  expect(w.statuses.at(-1)).toBe('degraded, see /souffleur')
+})
+
 test('/souffleur prints the ledger table', async ($, on) => {
   world(on, { [USER_FILE]: ALWAYS })
   await start($)
@@ -312,6 +380,34 @@ test('session restored from $.store when $.state is empty', async ($, on) => {
   expect(await table($)).toMatch(/writing-guide \| loaded/)
   const r = await $.prompt.submit({ text: 'carry on' })
   expect(r.context).toBe(undefined)
+})
+
+test('a reload of the held state keeps per-run counters', async ($, on) => {
+  const { config } = parseConfig(ALWAYS, undefined)
+  const busy = { ...initSession(config, 's1', 1, 'startup', '2.1.331'), subagentsRunning: 2 }
+  const written: any[] = []
+  on('state.get', () => ({ value: { value: busy, version: 0 } }) as never)
+  on('state.set', (_, e) => {
+    written.push(e.value)
+    return { value: { isSet: true, version: 1 } }
+  })
+  world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  expect(written.at(-1).subagentsRunning).toBe(2)
+})
+
+test('a resume from the store resets per-run counters', async ($, on) => {
+  const { config } = parseConfig(ALWAYS, undefined)
+  const busy = { ...initSession(config, 's1', 1, 'startup', '2.1.331'), subagentsRunning: 2 }
+  const written: any[] = []
+  on('state.get', () => ({ value: { value: undefined, version: 0 } }) as never)
+  on('state.set', (_, e) => {
+    written.push(e.value)
+    return { value: { isSet: true, version: 1 } }
+  })
+  world(on, { [USER_FILE]: ALWAYS }, { stored: { 'session:s1': busy } })
+  await start($)
+  expect(written.at(-1).subagentsRunning).toBe(0)
 })
 
 test('compaction marks the skill stale and the next prompt asks for it again', async ($, on) => {
@@ -1168,6 +1264,12 @@ test('a field rule denies an Agent call without model once, with the real call f
   expect(first.deny).toMatch(/agent-names-model/)
   expect((await $.tool.call({ tool: 'Agent', prompt: 'x' } as never)).deny).toBe(undefined)
   expect((await $.tool.call({ tool: 'Agent', prompt: 'x', model: 'sonnet' } as never)).deny).toBe(undefined)
+})
+
+test('a field rule on tool_use_id treats the metadata key as missing when no argument carries it', async ($, on) => {
+  world(on, { [USER_FILE]: JSON.stringify({ mode: 'enforce', rules: [{ id: 'agent-names-tool-use-id', before: { tools: ['Agent'] }, field: 'tool_use_id', source: 'slip' }] }) })
+  await start($)
+  expect((await $.tool.call({ tool: 'Agent', prompt: 'x', tool_use_id: 't1' } as never)).deny).toMatch(/agent-names-tool-use-id/)
 })
 
 test('migrate queues the standing instructions it found as note proposals and writes nothing', async ($, on) => {

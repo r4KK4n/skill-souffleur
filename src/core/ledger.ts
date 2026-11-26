@@ -8,7 +8,7 @@ export type Ledger = Record<SkillName, Entry>
 const MAX_REQUESTS = 2
 
 /** One entry per configured skill plus `extra`. Injected skills start loaded only at a real startup. */
-export function initLedger(config: Config, now: number, start: 'startup' | 'resume' | 'clear', extra: SkillName[] = []): Ledger {
+export function initLedger(config: Config, now: number, start: 'startup' | 'clear', extra: SkillName[] = []): Ledger {
   const ledger: Ledger = {}
   for (const [name, rule] of Object.entries(config.skills)) {
     ledger[name] = rule.startup === 'injected' && start === 'startup'

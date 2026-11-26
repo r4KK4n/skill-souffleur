@@ -283,7 +283,7 @@ The propose tool's server can disconnect between turns while the hooks keep runn
 
 ### Failure handling
 
-- A hook that throws passes the event through unchanged (the engine's default) and records the error for `/souffleur`.
+- A hook that throws passes the event through unchanged (the engine's default) and records the error for `/souffleur`. The error clears once the same step works again; each step has its own name, so another step's success does not clear it. Config errors and the small-model failure counts keep their own rules.
 - The classifier failing or timing out means no new need for that prompt; existing needs stay.
 - The adapter checks the Claude Code version at start and lists it in the status. Behaviour verified on other versions is named in `docs/compatibility.md`.
 
@@ -297,11 +297,11 @@ The propose tool's server can disconnect between turns while the hooks keep runn
 
 1. Does the model reliably invoke the skills a context block names before other work? Measure on the models in use.
 2. Does `skill.prompt` fire for the engine's own re-attachment after compaction? (In the first test it did not.)
-3. Does `$.state` survive a reload of the mod and a resume, and does `$.store` keyed by session id cover the rest?
+3. Does `$.state` survive a reload of the mod and a resume, and does `$.store` keyed by session id cover the rest? The reload/resume split depends on this; the reload half is the `$.state` row in [compatibility.md](compatibility.md), not verified yet.
 4. How does the status line render in the desktop and mobile clients?
 5. Plugin skill names: is the `skill.prompt` key `terse:terse-mode` or `terse-mode`?
 
-Items 1 to 5 were answered on 2.1.332; see [background.md](background.md). Item 4 was dropped: the status line is built for the terminal, and `/souffleur` shows the same everywhere. Items 7 to 10 were answered on 2.1.332 as well, with the evidence in [background.md](background.md#tests-for-rules-and-notes-claude-code-21332):
+Items 1 to 5 were answered on 2.1.332, except the reload half of item 3; see [background.md](background.md). Item 4 was dropped: the status line is built for the terminal, and `/souffleur` shows the same everywhere. Items 7 to 10 were answered on 2.1.332 as well, with the evidence in [background.md](background.md#tests-for-rules-and-notes-claude-code-21332):
 
 7. A tool registered with `$.tool.register` reaches the model in the main session, and the model calls it when the system prompt section asks.
 8. One small-model call over a 43 KB skill text takes about 2 seconds and returns the requested JSON.

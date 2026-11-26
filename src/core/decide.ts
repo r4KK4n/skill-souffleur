@@ -57,7 +57,7 @@ export type Session = {
 }
 
 export type CoreEvent =
-  | { type: 'start'; now: number; start: 'startup' | 'resume' | 'clear'; version?: string }
+  | { type: 'start'; now: number; start: 'startup' | 'resume' | 'reload' | 'clear'; version?: string }
   | { type: 'skill'; now: number; skill: string; text?: string; source?: string; pluginName?: string; path?: string }
   | { type: 'compact'; now: number; phase: 'before' | 'after'; trigger: string; skipped?: boolean; agentId?: string }
   /** `classifierFailed`: the classifier ran and failed (true) or answered every need (false); absent when it did not run. */
@@ -74,6 +74,8 @@ export type CoreEvent =
   /** The skill names this session lists. An empty list means unknown. */
   | { type: 'installed'; now: number; names: string[] }
   | { type: 'error'; now: number; where: string; message: string }
+  /** A hook ran without failing again: its earlier errors (`${where}: …`) are removed, nothing else. `config`, `learn` and `classify` (and `classifier`) never clear this way: they keep their own lifecycle. */
+  | { type: 'recovered'; now: number; where: string }
 
 export type Action =
   | { kind: 'context'; text: string }
@@ -96,7 +98,7 @@ const RESTORE_LIMIT = 5000
 const FAIL_LIMIT = 3
 const PAUSE_HINT = 'To turn checks off for this session: /souffleur pause.'
 
-export function initSession(config: Config, id: string, now: number, start: 'startup' | 'resume' | 'clear', version?: string): Session {
+export function initSession(config: Config, id: string, now: number, start: 'startup' | 'clear', version?: string): Session {
   const s: Session = {
     ledger: initLedger(config, now, start, ruleSkillNames(config)),
     needs: {},
@@ -144,9 +146,18 @@ function track(s: Session, key: 'classifyFails' | 'learnFails', prefix: string, 
 export function decide(config: Config, s: Session, e: CoreEvent): Result {
   switch (e.type) {
     case 'start':
-      // A resume keeps the ledger: what was loaded stays in the transcript until a compaction.
-      // A pause is not carried over.
-      if (e.start === 'resume') return { session: { ...s, paused: false, ...(e.version === undefined ? {} : { version: e.version }) }, actions: [] }
+      // A resume or reload keeps the ledger: what was loaded stays in the transcript until a compaction.
+      // A pause is not carried over. A reload (same process, state still held) keeps the per-run counters;
+      // a resume (a new process) restarts them.
+      if (e.start === 'resume' || e.start === 'reload') {
+        const counters = e.start === 'resume'
+          ? { subagentsRunning: 0, mainSkillCalls: [], agentDenied: false, learnCalls: [], fieldDenied: [] }
+          : {}
+        return {
+          session: { ...s, paused: false, ...counters, ...(e.version === undefined ? {} : { version: e.version }) },
+          actions: [],
+        }
+      }
       return { session: initSession(config, s.id, e.now, e.start, e.version), actions: [] }
     case 'skill': {
       const announced = (s.learnCalls ?? []).indexOf(e.skill)
@@ -176,8 +187,16 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
       return { session: track(s, 'learnFails', 'learn: ', !e.ok, 'the small model failed or gave no usable answer 3 times in a row, so skill texts are not read'), actions: [] }
     case 'error':
       return { session: { ...s, errors: lastN(s.errors, `${e.where}: ${e.message}`) }, actions: [] }
+    case 'recovered': {
+      const prefix = `${e.where}: `
+      if (OWN_LIFECYCLE.includes(e.where)) return { session: s, actions: [] }
+      return { session: s.errors.some((m) => m.startsWith(prefix)) ? { ...s, errors: s.errors.filter((m) => !m.startsWith(prefix)) } : s, actions: [] }
+    }
   }
 }
+
+/** Error prefixes owned by `config` events and `track()`; a hook success must not clear them. */
+const OWN_LIFECYCLE = ['config', 'learn', 'classify', 'classifier']
 
 /** A skill a rule names, once loaded, stays needed for the session. */
 function withRuleSkill(config: Config, s: Session, skill: SkillName): SkillName[] {
