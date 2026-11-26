@@ -192,7 +192,10 @@ function parseNeed(value: unknown, name: string, soft: (m: string) => void): Nee
   let audience: Audience = 'work'
   if (isObject(value)) {
     onlyKeys(value, ['for', 'what'], where)
-    if (isAudience(value.for)) audience = value.for
+    if (isAudience(value.for)) {
+      audience = value.for
+      if (audience === 'chat') soft(`${name}.for: a chat need starts only with /souffleur need, never by itself`)
+    }
     else soft(`${name}.for: must be one of chat, readers, users, work; counted as work`)
     what = value.what
   }
@@ -314,6 +317,10 @@ function parseFile(text: string, source: Origin, errors: string[]): FileConfig {
     const entries = Object.entries(section)
     if (entries.length > cap) fail(`${key}: at most ${cap} ${key} are read from a project file; the rest are ignored`)
     for (const [name, value] of entries.slice(0, cap)) {
+      if (kind === 'need' && name === 'none') {
+        fail('none: "none" is reserved; need dropped')
+        continue
+      }
       ;(kind === 'skill' ? file.skillKeys : file.needKeys).push(name)
       try {
         parseName(name, kind)

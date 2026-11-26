@@ -137,3 +137,10 @@ test('A and B have their own budgets: B outlives the A budget', async () => {
   assert.deepEqual(waits.sort(), [2500, 4000])
   assert.deepEqual(got.matched, ['debug'])
 })
+
+test('call B is not timed when no work need exists', async () => {
+  const waits: number[] = []
+  const sleep = (ms: number) => { waits.push(ms); return new Promise<void>(() => {}) }
+  await classifyDeliverable('x', { prose: { for: 'readers', what: 'w' } }, async () => 'chat-reply', sleep)
+  assert.deepEqual(waits, [2500])
+})

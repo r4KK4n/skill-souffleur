@@ -17,7 +17,7 @@ const A_TEXT = [
 const LATE = '\0late'
 
 /**
- * Two classifier calls in parallel under one budget. Call A asks what the agent will produce; `text-for-others` starts every
+ * Two classifier calls in parallel, each under its own budget (A 2.5 s, B 4 s, both from the start). Call A asks what the agent will produce; `text-for-others` starts every
  * `readers` need, `screen` every `users` need, `chat-reply` nothing. Call B picks one `work` need (or `none`) and counts only
  * when A says `code-or-repo-work`; A is awaited first and B only then. A late, rejected, empty or unknown answer of A fails the prompt; a failed B is reported as `bFailure` and fails nothing.
  */
@@ -31,13 +31,13 @@ export async function classifyDeliverable(
 ): Promise<{ matched: NeedName[]; failed: boolean; kind?: Deliverable; failure?: ClassifyFailure; bFailure?: ClassifyFailure }> {
   // Both budgets run from the start: A gets budgetMs, B gets budgetBMs and is awaited only after code work.
   const timerA = sleep(budgetMs).then(() => LATE)
-  const timerB = sleep(budgetBMs).then(() => LATE)
   const entries = Object.entries(needs)
   const work = entries.filter(([, n]) => n.for === 'work')
+  const timerB = work.length === 0 ? undefined : sleep(budgetBMs).then(() => LATE)
   // The label is the bare need name: the classifier returns no label at all for a long label with a colon (verified on 2.1.332).
   const labels = [...work.map(([name]) => name), 'none']
   const options = work.map(([name, n]) => `${name}: ${n.what}`).join('\n')
-  /** One call under the shared budget; never rejects. */
+  /** One call under its own budget; never rejects. */
   const call = async (text: string, asked: readonly string[], timer: Promise<string>): Promise<{ answer: string } | { failure: ClassifyFailure }> => {
     try {
       const answer = await Promise.race([classify(text, asked), timer])
@@ -50,7 +50,7 @@ export async function classifyDeliverable(
   }
   const callA = call(`${A_TEXT}\n\nPrompt:\n${prompt}`, DELIVERABLES, timerA)
   // B starts at once so the two calls overlap; it is awaited only when A says code work.
-  const callB = work.length === 0 ? Promise.resolve({ answer: 'none' }) : call(`Which kind of work does this prompt start? Answer none if it starts no work.\n${options}\n\n${prompt}`, labels, timerB)
+  const callB = work.length === 0 ? Promise.resolve({ answer: 'none' }) : call(`Which kind of work does this prompt start? Answer none if it starts no work.\n${options}\n\n${prompt}`, labels, timerB!)
   const a = await callA
   if ('failure' in a) return { matched: [], failed: true, failure: a.failure }
   const kind = a.answer as Deliverable

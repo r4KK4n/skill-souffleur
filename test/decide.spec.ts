@@ -316,16 +316,17 @@ test('observe mode: gate, duty and Agent-brief checks deny nothing and record wo
   const config = cfg({ mode: 'observe' })
   const s0 = run(config, [prompt('screen', ['ui']), loadSkill('ui-checklist'), compact()]).s
   const r = run(config, [
-    tool('Write', { path: 'a.html' }), // wakes the dormant need: toolContext, not recorded
+    tool('Write', { path: 'a.html' }), // wakes the dormant need: toolContext, recorded as would-deny
     loadSkill('ui-checklist'),
     tool('Write', { path: 'a.html' }), // opens duty
     tool('Write', { path: 'b.html' }), // duty
     tool('Agent', { brief: 'nothing' }), // brief
   ], s0)
   assert.deepEqual(r.out.flatMap(denies), [])
-  assert.equal(r.s.observed.length, 2)
-  assert.match(r.s.observed[0]!.reason, /open duty/)
-  assert.match(r.s.observed[1]!.reason, /skills:/)
+  assert.equal(r.s.observed.length, 3)
+  assert.match(r.s.observed[0]!.reason, /ui-checklist/)
+  assert.match(r.s.observed[1]!.reason, /open duty/)
+  assert.match(r.s.observed[2]!.reason, /skills:/)
 })
 
 test('observe mode still sends the restore context', () => {
@@ -926,17 +927,17 @@ test('evidence: gh issue comment starts readers, not users', () => {
 
 test('evidence: each listed command starts readers', () => {
   const c = evCfg()
-  for (const cmd of ['gh issue create -t x', 'gh issue comment 1 -b x', 'gh pr create --fill', 'gh pr edit 3 --body y', 'git commit -m x']) {
+  for (const cmd of ['gh issue create -t x', 'gh issue comment 1 -b x', 'gh pr create --fill', 'gh pr edit 3 --body y']) {
     assert.ok('prose' in decide(c, initSession(c, 's', 0, 'clear'), bash(cmd)).session.needs, cmd)
   }
-  for (const cmd of ['git status', 'gh pr view 3', 'echo hello']) {
+  for (const cmd of ['git status', 'git commit -m x', 'git commit', 'gh pr view 3', 'echo hello']) {
     assert.equal('prose' in decide(c, initSession(c, 's', 0, 'clear'), bash(cmd)).session.needs, false, cmd)
   }
 })
 
-test('evidence: git commit inside a chained command counts', () => {
+test('evidence: a text command inside a chained command counts', () => {
   const c = evCfg()
-  for (const cmd of ['cd x && git commit -m "fix"', 'git add . ; git commit -m a', 'npm test || git commit -m b']) {
+  for (const cmd of ['cd x && gh pr create --fill', 'git push ; gh pr edit 1 -b a', 'npm test || gh issue create -t b']) {
     assert.ok('prose' in decide(c, initSession(c, 's', 0, 'clear'), bash(cmd)).session.needs, cmd)
   }
 })
@@ -944,7 +945,7 @@ test('evidence: git commit inside a chained command counts', () => {
 test('evidence: a need already active is only refreshed, not requested again', () => {
   const c = evCfg()
   const s0 = sessionWith(c, { prose: { since: 1, reason: 'need:prose from "x"', misses: 5 } })
-  const r = decide(c, s0, bash('git commit -m x'))
+  const r = decide(c, s0, bash('gh pr create -t x'))
   assert.equal(r.session.needs.prose!.reason, 'need:prose from "x"')
   assert.equal(r.session.needs.prose!.since, 1)
   assert.equal(r.session.needs.prose!.misses, 0)
@@ -954,8 +955,8 @@ test('evidence: a need already active is only refreshed, not requested again', (
 test('evidence: a paused session starts nothing; a subagent call starts nothing', () => {
   const c = evCfg()
   const paused = { ...initSession(c, 's', 0, 'clear'), paused: true }
-  assert.equal('prose' in decide(c, paused, bash('git commit -m x')).session.needs, false)
-  assert.equal('prose' in decide(c, initSession(c, 's', 0, 'clear'), bash('git commit -m x', { agentId: 'a1' })).session.needs, false)
+  assert.equal('prose' in decide(c, paused, bash('gh pr create -t x')).session.needs, false)
+  assert.equal('prose' in decide(c, initSession(c, 's', 0, 'clear'), bash('gh pr create -t x', { agentId: 'a1' })).session.needs, false)
 })
 
 test('compaction: readers and users needs go dormant, chat and work keep going', () => {
@@ -1027,25 +1028,25 @@ test('expiry: readers need counts a miss only when A answered another deliverabl
 
 test('Review Focus 5: evidence in a notIn root requests no excluded skill; untrusted project skills and needs are not requested', () => {
   const c = evCfg({ skills: { 'writing-guide': { need: 'prose', from: 'user', notIn: ['/work/p'] }, 'writing-check': { need: 'prose', from: 'user' } } })
-  const r = decide(c, initSession(c, 's', 0, 'clear'), bash('git commit -m x', { root: '/work/p/' }))
+  const r = decide(c, initSession(c, 's', 0, 'clear'), bash('gh pr create -t x', { root: '/work/p/' }))
   const text = said(r.actions)
   assert.match(text, /writing-check/)
   assert.doesNotMatch(text, /writing-guide/)
   assert.equal(r.session.ledger['writing-guide']!.requests, 0)
   // all skills excluded: no need starts at all
   const c2 = evCfg({ skills: { 'writing-guide': { need: 'prose', from: 'user', notIn: ['/work/p'] }, 'ui-design': { need: 'ui', from: 'user', notIn: ['/work/p'], gate: { tools: ['Write'], paths: ['**/*.html'] } } } })
-  const r2 = decide(c2, initSession(c2, 's', 0, 'clear'), bash('git commit -m x', { root: '/work/p' }))
+  const r2 = decide(c2, initSession(c2, 's', 0, 'clear'), bash('gh pr create -t x', { root: '/work/p' }))
   assert.deepEqual(r2.session.needs, {})
   const r3 = decide(c2, initSession(c2, 's', 0, 'clear'), tool('Write', { path: 'a.html', root: '/work/p' }))
   assert.deepEqual(r3.session.needs, {})
   assert.deepEqual(denies(r3.actions), [])
   // untrusted project skill/need, root not in trustProjects
   const c3 = evCfg({ needs: { prose: { for: 'readers', what: 'w' } }, projectNeeds: ['prose'], skills: { 'proj-guide': { need: 'prose', from: 'project' } } })
-  const r4 = decide(c3, initSession(c3, 's', 0, 'clear'), bash('git commit -m x', { root: '/work/q' }))
+  const r4 = decide(c3, initSession(c3, 's', 0, 'clear'), bash('gh pr create -t x', { root: '/work/q' }))
   assert.deepEqual(r4.session.needs, {})
   assert.equal(r4.actions.filter((a) => a.kind === 'toolContext').length, 0)
   const trusted = evCfg({ ...c3, trustProjects: ['/work/q'] })
-  assert.ok('prose' in decide(trusted, initSession(trusted, 's', 0, 'clear'), bash('git commit -m x', { root: '/work/q' })).session.needs)
+  assert.ok('prose' in decide(trusted, initSession(trusted, 's', 0, 'clear'), bash('gh pr create -t x', { root: '/work/q' })).session.needs)
 })
 
 // --- fix round 1 ---
@@ -1075,7 +1076,7 @@ test('evidence in observe: no denial, toolContext after the call', () => {
 
 test('evidence restore is scoped to the started need; the deny names every skill it counted', () => {
   const c = evCfg({ skills: { ...evCfg().skills, 'other-ui': { need: 'ui', from: 'user' }, 'terse:terse-mode': { always: true, from: 'user' } } })
-  const r = decide(c, initSession(c, 's', 0, 'clear'), bash('git commit -m x'))
+  const r = decide(c, initSession(c, 's', 0, 'clear'), bash('gh pr create -t x'))
   assert.match(said(r.actions), /writing-guide/)
   assert.doesNotMatch(said(r.actions), /terse|ui-design|other-ui/)
   for (const n of ['terse:terse-mode', 'ui-design', 'other-ui']) assert.equal(r.session.ledger[n]!.requests, 0, n)
@@ -1101,19 +1102,19 @@ test('contextNotes: notes of a dormant need wait until it wakes', () => {
   assert.match(ctx(w.actions), /Write short/)
 })
 
-test('commands: prefixes, assignments and git -C are normalised; commit-graph and commit-tree are not commits', () => {
+test('commands: prefixes and assignments are normalised; git commit and look-alikes are not text commands', () => {
   const c = evCfg()
-  for (const cmd of ['GIT_AUTHOR_NAME=x git commit -m a', 'env A=1 git commit -m a', 'sudo git commit -m a', 'time git commit -m a', 'command git commit', 'git -C ../repo commit -m a', 'git commit', 'FOO=1 BAR=2 gh pr create']) {
+  for (const cmd of ['GH_TOKEN=x gh pr create -t a', 'env A=1 gh pr create', 'sudo gh pr edit 1', 'time gh issue comment 1', 'command gh pr create', 'FOO=1 BAR=2 gh pr create']) {
     assert.ok('prose' in decide(c, initSession(c, 's', 0, 'clear'), bash(cmd)).session.needs, cmd)
   }
-  for (const cmd of ['git commit-graph write', 'git commit-tree abc', 'gh pr create-x', 'git -C x commit-tree y']) {
+  for (const cmd of ['git commit-graph write', 'git commit -m a', 'gh pr create-x', 'gh pr view 1']) {
     assert.equal('prose' in decide(c, initSession(c, 's', 0, 'clear'), bash(cmd)).session.needs, false, cmd)
   }
 })
 
-test('commands: a quoted git commit inside echo counts (accepted false positive)', () => {
+test('commands: a quoted gh pr create inside echo counts (accepted false positive)', () => {
   const c = evCfg()
-  assert.ok('prose' in decide(c, initSession(c, 's', 0, 'clear'), bash('echo "ok && git commit -m x"')).session.needs)
+  assert.ok('prose' in decide(c, initSession(c, 's', 0, 'clear'), bash('echo "ok && gh pr create -t x"')).session.needs)
 })
 
 test('compaction: a need set with the command never goes dormant', () => {
@@ -1136,4 +1137,52 @@ test('status: a dormant need is listed as waiting since compaction', async () =>
   const text = statusText(c, sessionWith(c, { prose: { since: 0, reason: 't', dormant: true }, ui: { since: 0, reason: 't' } }), 1)
   assert.match(text, /- prose \(since \d\d:\d\d, waiting since compaction\)/)
   assert.match(text, /- ui \(since \d\d:\d\d\)/)
+})
+
+// --- final fix wave: evidence needs stay quiet in chat, fresh signals reset requests ---
+const aPrompt = (deliverable: string, text = 'write the readme for the project now', matched: string[] = []): CoreEvent => ({ ...prompt(text, matched), classifierFailed: false, deliverable } as CoreEvent)
+
+test('evidence need: the evidence call requests, a chat-reply prompt does not, a text prompt does again', () => {
+  const c = evCfg({ mode: 'observe' })
+  const a = run(c, [bash('gh pr create -t x')])
+  assert.equal(a.s.ledger['writing-guide']!.requests, 1)
+  const chat = run(c, [bash('gh pr create -t x'), aPrompt('chat-reply', 'what does this do exactly')])
+  assert.doesNotMatch(ctx(chat.out[1]!), /writing-guide/)
+  assert.equal(chat.s.ledger['writing-guide']!.requests, 1)
+  const failed = run(c, [bash('gh pr create -t x'), { ...prompt('what does this do exactly'), classifierFailed: true } as CoreEvent])
+  assert.doesNotMatch(ctx(failed.out[1]!), /writing-guide/)
+  const again = run(c, [bash('gh pr create -t x'), aPrompt('chat-reply', 'what does this do exactly'), aPrompt('text-for-others', 'write the readme for the project now', ['prose'])])
+  assert.match(ctx(again.out[2]!), /writing-guide/)
+  assert.equal(again.s.ledger['writing-guide']!.state, 'restoring')
+})
+
+test('a fresh deliverable signal resets requests and brings an unavailable skill back', () => {
+  const c = evCfg({ mode: 'observe' })
+  const r = run(c, [
+    aPrompt('text-for-others', 'write the readme for the project now', ['prose']),
+    aPrompt('code-or-repo-work', 'fix the parser for the new input format'),
+    aPrompt('code-or-repo-work', 'fix the lexer for the new input format'),
+  ])
+  assert.equal(r.s.ledger['writing-guide']!.state, 'unavailable')
+  const readme = decide(c, r.s, aPrompt('text-for-others', 'update the readme for the project now', ['prose']))
+  assert.match(ctx(readme.actions), /writing-guide/)
+  assert.equal(readme.session.ledger['writing-guide']!.state, 'restoring')
+  assert.equal(readme.session.ledger['writing-guide']!.requests, 1)
+})
+
+test('observe records the first evidence call as would have denied', () => {
+  const c = evCfg({ mode: 'observe' })
+  const r = decide(c, initSession(c, 's', 0, 'clear'), bash('gh pr create -t x'))
+  assert.equal(r.session.observed.length, 1)
+  assert.match(r.session.observed[0]!.reason, /writing-guide/)
+  assert.match(said(r.actions), /writing-guide/)
+})
+
+test('the compaction sentence appears only after a compaction', () => {
+  const c = evCfg({ mode: 'observe' })
+  const plain = run(c, [aPrompt('text-for-others', 'write the readme for the project now', ['prose']), aPrompt('text-for-others', 'write the readme for the project again', ['prose'])])
+  assert.match(ctx(plain.out[1]!), /writing-guide/)
+  assert.doesNotMatch(ctx(plain.out[1]!), /Compaction cut/)
+  const cut = run(c, [aPrompt('text-for-others', 'write the readme for the project now', ['prose']), loadSkill('writing-guide'), compact(), aPrompt('text-for-others', 'write the readme for the project again', ['prose'])])
+  assert.match(ctx(cut.out[3]!), /Compaction cut/)
 })

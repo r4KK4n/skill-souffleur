@@ -485,3 +485,17 @@ test('a duty whose after.tools has no file-changing tool is kept with an error',
   assert.equal(errors.length, 1)
   assert.match(errors[0]!, /x\.duty\.after\.tools: needs Write, Edit, MultiEdit or NotebookEdit; the duty never opens/)
 })
+
+test('a need named none is dropped: the name is the classifier label for no work', () => {
+  const { config, errors } = parseConfig(json({ skills: { s: { need: 'none' } }, needs: { none: { for: 'work', what: 'x' }, ok: { for: 'work', what: 'y' } } }), undefined)
+  assert.ok(errors.some((m) => m.endsWith('none: "none" is reserved; need dropped')), errors.join('|'))
+  assert.equal('none' in config.needs, false)
+  assert.ok('ok' in config.needs)
+})
+
+test('a chat need gets a warning: it only starts with /souffleur need', () => {
+  const { config, errors } = parseConfig(json({ needs: { talk: { for: 'chat', what: 'x' } } }), undefined)
+  assert.equal(errors.length, 1)
+  assert.match(errors[0]!, /talk\.for: .*chat.*\/souffleur need/)
+  assert.equal(config.needs.talk!.for, 'chat')
+})

@@ -113,7 +113,7 @@ Create `~/.claude/souffleur.json`, or let `/souffleur init` write it for you:
 }
 ```
 
-Each need names who receives the output its skills shape, in `for`: `chat` (your replies in the session), `readers` (texts other people read), `users` (what users of a product see) or `work` (how the agent works, nobody reads it). `what` is the description of 1 to 200 characters that the classifier matches against your prompt. The old form, a plain string, still works and counts as `work`. An always-on skill carries `for` itself; `for` on any other skill is an error and ignored. An object need with an invalid or missing `for` counts as `work` and reports an error. A skill in the user file can list `"notIn": ["/path/to/repo"]`: in those project roots it is excluded. `notIn` is compared without trailing slashes and is only read from the user file. The request to load skills names each skill with its audience, so a writing skill for docs does not change your replies in the chat; a skill excluded by `notIn` is not requested or gated there, and `/souffleur` shows it as `excluded in this project`. `/souffleur` lists under "Audience not set:" a need written as a plain string (`<need>: no audience set; add "for" to it in ~/.claude/souffleur.json`) and an always-on skill without `for` (`<skill>: always on without "for"; add "for": "chat" if it shapes your replies in this chat`).
+Each need names who receives the output its skills shape, in `for`: `chat` (your replies in the session), `readers` (texts other people read), `users` (what users of a product see) or `work` (how the agent works, nobody reads it). `what` is the description of 1 to 200 characters that the classifier uses for `work` needs; a `readers` or `users` need starts from what the prompt produces (a text for others, a screen) or from tool evidence, and its `what` is not matched. A need with `for: "chat"` starts only with `/souffleur need` and gets a config warning. The name `none` is reserved and dropped. The old form, a plain string, still works and counts as `work`. An always-on skill carries `for` itself; `for` on any other skill is an error and ignored. An object need with an invalid or missing `for` counts as `work` and reports an error. A skill in the user file can list `"notIn": ["/path/to/repo"]`: in those project roots it is excluded. `notIn` is compared without trailing slashes and is only read from the user file. The request to load skills names each skill with its audience, so a writing skill for docs does not change your replies in the chat; a skill excluded by `notIn` is not requested or gated there, and `/souffleur` shows it as `excluded in this project`. `/souffleur` lists under "Audience not set:" a need written as a plain string (`<need>: no audience set; add "for" to it in ~/.claude/souffleur.json`) and an always-on skill without `for` (`<skill>: always on without "for"; add "for": "chat" if it shapes your replies in this chat`).
 
 A skill with `"always": true` is needed from the first turn. A skill with `"need"` is needed once a prompt matches that need's description. After a compaction or a resume, Souffleur asks the model to load the skills it needs again. A project can add its own `.claude/souffleur.json`, but it cannot change your entries or your mode. Its skills and needs are report only until you list the project root in `trustProjects` in your user file: for any other project Souffleur neither asks the model to load them nor names them in the system prompt, and they cannot deny a call. `/souffleur` still lists them. A project file may define 20 skills and 10 needs at most; more get an error that names the cap. Roots in `trustProjects` are compared without trailing slashes.
 
@@ -212,7 +212,7 @@ Nothing is sent anywhere except through Claude Code's own model calls.
 
 Costs:
 
-- Detecting needs costs one small-model call per configured need on each prompt you type, about 0.8 seconds, with a 1.5 second limit after which the prompt goes on without a verdict. Needs from a project file that is not trusted are not classified.
+- Detecting needs costs two small-model calls on each prompt you type, run in parallel: call A asks what the prompt will produce (budget 2.5 seconds, a `chat-reply` starts nothing) and call B picks a `work` need, awaited only for code work (budget 4 seconds). A call that runs out of time means no new need for that prompt. Needs from a project file that is not trusted are not classified.
 - Reading a skill costs one small-model call of up to 30 seconds in the background, at most five per session.
 - A restored skill adds its full text to the context again. The restore request and the notes of one prompt stay under 10,000 characters together; skills that do not fit stay `absent` or `stale` in `/souffleur` and are asked for on a later prompt.
 
@@ -250,7 +250,8 @@ Costs:
 - [x] `/souffleur init` per skill and `/souffleur migrate` for old hooks
 - [x] Install guide
 - [x] Skill audiences (`for`, `notIn`)
-- [ ] Needs by deliverable and reply check
+- [x] Needs by deliverable
+- [ ] Reply check
 - [x] Short notices in the transcript for start, compaction and problems
 - [x] Release tags `v0.1.0` to `v0.1.4`
 - [x] Updates that reach running sessions (install from a folder)
