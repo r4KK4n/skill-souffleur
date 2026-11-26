@@ -271,7 +271,7 @@ test('an open after rule is told once per opening', () => {
   assert.match(ctx(out[5]!), /Open rule: test-after-edit/, 'a new opening is told again')
 })
 
-test('the need-note block is capped and the rest is listed in the status', async () => {
+test('the need-note block is capped and the rest follows on the next prompt', async () => {
   const { renderTable } = await import('../src/core/status.ts')
   const long = 'y'.repeat(450)
   const notes: Note[] = ['a', 'b', 'c', 'd', 'e', 'f'].map((id) => ({ id, text: long, need: 'ui', source: 'user' }))
@@ -280,7 +280,7 @@ test('the need-note block is capped and the rest is listed in the status', async
   const sent = ctx(out[0]!)
   assert.ok(sent.length < 2400)
   assert.deepEqual(s.notesSent, ['a', 'b', 'c', 'd'])
-  assert.match(renderTable(c, s, 0, '/work/a'), /Notes waiting for a later prompt[^\n]*: e, f/)
+  assert.doesNotMatch(renderTable(c, s, 0, '/work/a'), /Notes waiting/, 'e and f fit the next block, so they are not held back')
   const next = run(c, [prompt()], s)
   assert.match(ctx(next.out[0]!), /y{50}/, 'the rest follows on the next prompt')
 })

@@ -9,7 +9,7 @@ import type { Action, CoreEvent, Session } from '../core/decide.ts'
 import { classifyPromptChecked } from '../core/needs.ts'
 import { EXTRACT_SYSTEM, MAX_SKILL_TEXT, extractPrompt, hashKey, parseAnswer, shouldRead, skillHash, trusted } from '../core/learn.ts'
 import type { Proposal } from '../core/proposals.ts'
-import { NO, YES_EVERYWHERE, YES_PROJECT, addEntry, answer, describeProposal, enqueue, findProposal, makeProposal, nextQuestion, parseShaped, proposalLines, shapePrompt } from '../core/proposals.ts'
+import { NO, YES_EVERYWHERE, YES_PROJECT, addEntry, answer, describeProposal, enqueue, findProposal, makeProposal, nextQuestion, parseReply, parseShaped, proposalLines, proposalNotice, shapePrompt } from '../core/proposals.ts'
 import { ruleSkillNames, sectionNotes } from '../core/rules.ts'
 import { statusLine } from '../core/status.ts'
 import type { Config, Note, Rule } from '../core/types.ts'
@@ -39,6 +39,18 @@ let interactive = false
 let proposeReady = false
 /** A dialog was dismissed or could not open: no more questions at turn end in this session. */
 let askStopped = false
+/** The hash of the proposal a notice showed because no dialog opens; only the person's very next prompt can answer it, by one reply word. */
+let shownHash: string | undefined
+/** A typed `/souffleur review` could not open its dialog: the next turn end asks even after a dismissal. */
+let askAtTurnEnd = false
+/** `$.ui.ask` rejected in this session: nobody can answer a dialog, so waiting proposals are shown as notices. */
+let noDialog = false
+/** The origin kind of the last prompt of the person; under `claude -p` that is `sdk`, and no later prompt can carry a reply. */
+let lastPromptKind: string | undefined
+/** How long the dialog at a turn end may stay open before it counts as a rejection. */
+const ASK_WAIT_MS = 120_000
+/** The proposals a notice showed (kept after the offer ended), so each proposal gets one notice. */
+const noticed = new Set<string>()
 
 const now = () => Date.now()
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err))
@@ -124,13 +136,15 @@ function heal(l: Loaded, held: Session): Session {
   return decide(l.config, s, { type: 'config', now: now(), errors: l.errors }).session
 }
 
-/** One line in the transcript, unless the user switched notices off. A surface without a transcript must not break the hook. */
-function say($: Dollar, l: Loaded, line: string): void {
-  if (l.config.notices === false) return
+/** One line in the transcript, unless the user switched notices off; true when it was written. A surface without a transcript must not break the hook. */
+function say($: Dollar, l: Loaded, line: string): boolean {
+  if (l.config.notices === false) return false
   try {
     $.ui.log(line)
+    return true
   } catch {
     // The line is a courtesy; the work goes on.
+    return false
   }
 }
 
@@ -826,24 +840,103 @@ async function commitAnswerNow($: Dollar, hash: string, label: string): Promise<
   return r.revise === undefined ? 'Souffleur: nothing changed.' : 'Souffleur: the model is asked to revise it with your next prompt.'
 }
 
+/** Shows the first waiting proposal that no notice showed yet. A reply may answer only what was written to the transcript, so the offer is armed only then. */
+function noticeFirst($: Dollar, l: Loaded, session: Session): void {
+  const p = session.proposals.find((x) => !noticed.has(x.hash))
+  // A session that takes no person prompt (`claude -p`) cannot be answered by a reply word: name the command.
+  const form = !interactive && lastPromptKind === 'sdk' ? 'command' : 'reply'
+  if (p === undefined || !say($, l, proposalNotice(p, form))) return
+  shownHash = p.hash
+  noticed.add(p.hash)
+}
+
 /** One dialog about the first waiting proposal. Returns the line to show, or undefined when nothing was asked or the dialog gave no answer. */
-async function askFirst($: Dollar, stopOnFail = false): Promise<string | undefined> {
-  if (!interactive) return undefined
-  const { session } = await current($)
-  const q = nextQuestion(await withStoredDeclined($, session))
+async function askFirst($: Dollar, atTurnEnd = false): Promise<string | undefined> {
+  const { l, session } = await current($)
+  // A proposal whose dialog timed out is shown as a notice; it is not asked again while that dialog is still open.
+  const waiting = await withStoredDeclined($, session)
+  const q = nextQuestion({ ...waiting, proposals: waiting.proposals.filter((p) => !timedOutAsk.has(p.hash)) })
   if (!q) return undefined
   let label: unknown
+  const asking = Promise.resolve().then(() => $.ui.ask(q.question, { options: q.options, header: 'Souffleur' }))
   try {
-    label = await $.ui.ask(q.question, { options: q.options, header: 'Souffleur' })
-  } catch {
-    if (stopOnFail) askStopped = true
+    // At a turn end a client that shows no dialog may never answer: after two minutes this proposal falls back to the notice.
+    label = atTurnEnd ? await Promise.race([asking, $.clock.sleep(ASK_WAIT_MS).then(() => Promise.reject(new TimedOut()))]) : await asking
+  } catch (err) {
+    if (err instanceof TimedOut) {
+      // Only this proposal falls back. The dialog stays open: a later tap still counts while the proposal waits.
+      timedOutAsk.add(q.hash)
+      asking.then((late) => lateAnswer($, q.hash, late), () => undefined).finally(() => timedOutAsk.delete(q.hash))
+      noticeFirst($, l, session)
+    } else if (atTurnEnd) {
+      // Nobody can answer a dialog here: show the proposal once and let a one-word reply answer it.
+      askStopped = true
+      noDialog = true
+      noticeFirst($, l, session)
+    } else askAtTurnEnd = true
     return undefined
   }
   if (typeof label !== 'string' || label.trim() === '') {
-    if (stopOnFail) askStopped = true
+    if (atTurnEnd) askStopped = true
     return undefined
   }
   return commitAnswer($, q.hash, label)
+}
+
+class TimedOut extends Error {}
+/** Proposals whose turn-end dialog timed out and may still be answered. */
+const timedOutAsk = new Set<string>()
+
+/** A dialog answered after its timeout: counts only while the proposal still waits (a reply may have answered it first). */
+async function lateAnswer($: Dollar, hash: string, label: unknown): Promise<void> {
+  if (typeof label !== 'string' || label.trim() === '') return
+  try {
+    const { session } = await current($)
+    if (session.paused || !session.proposals.some((p) => p.hash === hash)) return
+    if (shownHash === hash) shownHash = undefined
+    askAtTurnEnd = true
+    const line = await commitAnswer($, hash, label)
+    try {
+      $.ui.toast(line)
+    } catch {
+      // a toast is a courtesy
+    }
+  } catch {
+    // a late answer that cannot be applied leaves the proposal queued
+  }
+}
+
+/**
+ * The person's one-word reply to the proposal a notice showed. Returns the context line for the model, or undefined when
+ * the prompt answers nothing. The shown proposal is forgotten by the first prompt of the person, whatever it says.
+ */
+async function answerShown($: Dollar, text: string): Promise<string | undefined> {
+  const hash = shownHash
+  shownHash = undefined
+  const verdict = parseReply(text)
+  if (hash === undefined || verdict === undefined) return undefined
+  const { l, session } = await current($)
+  const p = session.paused ? undefined : session.proposals.find((x) => x.hash === hash)
+  if (!p) return undefined
+  const id = p.entry.id
+  // By the full hash: the short id may name another waiting proposal.
+  try {
+    const line = await commitAnswer($, hash, verdict === 'accept' ? YES_EVERYWHERE : NO)
+    askAtTurnEnd = true // the next waiting proposal gets its question or notice at the next turn end
+    try {
+      $.ui.toast(line)
+    } catch {
+      say($, l, line)
+    }
+    const { l: l3, session: after } = await current($)
+    const active = [...l3.config.rules, ...l3.config.notes].some((x) => x.id === id)
+    if (verdict === 'accept' && !after.proposals.some((x) => x.hash === hash) && !active) return `Souffleur: the user accepted proposal ${id}, but the reader did not keep the entry; it is not active. Tell the user to check ~/.claude/souffleur.json.`
+    if (after.proposals.some((x) => x.hash === hash)) return `Souffleur: the user tried to ${verdict} proposal ${id}, but it could not be written; it stays queued. Do not retry it.`
+    return `Souffleur: the user ${verdict === 'accept' ? 'accepted' : 'declined'} proposal ${id}; nothing else to do for it.`
+  } catch {
+    // Something failed during or after the write; the model must not assume either outcome.
+    return `Souffleur: the answer may not have been written; check ~/.claude/souffleur.json or /souffleur.`
+  }
 }
 
 /** Queues a proposal. `from` is `slip` or `user`. */
@@ -988,9 +1081,9 @@ async function runPropose($: Dollar, input: Record<string, unknown>): Promise<st
   const r = await propose($, raw, input.source === 'slip' ? 'slip' : 'user')
   if (r.status.startsWith('error: ')) return `Not queued: ${r.status.slice(7)}. Fix the call and try again.`
   if (r.status !== 'queued') return PROPOSE_REPLY[r.status] ?? 'Not queued.'
-  return interactive && !askStopped
-    ? `Queued as ${r.id}. Souffleur asks the user at the end of this turn; do not ask again.`
-    : `Queued as ${r.id}. The user reviews it with /souffleur review.`
+  return !askStopped || noDialog
+    ? `Queued as ${r.id}. At the end of this turn Souffleur asks the user in a dialog, or shows a notice they answer with a reply; do not ask again.`
+    : `Queued as ${r.id}. It waits for the user's /souffleur review; do not ask again.`
 }
 
 /** `/souffleur rule <text>`: the small model shapes the words into a rule or note; a failure keeps them as a note. */
@@ -1030,7 +1123,7 @@ async function runReview($: Dollar): Promise<string> {
   const { session: rest } = await current($)
   const out = [...done]
   if (rest.proposals.length) {
-    out.push(done.length ? 'Still waiting:' : 'Waiting for your answer, and no dialog can open here:', ...proposalLines(rest), 'Add one with /souffleur accept <id> (everywhere) or /souffleur accept <id> here (this project only).')
+    out.push(done.length ? 'Still waiting:' : rest.proposals.some((p) => timedOutAsk.has(p.hash)) ? 'Waiting for your answer; a dialog for it is still open:' : 'Waiting for your answer, and no dialog can open here:', ...proposalLines(rest), 'Add one with /souffleur accept <id> (everywhere) or /souffleur accept <id> here (this project only).')
   }
   return out.join('\n')
 }
@@ -1152,7 +1245,13 @@ export const register: Register = (on) => {
       await $.command.register({ name: 'souffleur', description: 'Show which skills Souffleur keeps loaded', argumentHint: '[status | need <name> | drop <name> | pause | resume | init | migrate | rule <text> | review | accept <id> | decline <id>]' })
     })
     interactive = e.isInteractive === true
+    lastPromptKind = undefined
     askStopped = false
+    shownHash = undefined
+    noticed.clear()
+    timedOutAsk.clear()
+    noDialog = false
+    askAtTurnEnd = false
     proposeReady = false
     toolSeen = false
     silentRetried = false
@@ -1189,14 +1288,18 @@ export const register: Register = (on) => {
 
   on('prompt.submit', async ($, e, next) => {
     const fromUser = isFromUser(e)
+    if (fromUser) lastPromptKind = e.origin?.kind
     if (fromUser) await safe($, 'tool.reconnect', undefined, () => reconnectTool($))
+    // Only a prompt of the person (composer or bridge, no command) answers; any prompt of the person ends the offer.
+    if (e.command !== undefined && isUserOrigin(e)) shownHash = undefined
+    const answered = !fromUser ? undefined : e.origin?.kind === 'composer' || e.origin?.kind === 'bridge' ? await safe($, 'prompt.reply', undefined as string | undefined, () => answerShown($, e.text)) : void (shownHash = undefined)
     const texts = await safe($, 'prompt.submit', [] as string[], async () => {
       const { l, session } = await current($)
       const { config } = l
       // A need only the project file defines counts for a trusted root alone; nothing is classified while paused.
       const trusted = isTrustedRoot(config, l.root)
       const needs = Object.fromEntries(Object.entries(config.needs).filter(([name]) => trusted || !(config.projectNeeds ?? []).includes(name)))
-      const classify = fromUser && !session.paused && Object.keys(needs).length > 0
+      const classify = fromUser && answered === undefined && !session.paused && Object.keys(needs).length > 0
       // The skill listing runs beside the classification and gives up after its own short budget.
       const listing = fromUser ? safe($, 'installed', undefined, () => refreshInstalled($)) : undefined
       const verdict = classify
@@ -1209,8 +1312,17 @@ export const register: Register = (on) => {
         : undefined
       await listing
       const { actions } = await apply($, (l2) => ({ type: 'prompt', now: now(), text: e.text, fromUser, matched: verdict?.matched ?? [], root: l2.root, ...(verdict === undefined ? {} : { classifierFailed: verdict.failed }) }))
+      for (const a of actions) {
+        if (a.kind !== 'debug') continue
+        try {
+          $.ui.log(a.text, { to: 'debug' })
+        } catch {
+          // a debug line is a courtesy; the restore context below must still reach the model
+        }
+      }
       return actions.flatMap((a) => (a.kind === 'context' ? [a.text] : []))
     })
+    if (answered !== undefined) texts.push(answered)
     return texts.length ? next({ ...e, context: [...(e.context ?? []), ...texts] }) : next(e)
   }).catch(($, e, next) => next(e))
 
@@ -1264,12 +1376,22 @@ export const register: Register = (on) => {
     return { result: text }
   })
 
-  // At the end of a turn: one question about the first waiting proposal, in a session with a person at the prompt.
+  // At the end of a turn: one question about the first waiting proposal; where no dialog opens, a notice with a reply hint.
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
-    if (e.agentId === undefined && e.reason === 'answer' && interactive && !askStopped) {
+    if (e.agentId === undefined && e.reason === 'answer' && (!askStopped || askAtTurnEnd || noDialog)) {
       await safe($, 'turn.complete', undefined, async () => {
         if ((await current($)).session.paused) return
+        // While an offer is armed no person prompt has ended it yet: a new notice would redirect the reply, and a new
+        // dialog would add one more open question. The offer stays until a prompt of the person ends it.
+        if (shownHash !== undefined) return
+        askAtTurnEnd = false
+        if (noDialog) {
+          // A dialog was tried and nobody can answer: no new attempt, only a notice for a proposal not shown yet.
+          const { l, session } = await current($)
+          noticeFirst($, l, session)
+          return
+        }
         const line = await askFirst($, true)
         if (line !== undefined) {
           try {

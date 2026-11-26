@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { decide, initSession } from '../src/core/decide.ts'
-import { addEntry, answer, enqueue, makeProposal, nextQuestion, parseShaped } from '../src/core/proposals.ts'
+import { addEntry, answer, describeProposal, enqueue, makeProposal, nextQuestion, parseReply, parseShaped, proposalNotice } from '../src/core/proposals.ts'
 import type { Proposal } from '../src/core/proposals.ts'
 import type { Config, Note, Rule } from '../src/core/types.ts'
 
@@ -38,6 +38,17 @@ test('queue cap 20 and duplicate drop', () => {
   assert.equal(over.session.proposals.length, 20)
   const existing: Rule = { id: 'old', before: { tools: ['Agent'] }, skill: 'known', source: 'user' }
   assert.equal(enqueue({ ...config, rules: [existing] }, fresh(), prop(ruleRaw('known'))).status, 'duplicate', 'equal to an existing rule')
+})
+
+test('enqueue rejects a proposal whose id already waits', () => {
+  const a = prop({ kind: 'note', text: 'Reply in German.' }, 'user')
+  const s = enqueue(config, fresh(), a).session
+  // a different entry whose short id collides with the waiting one (the id is 8 hex digits of the hash)
+  const b: Proposal = { ...prop({ kind: 'note', text: 'Reply in French.' }, 'user'), entry: { ...a.entry, text: 'Reply in French.' } as Note }
+  assert.notEqual(b.hash, a.hash)
+  const r = enqueue(config, s, b)
+  assert.equal(r.status, 'duplicate')
+  assert.deepEqual(r.session.proposals.map((p) => p.hash), [a.hash])
 })
 
 test('declined proposal is not asked again', () => {
@@ -138,4 +149,22 @@ test('init pruning keeps a need that a note uses', async () => {
   const out = r.config as { needs: Record<string, string> }
   assert.deepEqual(Object.keys(out.needs), ['ui'])
   assert.deepEqual(r.pruned, ['old'])
+})
+
+test('parseReply accepts the listed words', () => {
+  for (const w of ['accept', 'annehmen', ' Accept ', 'ANNEHMEN\n']) assert.equal(parseReply(w), 'accept', w)
+  for (const w of ['decline', 'ablehnen', ' Decline ']) assert.equal(parseReply(w), 'decline', w)
+})
+
+test('parseReply ignores other text', () => {
+  for (const w of ['ja', 'yes', 'nein', 'no', 'ja bitte', '', '  ', 'accept it', 'accept!', 'maybe']) assert.equal(parseReply(w), undefined, w)
+})
+
+test('the notice carries the reply hint and the caution for a skill text', () => {
+  const p = prop({ kind: 'note', text: 'Reply in German.' }, 'user')
+  assert.equal(proposalNotice(p), `Souffleur: proposal ${p.entry.id}: ${describeProposal(p).replace(/\.$/, '')}. Reply "accept" (everywhere) or "decline".`)
+  assert.doesNotMatch(proposalNotice(p), /\.\./)
+  assert.equal(proposalNotice(p, 'command'), `Souffleur: proposal ${p.entry.id}: ${describeProposal(p).replace(/\.$/, '')}. Run /souffleur accept ${p.entry.id} or /souffleur decline ${p.entry.id}.`)
+  const q = { ...p, from: 'skill:writing-guide' }
+  assert.match(proposalNotice(q), /read from a skill's text, not verified/)
 })

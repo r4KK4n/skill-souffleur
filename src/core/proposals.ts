@@ -63,11 +63,13 @@ export function makeProposal(raw: unknown, from: string, config: Pick<Config, 'u
 
 export type EnqueueStatus = 'queued' | 'duplicate' | 'declined' | 'full'
 
-/** Adds a proposal unless the queue is full, the user declined it before, or an equal rule or note exists or waits. */
+/** Adds a proposal unless the queue is full, the user declined it before, an equal rule or note exists or waits, or its id waits. */
 export function enqueue(config: Config, s: Session, p: Proposal): { session: Session; status: EnqueueStatus } {
   if (s.declined.includes(p.hash)) return { session: s, status: 'declined' }
   const known = [...config.rules.map((r) => hashEntry('rule', r)), ...config.notes.map((n) => hashEntry('note', n)), ...s.proposals.map((q) => q.hash)]
   if (known.includes(p.hash)) return { session: s, status: 'duplicate' }
+  // `accept <id>` must name one proposal: a short id that already waits makes the new one a duplicate.
+  if (s.proposals.some((q) => q.entry.id === p.entry.id)) return { session: s, status: 'duplicate' }
   if (s.proposals.length >= QUEUE_CAP) return { session: s, status: 'full' }
   const fromSkill = (q: Proposal) => q.from.startsWith('skill:')
   if (fromSkill(p)) {
@@ -169,4 +171,20 @@ export function parseShaped(raw: string, text: string, config: Pick<Config, 'use
 /** One listing line per waiting proposal. */
 export function proposalLines(s: Session): string[] {
   return s.proposals.map((p) => `- ${p.entry.id}: ${p.kind} ${describeProposal(p)} (${p.from})`)
+}
+
+const ACCEPT_WORDS = ['accept', 'annehmen']
+const DECLINE_WORDS = ['decline', 'ablehnen']
+
+/** The answer a whole prompt gives to a shown proposal: one reply word, trimmed and lower-cased, nothing else. */
+export function parseReply(text: string): 'accept' | 'decline' | undefined {
+  const t = text.trim().toLowerCase()
+  return ACCEPT_WORDS.includes(t) ? 'accept' : DECLINE_WORDS.includes(t) ? 'decline' : undefined
+}
+
+/** The notice that shows a waiting proposal where no dialog opens; the same caution as the dialog for a text read from a skill. */
+export function proposalNotice(p: Proposal, form: 'reply' | 'command' = 'reply'): string {
+  const caution = p.from.startsWith('skill:') ? " (read from a skill's text, not verified)" : ''
+  const how = form === 'command' ? `Run /souffleur accept ${p.entry.id} or /souffleur decline ${p.entry.id}.` : 'Reply "accept" (everywhere) or "decline".'
+  return `Souffleur: proposal ${p.entry.id}${caution}: ${describeProposal(p).replace(/\.$/, '')}. ${how}`
 }

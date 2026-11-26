@@ -615,3 +615,72 @@ test('recovered with no matching error returns the same errors', () => {
   assert.equal(after.session.errors, before.errors)
   assert.deepEqual(after.actions, [])
 })
+
+const classified = (matched: string[], failed = false, text = 'please look at this some more'): CoreEvent => ({ type: 'prompt', now: at(), text, fromUser: true, matched, classifierFailed: failed })
+const repeat = (n: number, make: () => CoreEvent): CoreEvent[] => Array.from({ length: n }, make)
+
+test('need ends after 20 unmatched prompts', () => {
+  const start = run(cfg(), [classified(['ui'])]).s
+  assert.ok('ui' in start.needs)
+  const a = run(cfg(), repeat(19, () => classified([])), start)
+  assert.ok('ui' in a.s.needs)
+  const b = run(cfg(), [classified([])], a.s)
+  assert.equal('ui' in b.s.needs, false)
+  assert.ok(b.out[0]!.some((x) => x.kind === 'debug' && /ui/.test(x.text)))
+})
+
+test('a match resets the count', () => {
+  let s = run(cfg(), [classified(['ui'])]).s
+  s = run(cfg(), repeat(19, () => classified([])), s).s
+  s = run(cfg(), [classified(['ui'])], s).s
+  s = run(cfg(), repeat(19, () => classified([])), s).s
+  assert.ok('ui' in s.needs)
+})
+
+test('classifier failure is no miss', () => {
+  let s = run(cfg(), [classified(['ui'])]).s
+  s = run(cfg(), repeat(30, () => classified([], true)), s).s
+  assert.ok('ui' in s.needs)
+  s = run(cfg(), repeat(30, () => prompt('no classifier ran')), s).s
+  assert.ok('ui' in s.needs)
+})
+
+test('command need never ends', () => {
+  let s = run(cfg(), [command('need ui')]).s
+  assert.ok('ui' in s.needs)
+  s = run(cfg(), repeat(40, () => classified([])), s).s
+  assert.ok('ui' in s.needs)
+})
+
+test('starting a need writes a debug line with the reason', () => {
+  const r = decide(cfg(), initSession(cfg(), 'session-1', 0, 'clear'), { type: 'prompt', now: at(), text: 'build a screen', fromUser: true, matched: ['ui'], classifierFailed: false })
+  assert.ok(r.actions.some((x) => x.kind === 'debug' && /need:ui/.test(x.text)))
+})
+
+test('short prompts neither count as a miss nor reset the count', () => {
+  let s = run(cfg(), [classified(['ui'])]).s
+  s = run(cfg(), repeat(25, () => classified([], false, 'ja')), s).s
+  assert.ok('ui' in s.needs)
+  s = run(cfg(), repeat(19, () => classified([])), s).s
+  s = run(cfg(), [classified([], false, 'ok ja')], s).s
+  assert.ok('ui' in s.needs, 'a short prompt does not push it over')
+  s = run(cfg(), [classified([])], s).s
+  assert.equal('ui' in s.needs, false)
+})
+
+test('an ended need frees skills that were only restoring for it', () => {
+  const c = cfg({ skills: { ...base.skills, 'shared': { need: 'ui', from: 'user' }, 'other': { need: 'prose', from: 'user' } } })
+  const row = { state: 'restoring' as const, since: 1, reason: '', requests: 1 }
+  const s0 = initSession(c, 'session-1', 0, 'clear')
+  const start: Session = {
+    ...s0,
+    needs: { ui: { since: 1, reason: 'r', misses: 19 }, prose: { since: 1, reason: 'r', misses: 0 } },
+    ledger: { ...s0.ledger, 'ui-checklist': row, shared: row, other: row },
+  }
+  const s = run(c, [classified(['prose'])], start).s
+  assert.equal('ui' in s.needs, false)
+  assert.equal(s.ledger['ui-checklist']!.state, 'absent')
+  assert.equal(s.ledger['ui-checklist']!.requests, 0)
+  assert.equal(s.ledger['shared']!.state, 'absent')
+  assert.equal(s.ledger['other']!.state, 'restoring', 'still needed by prose')
+})

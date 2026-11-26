@@ -32,6 +32,8 @@ type World = {
   classifyCalls: () => number
   /** The lines written with `$.ui.log` (transcript). */
   logs: string[]
+  /** The lines written with `$.ui.log(..., { to: 'debug' })`. */
+  debugLogs: string[]
   /** From now on `$.tool.list` does not show the propose tool, as after a disconnect. */
   dropTool: () => void
 }
@@ -79,6 +81,8 @@ type Opts = {
   failLog?: boolean
   /** An Agent tool call stays open until this resolves, as a running subagent keeps it open. */
   holdAgent?: Promise<void>
+  /** A dialog never answers and never rejects, as in a session whose client does not show it. */
+  holdAsk?: boolean | Promise<string>
 }
 
 /** Answers every call the mod makes on `$`; files maps an absolute path to its text, a missing path throws. */
@@ -120,6 +124,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   })
   let toolGone = false
   const logs: string[] = []
+  const debugLogs: string[] = []
   on('tool.list', () => {
     if (opts.listMode === 'throws') throw new Error('list failed')
     if (opts.listMode === 'junk') return { value: 'nope' } as never
@@ -129,6 +134,10 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   })
   on('ui.log', (_, e) => {
     if (opts.failLog) throw new Error('no transcript here')
+    if ((e as { to?: string }).to === 'debug') {
+      debugLogs.push(e.text)
+      return { value: undefined } as never
+    }
     logs.push(e.text)
     return { value: undefined } as never
   })
@@ -199,6 +208,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
     asked.push(question)
     options.push(((e as unknown as { questions: { options?: ({ label: string } | string)[] }[] }).questions[0]!.options ?? []).map((o) => (typeof o === 'string' ? o : o.label)))
     opts.onAsk?.()
+    if (opts.holdAsk) return (opts.holdAsk === true ? new Promise(() => {}) : opts.holdAsk.then((l) => ({ result: { questions: [], answers: { [question]: l } } }))) as never
     const label = answers.shift()
     if (opts.answers === 'reject' || label === undefined) throw new Error('nobody to ask')
     if (label === '__undefined__') return { result: { questions: [], answers: { [question]: undefined } } } as never
@@ -208,7 +218,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   on('turn.complete', (_, e) => ({ text: e.answer }))
   on('session.compact', () => (opts.skipCompact ? { skip: 'vetoed' } : { messages: [{ role: 'user', text: 'summary', toolUses: [] }] }))
   on('command.run', () => ({}))
-  return { statuses, setId: (next) => { id = next }, seen, writes, asked, options, clock, hide: (path) => void hidden.add(path), files, tools, toasts, failRead, answers, driftAfter: (path, n) => { drift.path = path; drift.left = n }, stored: storeData, classifyCalls: () => classifyCalls, logs, dropTool: () => { toolGone = true } }
+  return { statuses, setId: (next) => { id = next }, seen, writes, asked, options, clock, hide: (path) => void hidden.add(path), files, tools, toasts, failRead, answers, driftAfter: (path, n) => { drift.path = path; drift.left = n }, stored: storeData, classifyCalls: () => classifyCalls, logs, debugLogs, dropTool: () => { toolGone = true } }
 }
 
 const COMPOSE = { model: 'm', promptModel: 'm', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] } as never
@@ -1133,13 +1143,13 @@ test('no declines it for good: the hash is stored and the proposal is not queued
   expect(await run($, 'review')).toMatch(/no proposals/)
 })
 
-test('a turn end in a session without a person asks nothing', async ($, on) => {
+test('ask at turn end without isInteractive', async ($, on) => {
   const w = world(on, { [USER_FILE]: ENFORCE }, { answers: ['Yes, everywhere'] })
   await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: false })
   await propose($, AGENT_RULE)
   await turnEnd($)
-  expect(w.asked.length).toBe(0)
-  expect(w.writes.length).toBe(0)
+  expect(w.asked.length).toBe(1)
+  expect(userFile(w).rules.length).toBe(1)
 })
 
 test('a subagent turn end asks nothing', async ($, on) => {
@@ -1350,11 +1360,11 @@ test('accept, decline, rule and review only act when the user typed them', async
   expect(await run($, 'review')).toMatch(new RegExp(id))
 })
 
-test('/souffleur rule asks nothing when no person is at the prompt', async ($, on) => {
-  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: ['Yes, everywhere'], shaped: '{"kind":"note","text":"Always say hi"}' })
+test('/souffleur rule falls back to the queued text when no dialog opens', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', shaped: '{"kind":"note","text":"Always say hi"}' })
   await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: false })
   expect(await run($, 'rule Always say hi')).toMatch(/queued note/)
-  expect(w.asked.length).toBe(0)
+  expect(w.writes.length).toBe(0)
 })
 
 test('the user file is read again just before the write, and a changed file stops it', async ($, on) => {
@@ -1390,7 +1400,7 @@ test('the reply points to review once a dialog was dismissed', async ($, on) => 
   await start($)
   await propose($, note('First note here.'))
   await turnEnd($)
-  expect(String((await propose($, note('Second note here.'))).result)).toMatch(/\/souffleur review/)
+  expect(String((await propose($, note('Second note here.'))).result)).toMatch(/notice/)
 })
 
 test('a dialog that fails under /souffleur rule does not stop the turn-end questions', async ($, on) => {
@@ -2059,4 +2069,417 @@ test('a tool list that never answers does not hold the prompt back', async ($, o
   const r = await p
   expect(r.context?.join('\n')).toMatch(/writing-guide/)
   expect(w.tools).toHaveLength(1)
+})
+
+// ---- reply words (#44) ----
+const reply = ($: any, text: string, origin?: Record<string, unknown>) => $.prompt.submit({ text, ...(origin ? { origin } : {}) } as never)
+const COMPOSER = { kind: 'composer' }
+const hasLine = (w: World, text: string) => w.seen.prompts.some((p) => (p.context ?? []).some((c) => c.includes(text)))
+
+test('ask rejected: one notice with the reply hint, no second ask', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  const id = idOf(await propose($, note('Reply in German.')))
+  await turnEnd($)
+  await turnEnd($)
+  await turnEnd($)
+  expect(w.asked.length).toBe(1)
+  const lines = w.logs.filter((l) => l.includes(`proposal ${id}`))
+  expect(lines.length).toBe(1)
+  expect(lines[0]).toMatch(/^Souffleur: proposal note-[0-9a-f]{8}: .*Reply in German.*\. Reply "accept" \(everywhere\) or "decline"\.$/)
+})
+
+test('a typed review that cannot ask makes the next turn end ask', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  await propose($, note('Reply in German.'))
+  await run($, 'review')
+  expect(w.asked.length).toBe(1)
+  await turnEnd($)
+  expect(w.asked.length).toBe(2)
+  await turnEnd($)
+  expect(w.asked.length).toBe(2)
+})
+
+test('reply accept applies the shown proposal', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  const id = idOf(await propose($, note('Reply in German.')))
+  await turnEnd($)
+  await reply($, ' Accept ', COMPOSER)
+  expect(userFile(w).notes.map((n: { text: string }) => n.text)).toEqual(['Reply in German.'])
+  expect(hasLine(w, `Souffleur: the user accepted proposal ${id}; nothing else to do for it.`)).toBe(true)
+  // the shown id is cleared: a second "yes" is an ordinary prompt
+  await reply($, 'accept', COMPOSER)
+  expect(userFile(w).notes.length).toBe(1)
+})
+
+
+test('a reply accepts the shown proposal even when another waiting proposal has the same id', async ($, on) => {
+  const { config } = parseConfig(ENFORCE, undefined)
+  const shown = makeProposal(note('Reply in German.'), 'user', config).proposal!
+  const other = makeProposal(note('Reply in French.'), 'user', config).proposal!
+  // the short id is 8 hex digits of the hash; a collision is seeded directly, ahead of the shown proposal
+  const ahead = { ...other, entry: { ...other.entry, id: shown.entry.id } }
+  const stored = { ...initSession(config, 's1', 0, 'startup'), proposals: [ahead, shown] }
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', stored: { 'session:s1': stored } })
+  await start($)
+  await turnEnd($) // notice for the first proposal
+  await reply($, 'carry on', COMPOSER)
+  await turnEnd($) // notice for the second, the one the reply answers
+  await reply($, 'accept', COMPOSER)
+  expect(userFile(w).notes.map((n: { text: string }) => n.text)).toEqual(['Reply in German.'])
+  expect(await run($, 'review')).toMatch(/Reply in French/)
+})
+test('reply decline declines the shown proposal for good', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  const id = idOf(await propose($, note('Reply in German.')))
+  await turnEnd($)
+  await reply($, 'decline', { kind: 'bridge' })
+  expect(w.writes.length).toBe(0)
+  expect(hasLine(w, `Souffleur: the user declined proposal ${id}; nothing else to do for it.`)).toBe(true)
+  expect(String((await propose($, note('Reply in German.'))).result)).toMatch(/declined this before/)
+})
+
+test('reply from a peer does not accept', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  await propose($, note('Reply in German.'))
+  await turnEnd($)
+  for (const origin of [{ kind: 'peer' }, { kind: 'plugin', name: 'x' }, { kind: 'task-notification' }]) await reply($, 'accept', origin)
+  await $.prompt.submit({ text: 'accept', isMeta: true } as never)
+  expect(w.writes.length).toBe(0)
+  expect(await run($, 'review')).toMatch(/Reply in German/)
+})
+
+test('reply word without a shown proposal passes untouched', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  await propose($, note('Reply in German.'))
+  // no turn end yet: nothing was shown
+  await reply($, 'accept', COMPOSER)
+  expect(w.writes.length).toBe(0)
+  expect(w.seen.prompts.at(-1)).toEqual({ text: 'accept' })
+  expect(await run($, 'review')).toMatch(/Reply in German/)
+})
+
+test('ja and yes are ordinary prompts after a notice', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  await propose($, note('Reply in German.'))
+  await turnEnd($)
+  await reply($, 'ja', COMPOSER)
+  await reply($, 'yes', COMPOSER)
+  expect(w.writes.length).toBe(0)
+})
+
+test('with notices off nothing was shown, so a reply does not act', async ($, on) => {
+  const w = world(on, { [USER_FILE]: JSON.stringify({ mode: 'enforce', notices: false, skills: {}, needs: {} }) }, { answers: 'reject' })
+  await start($)
+  await propose($, note('Reply in German.'))
+  await turnEnd($)
+  expect(w.logs.length).toBe(0)
+  await reply($, 'accept', COMPOSER)
+  expect(w.writes.length).toBe(0)
+})
+
+test('only the very next person prompt can answer', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  await propose($, note('Reply in German.'))
+  await turnEnd($)
+  await reply($, 'hello', COMPOSER)
+  await reply($, 'accept', COMPOSER)
+  expect(w.writes.length).toBe(0)
+})
+
+test('peer messages and hand-backs do not disarm the offer', async ($, on) => {
+  const w2 = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  await propose($, note('Reply in German.'))
+  await turnEnd($)
+  await reply($, 'hello', { kind: 'peer' })
+  await reply($, 'hello', { kind: 'task-notification' })
+  await reply($, 'accept', COMPOSER)
+  expect(userFile(w2).notes.length).toBe(1)
+})
+
+const armed = async ($: any, on: any) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  await propose($, note('Reply in German.'))
+  await turnEnd($)
+  return w
+}
+
+test('an sdk origin never accepts', async ($, on) => {
+  const w = await armed($, on)
+  await $.prompt.submit({ text: 'accept', origin: { kind: 'sdk' } } as never)
+  expect(w.writes.length).toBe(0)
+})
+
+test('a prompt without an origin never accepts', async ($, on) => {
+  const w = await armed($, on)
+  await $.prompt.submit({ text: 'accept' } as never)
+  expect(w.writes.length).toBe(0)
+})
+
+test('a typed command with a reply word never accepts', async ($, on) => {
+  const w = await armed($, on)
+  await $.prompt.submit({ text: 'accept', command: { name: 'accept', args: '' }, origin: COMPOSER } as never)
+  expect(w.writes.length).toBe(0)
+})
+
+test('a typed command ends the offer', async ($, on) => {
+  const w2 = await armed($, on)
+  await $.prompt.submit({ text: '/something', command: { name: 'something', args: '' }, origin: COMPOSER } as never)
+  await reply($, 'accept', COMPOSER)
+  expect(w2.writes.length).toBe(0)
+})
+
+test('a proposal queued after the first notice gets its own notice, and a reply accepts it', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  await propose($, note('First note here.'))
+  await turnEnd($)
+  await reply($, 'hello', COMPOSER)
+  const b = idOf(await propose($, note('Second note here.')))
+  await turnEnd($)
+  await turnEnd($)
+  expect(w.asked.length).toBe(1)
+  expect(w.logs.filter((l) => l.includes(`proposal ${b}`)).length).toBe(1)
+  await reply($, 'accept', COMPOSER)
+  expect(userFile(w).notes.map((n: { text: string }) => n.text)).toEqual(['Second note here.'])
+})
+
+test('the notice has a single period before the reply hint', async ($, on) => {
+  const w = await armed($, on)
+  expect(w.logs.at(-1)).toMatch(/Reply in German\. Reply "accept"/)
+})
+
+test('a paused session ignores replies', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  await propose($, note('Reply in German.'))
+  await turnEnd($)
+  await run($, 'pause')
+  await reply($, 'accept', COMPOSER)
+  expect(w.writes.length).toBe(0)
+})
+
+test('a failed write is shown and told to the model as not done; the proposal stays queued', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', failWrite: /souffleur\.json$/ })
+  await start($)
+  const id = idOf(await propose($, note('Reply in German.')))
+  await turnEnd($)
+  await reply($, 'accept', COMPOSER)
+  expect(hasLine(w, `proposal ${id}`)).toBe(true)
+  expect(hasLine(w, 'the user accepted')).toBe(false)
+  expect(hasLine(w, 'could not be written')).toBe(true)
+  expect(w.toasts.join('\n')).toMatch(/stays queued/)
+  expect(await run($, 'review')).toMatch(/Reply in German/)
+})
+
+test('a handled reply shows the result and the next waiting proposal gets its notice', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  const a = idOf(await propose($, note('First note here.')))
+  const b = idOf(await propose($, note('Second note here.')))
+  await turnEnd($)
+  await reply($, 'accept', COMPOSER)
+  expect(w.toasts.join('\n')).toMatch(/added note/)
+  await turnEnd($)
+  expect(w.logs.filter((l) => l.includes(`proposal ${b}`)).length).toBe(1)
+  await reply($, 'decline', COMPOSER)
+  expect(hasLine(w, `declined proposal ${b}`)).toBe(true)
+  expect(a).not.toBe(b)
+})
+
+test('a turn end without a person prompt does not replace the shown proposal', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  await propose($, note('First note here.'))
+  await turnEnd($)
+  await propose($, note('Second note here.'))
+  await reply($, 'hello', { kind: 'peer' })
+  await turnEnd($)
+  expect(w.logs.filter((l) => l.includes('Second note here')).length).toBe(0)
+  await reply($, 'accept', COMPOSER)
+  expect(userFile(w).notes.map((n: { text: string }) => n.text)).toEqual(['First note here.'])
+})
+
+test('a reply whose entry the reader drops tells the model it is not active', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', onWrite: (path) => { if (path === USER_FILE) w.files[USER_FILE] = '{"mode":"enforce"}' } })
+  await start($)
+  const id = idOf(await propose($, note('Reply in German.')))
+  await turnEnd($)
+  await reply($, 'accept', COMPOSER)
+  expect(hasLine(w, `proposal ${id}, but the reader did not keep the entry; it is not active`)).toBe(true)
+  expect(hasLine(w, 'nothing else to do')).toBe(false)
+})
+
+test('a prompt that starts a need writes the reason to the debug log only', async ($, on) => {
+  const w = world(on, { [USER_FILE]: UI }, { classify: 'match' })
+  await start($)
+  w.logs.length = 0
+  await $.prompt.submit({ text: 'build me a login screen' })
+  expect(w.debugLogs.filter((l) => /need started: need:ui/.test(l))).toHaveLength(1)
+  expect(w.logs.filter((l) => /need:ui/.test(l))).toEqual([])
+})
+
+// ---- hardening of the reply path (final review) ----
+test('a dialog nobody answers gives up after two minutes and shows the notice', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { holdAsk: true })
+  await start($)
+  const id = idOf(await propose($, note('Reply in German.')))
+  const t = turnEnd($)
+  await new Promise((r) => setTimeout(r, 50)) // let the turn end reach its dialog
+  await w.clock.advance(120_000)
+  await t
+  expect(w.logs.filter((l) => l.includes(`proposal ${id}`)).length).toBe(1)
+  await turnEnd($)
+  expect(w.asked.length).toBe(1)
+  await reply($, 'accept', COMPOSER)
+  expect(userFile(w).notes.length).toBe(1)
+})
+
+test('a throwing ui.log on a need-start prompt still delivers the restore context', async ($, on) => {
+  const w = world(on, { [USER_FILE]: UI }, { classify: 'match', failLog: true, skills: ['ui-checklist'] })
+  await start($)
+  const r = await $.prompt.submit({ text: 'build me a login screen' })
+  expect(r.context?.join('\n')).toMatch(/ui-checklist/)
+  expect(w.statuses.at(-1)).not.toMatch(/degraded/)
+})
+
+test('a reload while an offer is armed disarms it: accept does not act and the notice comes again', async ($, on) => {
+  const w = await armed($, on)
+  await start($)
+  await reply($, 'accept', COMPOSER)
+  expect(w.writes.length).toBe(0)
+  await turnEnd($)
+  expect(w.logs.filter((l) => l.includes('Reply "accept"')).length).toBe(2)
+  await reply($, 'accept', COMPOSER)
+  expect(userFile(w).notes.length).toBe(1)
+})
+
+test('a prompt handled as a reply is not classified', async ($, on) => {
+  const file = JSON.stringify({ mode: 'enforce', skills: {}, needs: { ui: 'Designing something a user sees.' } })
+  const w = world(on, { [USER_FILE]: file }, { answers: 'reject', classify: 'no-match' })
+  await start($)
+  await propose($, note('Reply in German.'))
+  await turnEnd($)
+  const before = w.classifyCalls()
+  await reply($, 'accept', COMPOSER)
+  expect(userFile(w).notes.length).toBe(1)
+  expect(w.classifyCalls()).toBe(before)
+})
+
+test('the notice names the command where the session takes no reply (sdk prompt, not interactive)', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: false })
+  const id = idOf(await propose($, note('Reply in German.')))
+  await $.prompt.submit({ text: 'hello', origin: { kind: 'sdk' } } as never)
+  await turnEnd($)
+  const line = w.logs.filter((l) => l.includes(`proposal ${id}`)).at(-1)!
+  expect(line).toContain(`/souffleur accept ${id}`)
+  expect(line).not.toContain('Reply "accept"')
+})
+
+test('the notice keeps the reply words over Remote Control (bridge prompt, not interactive)', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: false })
+  const id = idOf(await propose($, note('Reply in German.')))
+  await $.prompt.submit({ text: 'hello', origin: { kind: 'bridge' } } as never)
+  await turnEnd($)
+  expect(w.logs.filter((l) => l.includes(`proposal ${id}`)).at(-1)).toContain('Reply "accept"')
+})
+
+test('a failure after the answer was written still tells the model', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', onWrite: (path) => { if (path === USER_FILE) on('session.id', () => { throw new Error('gone') }) } })
+  await start($)
+  const id = idOf(await propose($, note('Reply in German.')))
+  await turnEnd($)
+  await reply($, 'accept', COMPOSER)
+  expect(w.writes.length).toBe(1)
+  expect(hasLine(w, `proposal ${id}`)).toBe(true)
+})
+
+const lateWorld = (on: any) => {
+  let tap!: (label: string) => void
+  const held = new Promise<string>((r) => { tap = r })
+  const w = world(on, { [USER_FILE]: ENFORCE }, { holdAsk: held })
+  return { w, tap }
+}
+const timedOut = async ($: any, w: World) => {
+  const t = turnEnd($)
+  await new Promise((r) => setTimeout(r, 50))
+  await w.clock.advance(120_000)
+  await t
+}
+const idle = () => new Promise((r) => setTimeout(r, 50))
+
+test('a dialog tapped after the timeout still writes once and disarms the reply', async ($, on) => {
+  const { w, tap } = lateWorld(on)
+  await start($)
+  await propose($, note('Reply in German.'))
+  await timedOut($, w)
+  tap('Yes, everywhere')
+  await idle()
+  expect(userFile(w).notes.length).toBe(1)
+  await reply($, 'accept', COMPOSER)
+  expect(userFile(w).notes.length).toBe(1)
+  expect(hasLine(w, 'the user accepted')).toBe(false)
+})
+
+test('a reply first, then a late tap: one write', async ($, on) => {
+  const { w, tap } = lateWorld(on)
+  await start($)
+  await propose($, note('Reply in German.'))
+  await timedOut($, w)
+  await reply($, 'accept', COMPOSER)
+  tap('Yes, everywhere')
+  await idle()
+  expect(userFile(w).notes.length).toBe(1)
+  expect(w.writes.length).toBe(1)
+})
+
+test('after a timeout the next proposal still gets a dialog attempt', async ($, on) => {
+  const { w } = lateWorld(on)
+  await start($)
+  await propose($, note('First note here.'))
+  await timedOut($, w)
+  await propose($, note('Second note here.'))
+  await reply($, 'hello', COMPOSER) // a prompt of the person ends the armed offer
+  const t = turnEnd($)
+  await idle()
+  expect(w.asked.length).toBe(2)
+  expect(w.asked[1]).toMatch(/Second note here/)
+  await w.clock.advance(120_000)
+  await t
+})
+
+test('a failure inside the commit after the write still tells the model', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  const id = idOf(await propose($, note('Reply in German.')))
+  await turnEnd($)
+  w.stored['declined'] = 'junk'
+  await reply($, 'accept', COMPOSER)
+  expect(hasLine(w, `proposal ${id}`)).toBe(true)
+})
+
+test('while a reply offer is armed no new dialog and no new notice open', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { holdAsk: true })
+  await start($)
+  await propose($, note('First note here.'))
+  await propose($, note('Second note here.'))
+  await timedOut($, w)
+  expect(w.asked.length).toBe(1)
+  await reply($, 'hello', { kind: 'peer' })
+  await turnEnd($)
+  expect(w.asked.length).toBe(1)
+  expect(w.logs.filter((l) => l.includes('Second note here')).length).toBe(0)
+  await reply($, 'accept', COMPOSER)
+  expect(userFile(w).notes.map((n: { text: string }) => n.text)).toEqual(['First note here.'])
 })

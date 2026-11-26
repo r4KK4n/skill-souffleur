@@ -9,10 +9,13 @@ const cell = (text: string) => text.replace(/\\/g, '\\\\').replace(/\|/g, '\\|')
 /** `HH:MM` in UTC. */
 const clock = (ms: number) => new Date(ms).toISOString().slice(11, 16)
 
+/** The first sentence of each line of a reason, without final periods. */
+const heads = (reason: string): string[] => reason.split('\n').map((l) => (l.split(/\.(?:\s|$)/)[0] ?? l).trim())
+
 /** The `/souffleur` reply: mode, the version notice when Claude Code is newer than the verified one, one row per ledger entry, then non-empty sections, then the Claude Code version. */
 export function renderTable(config: Config, s: Session, now: number, root?: string): string {
   void now
-  const lines = [`Mode: ${config.mode}${s.paused ? ' (paused)' : ''}`]
+  const lines = [`Mode: ${config.mode}${s.paused ? ' (paused)' : ''}. Times in UTC.`]
   const notice = versionNotice(s.version)
   if (notice) lines.push(notice)
   lines.push('')
@@ -25,15 +28,30 @@ export function renderTable(config: Config, s: Session, now: number, root?: stri
   }
   const duties = s.duties.filter((d) => s.ledger[d.skill]?.state !== 'not installed here').map((d) => `- ${d.skill} (${d.by})`)
   if (duties.length) lines.push('', 'Open duties:', ...duties)
-  const needs = Object.entries(s.needs).map(([name, n]) => `- ${name}: ${n.reason}`)
+  const needs = Object.entries(s.needs).map(([name, n]) => `- ${name} (since ${clock(n.since)})`)
   if (needs.length) lines.push('', 'Active needs:', ...needs)
-  const denied = s.observed.map((o) => `- ${clock(o.at)} ${o.reason}`)
+  // Equal first sentences (per line, sorted) form one group, so a call that broke two checks stays apart from one that broke one.
+  const groups = new Map<string, { n: number; first: number; last: number; newest: string; newestAt: number }>()
+  for (const o of s.observed) {
+    const key = heads(o.reason).sort().join('\n')
+    const g = groups.get(key)
+    if (!g) groups.set(key, { n: 1, first: o.at, last: o.at, newest: o.reason, newestAt: o.at })
+    else Object.assign(g, { n: g.n + 1, first: Math.min(g.first, o.at), last: Math.max(g.last, o.at), ...(o.at >= g.newestAt ? { newest: o.reason, newestAt: o.at } : {}) })
+  }
+  const indent = (text: string) => text.split('\n').map((l) => `  ${l}`)
+  const denied = [...groups.values()].flatMap((g) => {
+    if (g.n === 1) {
+      const [first = '', ...rest] = g.newest.split('\n')
+      return [`- ${clock(g.first)} ${first}`, ...rest.map((l) => `  ${l}`)]
+    }
+    return [`- ${g.n}× ${heads(g.newest).join('; ')} (${clock(g.first)}–${clock(g.last)})`, ...indent(g.newest)]
+  })
   if (denied.length) lines.push('', 'Would have denied:', ...denied)
   if (s.proposals.length) lines.push('', `Open proposals (${s.proposals.length}), /souffleur review asks about them:`, ...s.proposals.map((p) => `- ${p.entry.id}`))
   const leftOut = sectionNotes(config, root).leftOut
   if (leftOut.length) lines.push('', `Notes left out of the system prompt (2,000 character limit): ${leftOut.map((n) => n.id).join(', ')}`)
   const due = contextNotes(config, s, root)
-  const waiting = [...due.kept, ...due.leftOut]
+  const waiting = due.leftOut
   if (waiting.length) lines.push('', `Notes waiting for a later prompt (a context block holds 2,000 characters): ${waiting.map((n) => n.id).join(', ')}`)
   if (config.rules.length || config.notes.length) lines.push('', `Rules: ${config.rules.length}, notes: ${config.notes.length}`)
   if (s.errors.length) lines.push('', 'Errors:', ...s.errors.map((err) => `- ${err}`))
