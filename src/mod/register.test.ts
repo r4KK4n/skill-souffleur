@@ -1390,7 +1390,7 @@ test('the reply points to review once a dialog was dismissed', async ($, on) => 
   await start($)
   await propose($, note('First note here.'))
   await turnEnd($)
-  expect(String((await propose($, note('Second note here.'))).result)).toMatch(/\/souffleur review/)
+  expect(String((await propose($, note('Second note here.'))).result)).toMatch(/notice/)
 })
 
 test('a dialog that fails under /souffleur rule does not stop the turn-end questions', async ($, on) => {
@@ -2178,17 +2178,57 @@ test('peer messages and hand-backs do not disarm the offer', async ($, on) => {
   expect(userFile(w2).notes.length).toBe(1)
 })
 
-test('sdk origin, no origin and a typed command never accept', async ($, on) => {
+const armed = async ($: any, on: any) => {
   const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
   await start($)
   await propose($, note('Reply in German.'))
   await turnEnd($)
+  return w
+}
+
+test('an sdk origin never accepts', async ($, on) => {
+  const w = await armed($, on)
   await $.prompt.submit({ text: 'accept', origin: { kind: 'sdk' } } as never)
   expect(w.writes.length).toBe(0)
-  await turnEnd($)
+})
+
+test('a prompt without an origin never accepts', async ($, on) => {
+  const w = await armed($, on)
   await $.prompt.submit({ text: 'accept' } as never)
+  expect(w.writes.length).toBe(0)
+})
+
+test('a typed command with a reply word never accepts', async ($, on) => {
+  const w = await armed($, on)
   await $.prompt.submit({ text: 'accept', command: { name: 'accept', args: '' }, origin: COMPOSER } as never)
   expect(w.writes.length).toBe(0)
+})
+
+test('a typed command ends the offer', async ($, on) => {
+  const w2 = await armed($, on)
+  await $.prompt.submit({ text: '/something', command: { name: 'something', args: '' }, origin: COMPOSER } as never)
+  await reply($, 'accept', COMPOSER)
+  expect(w2.writes.length).toBe(0)
+})
+
+test('a proposal queued after the first notice gets its own notice, and a reply accepts it', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  await propose($, note('First note here.'))
+  await turnEnd($)
+  await reply($, 'hello', COMPOSER)
+  const b = idOf(await propose($, note('Second note here.')))
+  await turnEnd($)
+  await turnEnd($)
+  expect(w.asked.length).toBe(1)
+  expect(w.logs.filter((l) => l.includes(`proposal ${b}`)).length).toBe(1)
+  await reply($, 'accept', COMPOSER)
+  expect(userFile(w).notes.map((n: { text: string }) => n.text)).toEqual(['Second note here.'])
+})
+
+test('the notice has a single period before the reply hint', async ($, on) => {
+  const w = await armed($, on)
+  expect(w.logs.at(-1)).toMatch(/Reply in German\. Reply "accept"/)
 })
 
 test('a paused session ignores replies', async ($, on) => {

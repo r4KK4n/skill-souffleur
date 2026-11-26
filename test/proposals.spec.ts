@@ -151,7 +151,8 @@ test('parseReply ignores other text', () => {
 
 test('the notice carries the reply hint and the caution for a skill text', () => {
   const p = prop({ kind: 'note', text: 'Reply in German.' }, 'user')
-  assert.equal(proposalNotice(p), `Souffleur: proposal ${p.entry.id}: note "Reply in German.". Reply "accept" (everywhere) or "decline".`.replace('note "Reply in German."', describeProposal(p)))
+  assert.equal(proposalNotice(p), `Souffleur: proposal ${p.entry.id}: ${describeProposal(p).replace(/\.$/, '')}. Reply "accept" (everywhere) or "decline".`)
+  assert.doesNotMatch(proposalNotice(p), /\.\./)
   const q = { ...p, from: 'skill:writing-guide' }
   assert.match(proposalNotice(q), /read from a skill's text, not verified/)
 })

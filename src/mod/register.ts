@@ -43,6 +43,10 @@ let askStopped = false
 let shownHash: string | undefined
 /** A typed `/souffleur review` could not open its dialog: the next turn end asks even after a dismissal. */
 let askAtTurnEnd = false
+/** `$.ui.ask` rejected in this session: nobody can answer a dialog, so waiting proposals are shown as notices. */
+let noDialog = false
+/** The proposals a notice showed (kept after the offer ended), so each proposal gets one notice. */
+const noticed = new Set<string>()
 
 const now = () => Date.now()
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err))
@@ -832,6 +836,14 @@ async function commitAnswerNow($: Dollar, hash: string, label: string): Promise<
   return r.revise === undefined ? 'Souffleur: nothing changed.' : 'Souffleur: the model is asked to revise it with your next prompt.'
 }
 
+/** Shows the first waiting proposal that no notice showed yet. A reply may answer only what was written to the transcript, so the offer is armed only then. */
+function noticeFirst($: Dollar, l: Loaded, session: Session): void {
+  const p = session.proposals.find((x) => !noticed.has(x.hash))
+  if (p === undefined || !say($, l, proposalNotice(p))) return
+  shownHash = p.hash
+  noticed.add(p.hash)
+}
+
 /** One dialog about the first waiting proposal. Returns the line to show, or undefined when nothing was asked or the dialog gave no answer. */
 async function askFirst($: Dollar, atTurnEnd = false): Promise<string | undefined> {
   const { l, session } = await current($)
@@ -844,9 +856,8 @@ async function askFirst($: Dollar, atTurnEnd = false): Promise<string | undefine
     if (atTurnEnd) {
       // Nobody can answer a dialog here: show the proposal once and let a one-word reply answer it.
       askStopped = true
-      const p = session.proposals.find((x) => x.hash === q.hash)
-      // Armed only when the line was written: a reply may answer only what the person was shown.
-      if (p !== undefined && shownHash !== p.hash && say($, l, proposalNotice(p))) shownHash = p.hash
+      noDialog = true
+      noticeFirst($, l, session)
     } else askAtTurnEnd = true
     return undefined
   }
@@ -878,6 +889,7 @@ async function answerShown($: Dollar, text: string): Promise<string | undefined>
     say($, l, line)
   }
   const { session: after } = await current($)
+  if (/did not keep it/.test(line)) return `Souffleur: the user accepted proposal ${id}, but the reader did not keep the entry; it is not active. Tell the user to check ~/.claude/souffleur.json.`
   if (after.proposals.some((x) => x.hash === hash)) return `Souffleur: the user tried to ${verdict} proposal ${id}, but it could not be written; it stays queued. Do not retry it.`
   return `Souffleur: the user ${verdict === 'accept' ? 'accepted' : 'declined'} proposal ${id}; nothing else to do for it.`
 }
@@ -1024,8 +1036,8 @@ async function runPropose($: Dollar, input: Record<string, unknown>): Promise<st
   const r = await propose($, raw, input.source === 'slip' ? 'slip' : 'user')
   if (r.status.startsWith('error: ')) return `Not queued: ${r.status.slice(7)}. Fix the call and try again.`
   if (r.status !== 'queued') return PROPOSE_REPLY[r.status] ?? 'Not queued.'
-  return !askStopped
-    ? `Queued as ${r.id}. Souffleur asks the user at the end of this turn, or shows it with a reply hint; do not ask again.`
+  return !askStopped || noDialog
+    ? `Queued as ${r.id}. At the end of this turn Souffleur asks the user in a dialog, or shows a notice they answer with a reply; do not ask again.`
     : `Queued as ${r.id}. It waits for the user's /souffleur review or a reply; do not ask again.`
 }
 
@@ -1190,6 +1202,8 @@ export const register: Register = (on) => {
     interactive = e.isInteractive === true
     askStopped = false
     shownHash = undefined
+    noticed.clear()
+    noDialog = false
     askAtTurnEnd = false
     proposeReady = false
     toolSeen = false
@@ -1229,6 +1243,7 @@ export const register: Register = (on) => {
     const fromUser = isFromUser(e)
     if (fromUser) await safe($, 'tool.reconnect', undefined, () => reconnectTool($))
     // Only a prompt of the person (composer or bridge, no command) answers; any prompt of the person ends the offer.
+    if (e.command !== undefined && isUserOrigin(e)) shownHash = undefined
     const answered = !fromUser ? undefined : e.origin?.kind === 'composer' || e.origin?.kind === 'bridge' ? await safe($, 'prompt.reply', undefined as string | undefined, () => answerShown($, e.text)) : void (shownHash = undefined)
     const texts = await safe($, 'prompt.submit', [] as string[], async () => {
       const { l, session } = await current($)
@@ -1308,10 +1323,16 @@ export const register: Register = (on) => {
   // At the end of a turn: one question about the first waiting proposal; where no dialog opens, a notice with a reply hint.
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
-    if (e.agentId === undefined && e.reason === 'answer' && (!askStopped || askAtTurnEnd)) {
+    if (e.agentId === undefined && e.reason === 'answer' && (!askStopped || askAtTurnEnd || noDialog)) {
       await safe($, 'turn.complete', undefined, async () => {
         if ((await current($)).session.paused) return
         askAtTurnEnd = false
+        if (noDialog) {
+          // A dialog was tried and nobody can answer: no new attempt, only a notice for a proposal not shown yet.
+          const { l, session } = await current($)
+          noticeFirst($, l, session)
+          return
+        }
         const line = await askFirst($, true)
         if (line !== undefined) {
           try {
