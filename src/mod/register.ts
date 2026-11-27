@@ -275,9 +275,42 @@ async function readCheck($: Dollar, fresh = true): Promise<{ at: number; latest?
 
 const KIND_KEY = 'installKind'
 
-/** A folder install when the plugin root is the top of a git work tree (`--show-prefix` prints nothing); anything else, or no git, is a marketplace install. */
+/** True when `path` is `dir` or lies under it. */
+const underDir = (path: string, dir: string) => path === dir || path.startsWith(dir.endsWith('/') ? dir : `${dir}/`)
+
+/** True when Claude Code owns the plugin root: it lies under `<user config dir>/plugins/` or is an `installPath` in `installed_plugins.json`. A missing or unreadable file means no ownership found. */
+async function ownedByMarketplace($: Dollar): Promise<boolean> {
+  const home = await $.env.get('HOME').catch(() => undefined)
+  if (!home) return false
+  const plugins = `${collapsePath(home)}/.claude/plugins`
+  const roots = new Set([collapsePath($.plugin.root)])
+  try {
+    const real = (await $.fs.stat($.plugin.root, { resolve: true }))?.realPath
+    if (real) roots.add(collapsePath(real))
+  } catch {
+    // The path as given is all there is to compare.
+  }
+  if ([...roots].some((r) => underDir(r, plugins))) return true
+  try {
+    const listed: unknown = parseJson(await $.fs.read(`${plugins}/installed_plugins.json`))
+    const all = (listed as { plugins?: Record<string, unknown> } | null)?.plugins ?? {}
+    for (const copies of Object.values(all)) {
+      if (!Array.isArray(copies)) continue
+      for (const c of copies) {
+        const p: unknown = (c as { installPath?: unknown } | null)?.installPath
+        if (typeof p === 'string' && roots.has(collapsePath(p))) return true
+      }
+    }
+  } catch {
+    // No file or not JSON: nothing owns the folder.
+  }
+  return false
+}
+
+/** A folder install when the plugin root is the top of a git work tree (`--show-prefix` prints nothing) and Claude Code does not own it; anything else, or no git, is a marketplace install. */
 export async function installKind($: Dollar): Promise<'folder' | 'market'> {
   try {
+    if (await ownedByMarketplace($)) return 'market'
     const r = await $.process.run(['git', '-C', $.plugin.root, 'rev-parse', '--show-prefix'], { timeoutMs: 5000 })
     return r.exitCode === 0 && String(r.stdout).trim() === '' ? 'folder' : 'market'
   } catch {
@@ -381,10 +414,37 @@ async function tagVerified($: Dollar, signer: string, tag: string, oid: string):
   return r.exitCode === 0 && r.stderr.split('\n').some((line) => line.startsWith('Good "git" signature for souffleur with '))
 }
 
-type Install = { done: 'installed'; signed: boolean } | { done: 'refused'; reason: string } | { done: 'unverified' }
+type Install = { done: 'installed'; signed: boolean } | { done: 'refused'; reason: string } | { done: 'unverified' } | { done: 'busy' }
 
-/** Fetches, resolves `tag` once to an object id, verifies that object when a signer is set (or `needSigner`), and checks out its commit. Throws on a git failure. */
+/** Plugin store key of the install lock: `{ at, token }`, younger than this is held by another session. */
+const LOCK_KEY = 'updateLock'
+const LOCK_STALE_MS = 120_000
+
+/** Takes the install lock, runs `fn`, releases it. `undefined` when another session holds a fresh lock or won the race. */
+async function withInstallLock<T>($: Dollar, fn: () => Promise<T>): Promise<{ value: T } | undefined> {
+  const held: unknown = await $.store.get(LOCK_KEY)
+  const at = (held as { at?: unknown } | null)?.at
+  if (typeof at === 'number' && now() - at < LOCK_STALE_MS) return undefined
+  const token = `${now()}-${Math.random().toString(36).slice(2)}`
+  await $.store.set(LOCK_KEY, { at: now(), token })
+  if (((await $.store.get(LOCK_KEY)) as { token?: unknown } | null)?.token !== token) return undefined
+  try {
+    return { value: await fn() }
+  } finally {
+    try {
+      if (((await $.store.get(LOCK_KEY)) as { token?: unknown } | null)?.token === token) await $.store.delete(LOCK_KEY)
+    } catch {
+      // A lock that stays is stale after two minutes.
+    }
+  }
+}
+
+/** Under the install lock: fetches, resolves `tag` once to an object id, verifies that object when a signer is set (or `needSigner`), and checks out its commit. Throws on a git failure. */
 async function installTag($: Dollar, l: Loaded, tag: string, needSigner: boolean): Promise<Install> {
+  return (await withInstallLock($, () => installTagLocked($, l, tag, needSigner)))?.value ?? { done: 'busy' }
+}
+
+async function installTagLocked($: Dollar, l: Loaded, tag: string, needSigner: boolean): Promise<Install> {
   const blocker = await installBlocker($)
   if (blocker !== undefined) return { done: 'refused', reason: blocker }
   const f = await git($, ['fetch', '-q', '--tags', REPO_URL], FETCH_TIMEOUT_MS)
@@ -413,7 +473,8 @@ async function autoInstall($: Dollar, l: Loaded, sid: string): Promise<void> {
   if (l.config.updateSigner === undefined) return tell(updateLine('auto-no-signer', tag, PLUGIN_VERSION))
   try {
     const r = await installTag($, l, tag, true)
-    if (r.done === 'refused') await tell(refusalLine(r.reason, $.plugin.root))
+    if (r.done === 'busy') $.ui.log('update install skipped: another session holds the install lock', { to: 'debug' })
+    else if (r.done === 'refused') await tell(refusalLine(r.reason, $.plugin.root))
     else if (r.done === 'unverified') await tell(updateLine('auto-unverified', tag, PLUGIN_VERSION, $.plugin.root))
     else await tell(updateLine('auto-done', tag, PLUGIN_VERSION))
   } catch (err) {
@@ -444,6 +505,7 @@ async function runUpdate($: Dollar, l: Loaded): Promise<string> {
   } catch (err) {
     return `Souffleur: could not install ${shown(tag)}: ${message(err).split('\n')[0]!.slice(0, 120)}.`
   }
+  if (done.done === 'busy') return 'Souffleur: another session is installing an update; try again in a minute.'
   if (done.done === 'refused') return refusalLine(done.reason, $.plugin.root)
   if (done.done === 'unverified') return `Souffleur: ${shown(tag)} is not signed by your updateSigner key; not installed.`
   return `Souffleur: updated to ${shown(tag)} (${done.signed ? 'signed' : 'unsigned; you asked for it'})\nRunning sessions pick it up at their next turn.`

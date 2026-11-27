@@ -5168,3 +5168,97 @@ test('a symlinked user file is written through, the link stays', async ($, on) =
   expect(JSON.parse(w.files[real]!).projects['/work/proj'].block).toEqual(['writing-guide'])
   expect(w.files[USER_FILE]).toBe(BLOCKABLE)
 })
+
+// ---- update lock and ownership ----
+
+test('/souffleur update: a fresh lock held by another token skips the install and runs no checkout', async ($, on) => {
+  const w = world(on, { ...SETUP }, { stored: { ...QUIET, updateLock: { at: Date.now() - 30_000, token: 'other' } }, run: gitRun() })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toBe('Souffleur: another session is installing an update; try again in a minute.')
+  expect(ran(w, 'fetch').length).toBe(0)
+  expect(ran(w, 'checkout').length).toBe(0)
+  expect((w.stored.updateLock as { token: string }).token).toBe('other')
+})
+
+test('update auto: a fresh lock held by another token skips the install, says nothing and logs to debug', async ($, on) => {
+  const w = world(on, AUTO_FILE, { stored: { ...STORED_NEWER, updateLock: { at: Date.now() - 30_000, token: 'other' } }, run: gitRun() })
+  own(w)
+  await start($)
+  await settleUpdate(w)
+  expect(ran(w, 'checkout').length).toBe(0)
+  expect(ran(w, 'fetch').length).toBe(0)
+  expect(w.logs.some((l) => l.includes('updated to'))).toBe(false)
+  expect(w.debugLogs.some((l) => l.includes('install lock'))).toBe(true)
+})
+
+test('update auto: a stale lock is taken over and released after the install', async ($, on) => {
+  const w = world(on, AUTO_FILE, { stored: { ...STORED_NEWER, updateLock: { at: Date.now() - 180_000, token: 'old' } }, run: gitRun() })
+  own(w)
+  await start($)
+  await settleUpdate(w)
+  expect(ran(w, 'checkout').length).toBe(1)
+  expect(w.stored.updateLock).toBeUndefined()
+})
+
+test('/souffleur update: the lock is released after a failed verify', async ($, on) => {
+  const w = world(on, AUTO_FILE, { stored: QUIET, run: gitRun({ 'verify-tag': { exitCode: 1 } }) })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toMatch(/not signed by your updateSigner key; not installed/)
+  expect(w.storeSets).toContain('updateLock')
+  expect(w.stored.updateLock).toBeUndefined()
+})
+
+test('/souffleur update: the lock is released after a git failure', async ($, on) => {
+  const w = world(on, { ...SETUP }, { stored: QUIET, run: gitRun({ fetch: { exitCode: 1 } }) })
+  own(w)
+  await start($)
+  await runUser($, 'update')
+  expect(w.storeSets).toContain('updateLock')
+  expect(w.stored.updateLock).toBeUndefined()
+})
+
+const OWNED = `${HOME}/.claude/plugins/installed_plugins.json`
+const MARKET_LINE = `Souffleur ${NEWER_V} is out (you run ${PLUGIN_VERSION}). /plugin update installs it.`
+const MARKET_ANSWER = 'Souffleur: installed through the marketplace; run /plugin update.'
+
+/** The engine picks the plugin root, so a test learns it from the first git call, then arranges the files. */
+const learnRoot = async ($: any, w: World) => {
+  await start($)
+  await runUser($, 'update')
+  return rootOf(w)
+}
+
+test('update: a root listed as an installPath is market and gets the marketplace line', async ($, on) => {
+  const w = world(on, { ...SETUP }, { stored: QUIET, run: gitRun() })
+  own(w)
+  const root = await learnRoot($, w)
+  expect(ran(w, 'checkout').length).toBe(1)
+  w.edit(OWNED, JSON.stringify({ version: 2, plugins: { 'skill-souffleur@market': [{ scope: 'user', installPath: root }] } }))
+  expect(await runUser($, 'update')).toBe(MARKET_ANSWER)
+  expect(ran(w, 'checkout').length).toBe(1)
+})
+
+test('update: a root under the plugins folder is market even when git calls it a top level', async ($, on) => {
+  const links: Record<string, string> = {}
+  const w = world(on, { ...SETUP }, { stored: QUIET, run: gitRun(), linkTo: links })
+  own(w)
+  const root = await learnRoot($, w)
+  const checkouts = ran(w, 'checkout').length
+  w.edit(root, '')
+  links[root] = `${HOME}/.claude/plugins/marketplaces/m/plugin`
+  expect(await runUser($, 'update')).toBe(MARKET_ANSWER)
+  expect(ran(w, 'checkout').length).toBe(checkouts)
+})
+
+for (const [name, text] of [['missing', undefined], ['broken', '{not json'], ['without plugins', '{}'], ['with other roots', JSON.stringify({ plugins: { 'x@m': [{ installPath: '/elsewhere' }, null] } })]] as const) {
+  test(`update: a ${name} installed_plugins.json leaves a real folder install as folder`, async ($, on) => {
+    const w = world(on, text === undefined ? SETUP : { ...SETUP, [OWNED]: text }, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: gitRun() })
+    own(w)
+    await start($)
+    await settleUpdate(w)
+    expect(w.logs).toContain(`Souffleur ${NEWER_V} is out (you run ${PLUGIN_VERSION}). /souffleur update installs it.`)
+    expect(w.stored.installKind).toBe('folder')
+  })
+}
