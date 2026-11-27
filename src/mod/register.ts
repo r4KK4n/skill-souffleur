@@ -737,7 +737,11 @@ async function importAllowed($: Dollar, target: string, roots: string[], claudeD
   try {
     real = (await $.fs.stat(flat, { resolve: true }))?.realPath
   } catch (err) {
-    $.ui.log(`import skipped: could not resolve ${flat}: ${message(err)}`, { to: 'debug' })
+    try {
+      $.ui.log(`import skipped: could not resolve ${flat}: ${message(err)}`, { to: 'debug' })
+    } catch {
+      // A surface without a log must not fail init or migrate.
+    }
     return false
   }
   if (real === undefined) return true
