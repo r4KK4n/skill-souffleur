@@ -393,7 +393,7 @@ test('status shows the version line after the Small model line', () => {
   const lines = text.split('\n')
   const small = lines.findIndex((l) => l.startsWith('Small model:'))
   assert.ok(small >= 0)
-  assert.equal(lines[small + 1], 'Version 0.2.3 · latest v0.2.4 · checked 07:05 · update: notify')
+  assert.equal(lines[small + 1], 'Version 0.2.3 · latest 0.2.4 · checked 07:05 · update: notify')
 })
 
 test('status version line with latest unknown and checked never', () => {

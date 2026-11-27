@@ -94,12 +94,12 @@ Every running session picks up the new version, usually within half a minute. Us
 
 ### Update notice and automatic update
 
-Souffleur looks up the newest release tag once a day, in the background, and shows one line at the next session start: `Souffleur v0.2.4 is out (you run 0.2.3). /souffleur update installs it.` (`/plugin update installs it.` for the marketplace install). Only tags shaped `vX.Y.Z` count, and only a newer one than the version you run. The look-up never delays a session start, and a failed one stays silent and is tried again after a day. `/souffleur` shows the version, the newest release, when it was checked and the setting.
+Souffleur looks up the newest release tag once a day, in the background, and shows one line at the next session start: `Souffleur 0.2.4 is out (you run 0.2.3). /souffleur update installs it.` (`/plugin update installs it.` for the marketplace install). Only tags shaped `vX.Y.Z` count, and only a newer one than the version you run. The look-up never delays a session start, and a failed one stays silent and is tried again after a day. `/souffleur` shows the version, the newest release, when it was checked and the setting.
 
 The setting `update` in `~/.claude/souffleur.json` (user file only):
 
 - `"notify"` (default): the line above.
-- `"auto"`: at session start, after the first line, Souffleur installs a newer release when its tag is signed by your key. It says `Souffleur updated to v0.2.4 (tag signed by your key).` A tag that is unsigned or signed by another key is not installed.
+- `"auto"`: at session start, after the first line, Souffleur installs a newer release when its tag is signed by your key. It says `Souffleur updated to 0.2.4 (tag signed by your key).` A tag that is unsigned or signed by another key is not installed.
 - `"off"`: no look-up and no line.
 
 ```json

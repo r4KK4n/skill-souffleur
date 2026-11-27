@@ -17,7 +17,7 @@ import type { ModelUse, UsageFields } from '../core/cost.ts'
 import type { Config, Note, Rule } from '../core/types.ts'
 import { notices, startNotice } from '../core/notices.ts'
 import { PLUGIN_VERSION } from './version.ts'
-import { isCheckDue, isUpdateCheck, newestRelease, refusalLine, updateLine } from '../core/update.ts'
+import { isCheckDue, isUpdateCheck, newestRelease, refusalLine, shown, updateLine } from '../core/update.ts'
 import type { UpdateInfo } from '../core/status.ts'
 import { compareVersions } from '../core/version.ts'
 import { isFromUser, isUserOrigin, presentArgs, toolFields } from './map.ts'
@@ -184,10 +184,6 @@ async function persist($: Dollar, l: Loaded, s0: Session, quiet = false): Promis
 const UPDATE_KEY = 'updateCheck'
 const REPO_URL = 'https://github.com/r4KK4n/skill-souffleur'
 
-/** The detached update work of the last session start, so a test can wait for it. */
-let updateWork: Promise<void> = Promise.resolve()
-export const updateSettled = (): Promise<void> => updateWork
-
 async function readCheck($: Dollar): Promise<{ at: number; latest?: string } | undefined> {
   try {
     const stored: unknown = await $.store.get(UPDATE_KEY)
@@ -337,7 +333,7 @@ async function autoInstall($: Dollar, l: Loaded, sid: string): Promise<void> {
   try {
     const r = await installTag($, l, tag, true)
     if (r.done === 'refused') await tell(refusalLine(r.reason, $.plugin.root))
-    else if (r.done === 'unverified') await tell(updateLine('auto-unverified', tag, PLUGIN_VERSION))
+    else if (r.done === 'unverified') await tell(updateLine('auto-unverified', tag, PLUGIN_VERSION, $.plugin.root))
     else await tell(updateLine('auto-done', tag, PLUGIN_VERSION))
   } catch (err) {
     $.ui.log(`update install failed: ${message(err)}`, { to: 'debug' })
@@ -345,21 +341,31 @@ async function autoInstall($: Dollar, l: Loaded, sid: string): Promise<void> {
 }
 
 /** `/souffleur update`: installs the newest release now. Verifies when a signer is set; installs an unsigned tag only because the person asked. */
+/** First line of a git message, cut to 120 characters, without a final dot; `fallback` when it is empty. */
+function shortReason(text: string, fallback: string): string {
+  return text.split('\n').map((x) => x.trim()).find((x) => x !== '')?.slice(0, 120).replace(/\.+$/, '') || fallback
+}
+
 async function runUpdate($: Dollar, l: Loaded): Promise<string> {
   if ((await installKind($)) === 'market') return 'Souffleur: installed through the marketplace; run /plugin update.'
-  const r = await $.process.run(['git', 'ls-remote', '--tags', '--refs', REPO_URL], { timeoutMs: 15000 })
-  if (r.exitCode !== 0) return `Souffleur: could not look up releases (git exited with ${r.exitCode}).`
+  let r: { exitCode: number; stdout: unknown; stderr?: unknown }
+  try {
+    r = await $.process.run(['git', 'ls-remote', '--tags', '--refs', REPO_URL], { timeoutMs: 15000 })
+  } catch (err) {
+    return `Souffleur: could not look up releases: ${shortReason(message(err), 'git failed')}.`
+  }
+  if (r.exitCode !== 0) return `Souffleur: could not look up releases: ${shortReason(String(r.stderr ?? ''), `git exited with ${r.exitCode}`)}.`
   const tag = newestRelease(String(r.stdout), PLUGIN_VERSION)
   if (tag === undefined) return `Souffleur: ${PLUGIN_VERSION} is the newest release.`
   let done: Install
   try {
     done = await installTag($, l, tag, false)
   } catch (err) {
-    return `Souffleur: could not install ${tag}: ${message(err).split('\n')[0]!.slice(0, 120)}.`
+    return `Souffleur: could not install ${shown(tag)}: ${message(err).split('\n')[0]!.slice(0, 120)}.`
   }
   if (done.done === 'refused') return refusalLine(done.reason, $.plugin.root)
-  if (done.done === 'unverified') return `Souffleur: ${tag} is not signed by your updateSigner key; not installed.`
-  return `Souffleur: updated to ${tag} (${done.signed ? 'signed' : 'unsigned; you asked for it'})\nRunning sessions pick it up at their next turn.`
+  if (done.done === 'unverified') return `Souffleur: ${shown(tag)} is not signed by your updateSigner key; not installed.`
+  return `Souffleur: updated to ${shown(tag)} (${done.signed ? 'signed' : 'unsigned; you asked for it'})\nRunning sessions pick it up at their next turn.`
 }
 
 /** Stored copies of sessions not touched for this long are removed at session start. */
@@ -1879,7 +1885,7 @@ export const register: Register = (on) => {
         if (said) await markShown($, tell)
       }
       // Neither the first-run line nor the check may hold the session start: both run detached.
-      updateWork = (async () => {
+      void (async () => {
         try {
           if (l.config.update === 'off') return
           const k = await installKind($)

@@ -29,14 +29,18 @@ export function isUpdateCheck(v: unknown): v is { at: number; latest?: string } 
 
 export type UpdateKind = 'notify' | 'notify-market' | 'auto-done' | 'auto-unverified' | 'auto-no-signer'
 
+/** A release tag as people read it: without the leading `v`. */
+export const shown = (tag: string): string => tag.replace(/^v/, '')
+
 /** The one line shown for a newer release. */
-export function updateLine(kind: UpdateKind, next: string, cur: string): string {
+export function updateLine(kind: UpdateKind, tag: string, cur: string, root = 'the plugin folder'): string {
+  const next = shown(tag)
   const out = `Souffleur ${next} is out (you run ${cur}).`
   switch (kind) {
     case 'notify': return `${out} /souffleur update installs it.`
     case 'notify-market': return `${out} /plugin update installs it.`
     case 'auto-done': return `Souffleur updated to ${next} (tag signed by your key).`
-    case 'auto-unverified': return `Souffleur ${next} is out but its tag is not signed by your updateSigner key; not installed. /souffleur update installs it anyway.`
+    case 'auto-unverified': return `Souffleur ${next} is out but its tag is not signed by your updateSigner key; not installed. Update by hand with git in ${root}.`
     case 'auto-no-signer': return `${out} /souffleur update installs it. Set updateSigner to let auto install it.`
   }
 }

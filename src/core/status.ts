@@ -6,6 +6,7 @@ import type { Config, Mode } from './types.ts'
 import { versionNotice } from './version.ts'
 import { costSuffix, formatUse } from './cost.ts'
 import type { ModelUse } from './cost.ts'
+import { shown } from './update.ts'
 
 /** What `/souffleur` knows about the release check; `current` is the running version. */
 export type UpdateInfo = { current: string; latest?: string; at?: number }
@@ -67,7 +68,7 @@ export function renderTable(config: Config, s: Session, now: number, root?: stri
   if (chat !== undefined && s.replyCheck !== undefined && s.replyCheck.total > 0) lines.push('', 'Reply check:', `- ${chat.name}: ${s.replyCheck.over} of ${s.replyCheck.total} replies over the limit`)
   const spent = formatUse(s.modelUse, total)
   if (spent !== undefined) lines.push('', spent)
-  if (update !== undefined) lines.push(...(spent === undefined ? [''] : []), `Version ${update.current} · latest ${update.latest ?? 'unknown'} · checked ${update.at === undefined ? 'never' : clock(update.at)} · update: ${config.update}`)
+  if (update !== undefined) lines.push(...(spent === undefined ? [''] : []), `Version ${update.current} · latest ${update.latest === undefined ? 'unknown' : shown(update.latest)} · checked ${update.at === undefined ? 'never' : clock(update.at)} · update: ${config.update}`)
   if (s.proposals.length) lines.push('', `Open proposals (${s.proposals.length}), /souffleur review asks about them:`, ...s.proposals.map((p) => `- ${p.entry.id}`))
   const leftOut = sectionNotes(config, root).leftOut
   if (leftOut.length) lines.push('', `Notes left out of the system prompt (2,000 character limit): ${leftOut.map((n) => n.id).join(', ')}`)

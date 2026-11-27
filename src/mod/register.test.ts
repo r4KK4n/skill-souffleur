@@ -5,7 +5,6 @@ import { decide, initSession } from '../core/decide.ts'
 import { parseConfig } from '../core/config.ts'
 import { makeProposal } from '../core/proposals.ts'
 import { hashKey, skillHash } from '../core/learn.ts'
-import { updateSettled } from './register.ts'
 
 const HOME = '/users/test'
 const USER_FILE = `${HOME}/.claude/souffleur.json`
@@ -3755,6 +3754,7 @@ test('a resume shows a time in the status line at once', async ($, on) => {
 
 const LS = (...tags: string[]) => tags.map((t, i) => `${String(i + 1).padStart(40, 'a')}\trefs/tags/${t}`).join('\n')
 const NEWER = 'v0.2.99'
+const NEWER_V = NEWER.slice(1)
 const lsRemoteCalls = (w: World) => w.runs.filter((r) => r.argv.includes('ls-remote'))
 const FOLDER_ROOT = (argv: readonly string[]) => (argv.includes('rev-parse') ? { exitCode: 0, stdout: '\n', stderr: '' } : undefined)
 const MARKET_ROOT = (argv: readonly string[]) => (argv.includes('rev-parse') ? { exitCode: 128, stdout: '', stderr: 'fatal: not a git repository' } : undefined)
@@ -3768,7 +3768,7 @@ const SETUP = { [USER_FILE]: ALWAYS }
 test('update: a due check runs ls-remote once and stores updateCheck', async ($, on) => {
   const w = world(on, SETUP, { run: runWith({ exitCode: 0, stdout: LS('v0.1.0', NEWER, 'v0.3.0-rc.1') }) })
   await start($)
-  await updateSettled()
+  await settleUpdate(w)
   const calls = lsRemoteCalls(w)
   expect(calls.length).toBe(1)
   expect(calls[0]!.argv).toEqual(['git', 'ls-remote', '--tags', '--refs', 'https://github.com/r4KK4n/skill-souffleur'])
@@ -3779,7 +3779,7 @@ test('update: a due check runs ls-remote once and stores updateCheck', async ($,
 test('update: nothing newer stores the running version as latest', async ($, on) => {
   const w = world(on, SETUP, { run: runWith({ exitCode: 0, stdout: LS('v0.1.0', `v${PLUGIN_VERSION}`) }) })
   await start($)
-  await updateSettled()
+  await settleUpdate(w)
   expect(w.stored.updateCheck).toEqual({ at: expect.any(Number), latest: `v${PLUGIN_VERSION}` })
   expect(w.logs.some((l) => l.includes('is out'))).toBe(false)
 })
@@ -3787,7 +3787,7 @@ test('update: nothing newer stores the running version as latest', async ($, on)
 test('update: unparsable ls-remote output logs a debug line and stores at only', async ($, on) => {
   const w = world(on, SETUP, { run: runWith({ exitCode: 0, stdout: '<html>nope</html>' }) })
   await start($)
-  await updateSettled()
+  await settleUpdate(w)
   expect(w.debugLogs).toContain('update check: unparsable ls-remote output')
   expect(w.stored.updateCheck).toEqual({ at: expect.any(Number) })
 })
@@ -3795,21 +3795,21 @@ test('update: unparsable ls-remote output logs a debug line and stores at only',
 test('update: a fresh check does not run', async ($, on) => {
   const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now() - 3_600_000 } }, run: runWith({ exitCode: 0, stdout: LS(NEWER) }) })
   await start($)
-  await updateSettled()
+  await settleUpdate(w)
   expect(lsRemoteCalls(w).length).toBe(0)
 })
 
 test('update: an old check runs again', async ($, on) => {
   const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now() - 90_000_000 } }, run: runWith({ exitCode: 0, stdout: LS(NEWER) }) })
   await start($)
-  await updateSettled()
+  await settleUpdate(w)
   expect(lsRemoteCalls(w).length).toBe(1)
 })
 
 test('update: off runs nothing and says nothing', async ($, on) => {
   const w = world(on, { [USER_FILE]: JSON.stringify({ update: 'off' }) }, { stored: { updateCheck: { at: 1, latest: NEWER } }, run: runWith({ exitCode: 0, stdout: LS(NEWER) }) })
   await start($)
-  await updateSettled()
+  await settleUpdate(w)
   expect(w.runs.length).toBe(0)
   expect(w.logs.some((l) => l.includes('is out'))).toBe(false)
 })
@@ -3817,7 +3817,7 @@ test('update: off runs nothing and says nothing', async ($, on) => {
 test('update: a failed run stores at, logs to debug and shows no notice', async ($, on) => {
   const w = world(on, SETUP, { run: runWith({ exitCode: 128, stdout: '' }) })
   await start($)
-  await updateSettled()
+  await settleUpdate(w)
   expect(w.stored.updateCheck).toEqual({ at: expect.any(Number) })
   expect(w.debugLogs.some((l) => l.startsWith('update check failed: '))).toBe(true)
   expect(w.logs.some((l) => l.includes('is out'))).toBe(false)
@@ -3826,7 +3826,7 @@ test('update: a failed run stores at, logs to debug and shows no notice', async 
 test('update: a rejected run (timeout) is stored too and keeps the earlier latest', async ($, on) => {
   const w = world(on, SETUP, { stored: { updateCheck: { at: 1, latest: 'v0.0.1' } }, run: (argv) => (argv.includes('rev-parse') ? FOLDER_ROOT(argv)! : new Error('timed out')) })
   await start($)
-  await updateSettled()
+  await settleUpdate(w)
   expect(w.stored.updateCheck).toEqual({ at: expect.any(Number), latest: 'v0.0.1' })
   expect(w.debugLogs.some((l) => l.startsWith('update check failed: ') && l.includes('timed out'))).toBe(true)
 })
@@ -3834,25 +3834,25 @@ test('update: a rejected run (timeout) is stored too and keeps the earlier lates
 test('update: a stored newer latest says the notify line once; a reload does not repeat it', async ($, on) => {
   const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: runWith({ exitCode: 0, stdout: '' }) })
   await start($)
-  await updateSettled()
-  const line = `Souffleur ${NEWER} is out (you run ${PLUGIN_VERSION}). /souffleur update installs it.`
+  await settleUpdate(w)
+  const line = `Souffleur ${NEWER_V} is out (you run ${PLUGIN_VERSION}). /souffleur update installs it.`
   expect(w.logs.filter((l) => l === line).length).toBe(1)
   await start($)
-  await updateSettled()
+  await settleUpdate(w, 2)
   expect(w.logs.filter((l) => l === line).length).toBe(1)
 })
 
 test('update: the marketplace install is pointed to /plugin update', async ($, on) => {
   const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: runWith({ exitCode: 0, stdout: '' }, MARKET_ROOT) })
   await start($)
-  await updateSettled()
-  expect(w.logs).toContain(`Souffleur ${NEWER} is out (you run ${PLUGIN_VERSION}). /plugin update installs it.`)
+  await settleUpdate(w)
+  expect(w.logs).toContain(`Souffleur ${NEWER_V} is out (you run ${PLUGIN_VERSION}). /plugin update installs it.`)
 })
 
 test('update: a stored latest that is not newer says nothing', async ($, on) => {
   const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now(), latest: `v${PLUGIN_VERSION}` } }, run: runWith({ exitCode: 0, stdout: '' }) })
   await start($)
-  await updateSettled()
+  await settleUpdate(w)
   expect(w.logs.some((l) => l.includes('is out'))).toBe(false)
 })
 
@@ -3862,33 +3862,33 @@ test('update: a never-resolving process.run does not hold session.start', async 
 })
 
 test('update: /souffleur shows the version line from the stored check', async ($, on) => {
-  world(on, SETUP, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: runWith({ exitCode: 0, stdout: '' }) })
+  const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: runWith({ exitCode: 0, stdout: '' }) })
   await start($)
-  await updateSettled()
-  expect(await table($)).toContain(`Version ${PLUGIN_VERSION} · latest`)
+  await settleUpdate(w)
+  expect(await table($)).toContain(`Version ${PLUGIN_VERSION} · latest ${NEWER_V} ·`)
 })
 
 test('update: a cached install kind shows the line at start although rev-parse never answers', async ($, on) => {
   const w = world(on, SETUP, { stored: { installKind: 'folder', updateCheck: { at: Date.now(), latest: NEWER } }, run: (argv) => (argv.includes('rev-parse') ? new Promise(() => {}) : { exitCode: 0, stdout: '', stderr: '' }) })
   await start($)
-  expect(w.logs).toContain(`Souffleur ${NEWER} is out (you run ${PLUGIN_VERSION}). /souffleur update installs it.`)
+  expect(w.logs).toContain(`Souffleur ${NEWER_V} is out (you run ${PLUGIN_VERSION}). /souffleur update installs it.`)
 })
 
 test('update: the first run learns the install kind, stores it and says the line once', async ($, on) => {
   const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: runWith({ exitCode: 0, stdout: '' }, MARKET_ROOT) })
   await start($)
-  await updateSettled()
+  await settleUpdate(w)
   expect(w.stored.installKind).toBe('market')
   expect(w.logs.filter((l) => l.includes('/plugin update installs it.')).length).toBe(1)
   await start($)
-  await updateSettled()
+  await settleUpdate(w, 2)
   expect(w.logs.filter((l) => l.includes('is out')).length).toBe(1)
 })
 
 test('update: a plugin folder inside a work tree (non-empty prefix) is a marketplace install', async ($, on) => {
   const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: (argv) => (argv.includes('rev-parse') ? { exitCode: 0, stdout: 'plugins/x/\n', stderr: '' } : { exitCode: 0, stdout: '', stderr: '' }) })
   await start($)
-  await updateSettled()
+  await settleUpdate(w)
   expect(w.stored.installKind).toBe('market')
   expect(w.runs.find((r) => r.argv.includes('rev-parse'))!.argv).toContain('--show-prefix')
 })
@@ -3900,7 +3900,7 @@ test('update: a second start before the first detached work finishes does not sa
   await start($)
   await start($)
   release({ exitCode: 0, stdout: '\n', stderr: '' })
-  await updateSettled()
+  await settleUpdate(w, 2)
   await new Promise((r) => setTimeout(r, 20))
   expect(w.logs.filter((l) => l.includes('is out')).length).toBe(1)
 })
@@ -3909,7 +3909,7 @@ test('update: a second start before the first detached work finishes does not sa
 
 /**
  * Waits until the detached update work of `starts` session starts has said it is done (debug line `update work done`).
- * `updateSettled()` cannot do this: the engine runs its own copy of the mod, so the copy the test imports never sets it.
+ * The engine runs its own copy of the mod, so the test cannot read a promise from it; the debug line is the signal.
  */
 const settleUpdate = async (w: World, starts = 1) => {
   for (let i = 0; i < 200 && w.debugLogs.filter((l) => l === 'update work done').length < starts; i++) await new Promise((r) => setTimeout(r, 15))
@@ -3949,7 +3949,7 @@ const gitRun = (over: Record<string, Out> = {}): NonNullable<Opts['run']> => (ar
 const ran = (w: World, sub: string) => w.runs.filter((r) => r.argv.includes(sub))
 /** The plugin root the mod asked git about. */
 const rootOf = (w: World) => String(w.runs[0]!.argv[2])
-const AUTO_LINE = `Souffleur updated to ${NEWER} (tag signed by your key).`
+const AUTO_LINE = `Souffleur updated to ${NEWER_V} (tag signed by your key).`
 
 test('update auto: a verified tag is fetched, verified, checked out and said once', async ($, on) => {
   const w = world(on, AUTO_FILE, { stored: STORED_NEWER, run: gitRun() })
@@ -3986,7 +3986,7 @@ test('update auto: a tag that does not verify says so and runs no checkout', asy
   own(w)
   await start($)
   await settleUpdate(w)
-  expect(w.logs).toContain(`Souffleur ${NEWER} is out but its tag is not signed by your updateSigner key; not installed. /souffleur update installs it anyway.`)
+  expect(w.logs).toContain(`Souffleur ${NEWER_V} is out but its tag is not signed by your updateSigner key; not installed. Update by hand with git in ${rootOf(w)}.`)
   expect(ran(w, 'checkout').length).toBe(0)
 })
 
@@ -3995,7 +3995,7 @@ test('update auto: without updateSigner it says the no-signer line and runs no c
   own(w)
   await start($)
   await settleUpdate(w)
-  expect(w.logs).toContain(`Souffleur ${NEWER} is out (you run ${PLUGIN_VERSION}). /souffleur update installs it. Set updateSigner to let auto install it.`)
+  expect(w.logs).toContain(`Souffleur ${NEWER_V} is out (you run ${PLUGIN_VERSION}). /souffleur update installs it. Set updateSigner to let auto install it.`)
   expect(w.logs.filter((l) => l.includes('is out')).length).toBe(1)
   expect(w.stored.installKind).toBe('folder')
   expect(ran(w, 'checkout').length).toBe(0)
@@ -4007,7 +4007,7 @@ test('update auto: a marketplace install gets the notify line and no install', a
   own(w)
   await start($)
   await settleUpdate(w)
-  expect(w.logs).toContain(`Souffleur ${NEWER} is out (you run ${PLUGIN_VERSION}). /plugin update installs it.`)
+  expect(w.logs).toContain(`Souffleur ${NEWER_V} is out (you run ${PLUGIN_VERSION}). /plugin update installs it.`)
   expect(ran(w, 'checkout').length).toBe(0)
 })
 
@@ -4094,14 +4094,35 @@ test('/souffleur update: a git failure answers with the reason, not the usage li
   own(w)
   await start($)
   const text = await runUser($, 'update')
-  expect(text).toBe(`Souffleur: could not install ${NEWER}: git fetch exited with 1.`)
+  expect(text).toBe(`Souffleur: could not install ${NEWER_V}: git fetch exited with 1.`)
 })
 
 test('/souffleur update: a rejected git call answers with the reason too', async ($, on) => {
   const w = world(on, SETUP, { stored: QUIET, run: gitRun({ fetch: new Error('timed out') }) })
   own(w)
   await start($)
-  expect(await runUser($, 'update')).toMatch(/^Souffleur: could not install v0\.2\.99: /)
+  expect(await runUser($, 'update')).toMatch(/^Souffleur: could not install 0\.2\.99: /)
+})
+
+test('/souffleur update: a failing ls-remote answers with the git message', async ($, on) => {
+  const w = world(on, SETUP, { stored: QUIET, run: gitRun({ 'ls-remote': { exitCode: 128, stderr: 'fatal: unable to access repo\nmore' } }) })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toBe('Souffleur: could not look up releases: fatal: unable to access repo.')
+})
+
+test('/souffleur update: a failing ls-remote without a message answers with the exit code', async ($, on) => {
+  const w = world(on, SETUP, { stored: QUIET, run: gitRun({ 'ls-remote': { exitCode: 128 } }) })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toBe('Souffleur: could not look up releases: git exited with 128.')
+})
+
+test('/souffleur update: a rejected ls-remote answers instead of throwing', async ($, on) => {
+  const w = world(on, SETUP, { stored: QUIET, run: gitRun({ 'ls-remote': new Error('timed out') }) })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toMatch(/^Souffleur: could not look up releases: .*timed out\.$/)
 })
 
 test('update auto: a git failure logs to debug, says nothing and does not mark the tag shown', async ($, on) => {
@@ -4136,7 +4157,7 @@ test('/souffleur update: installs an unsigned tag when no signer is set, with th
   own(w)
   await start($)
   const text = await runUser($, 'update')
-  expect(text).toBe(`Souffleur: updated to ${NEWER} (unsigned; you asked for it)\nRunning sessions pick it up at their next turn.`)
+  expect(text).toBe(`Souffleur: updated to ${NEWER_V} (unsigned; you asked for it)\nRunning sessions pick it up at their next turn.`)
   expect(ran(w, 'checkout').length).toBe(1)
   expect(ran(w, 'verify-tag').length).toBe(0)
 })
@@ -4145,7 +4166,7 @@ test('/souffleur update: with a signer the tag is verified and the answer says s
   const w = world(on, AUTO_FILE, { stored: QUIET, run: gitRun() })
   own(w)
   await start($)
-  expect(await runUser($, 'update')).toBe(`Souffleur: updated to ${NEWER} (signed)\nRunning sessions pick it up at their next turn.`)
+  expect(await runUser($, 'update')).toBe(`Souffleur: updated to ${NEWER_V} (signed)\nRunning sessions pick it up at their next turn.`)
   expect(ran(w, 'verify-tag').length).toBe(1)
 })
 

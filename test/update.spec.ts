@@ -42,11 +42,11 @@ test('isUpdateCheck accepts { at, latest? } only', () => {
 })
 
 test('updateLine texts are exact', () => {
-  assert.equal(updateLine('notify', 'v0.2.4', '0.2.3'), 'Souffleur v0.2.4 is out (you run 0.2.3). /souffleur update installs it.')
-  assert.equal(updateLine('notify-market', 'v0.2.4', '0.2.3'), 'Souffleur v0.2.4 is out (you run 0.2.3). /plugin update installs it.')
-  assert.equal(updateLine('auto-done', 'v0.2.4', '0.2.3'), 'Souffleur updated to v0.2.4 (tag signed by your key).')
-  assert.equal(updateLine('auto-unverified', 'v0.2.4', '0.2.3'), 'Souffleur v0.2.4 is out but its tag is not signed by your updateSigner key; not installed. /souffleur update installs it anyway.')
-  assert.equal(updateLine('auto-no-signer', 'v0.2.4', '0.2.3'), 'Souffleur v0.2.4 is out (you run 0.2.3). /souffleur update installs it. Set updateSigner to let auto install it.')
+  assert.equal(updateLine('notify', 'v0.2.4', '0.2.3'), 'Souffleur 0.2.4 is out (you run 0.2.3). /souffleur update installs it.')
+  assert.equal(updateLine('notify-market', 'v0.2.4', '0.2.3'), 'Souffleur 0.2.4 is out (you run 0.2.3). /plugin update installs it.')
+  assert.equal(updateLine('auto-done', 'v0.2.4', '0.2.3'), 'Souffleur updated to 0.2.4 (tag signed by your key).')
+  assert.equal(updateLine('auto-unverified', 'v0.2.4', '0.2.3', '/p/x'), 'Souffleur 0.2.4 is out but its tag is not signed by your updateSigner key; not installed. Update by hand with git in /p/x.')
+  assert.equal(updateLine('auto-no-signer', 'v0.2.4', '0.2.3'), 'Souffleur 0.2.4 is out (you run 0.2.3). /souffleur update installs it. Set updateSigner to let auto install it.')
 })
 
 test('refusalLine text is exact', () => {
