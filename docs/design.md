@@ -126,7 +126,7 @@ The top level of the user file is the standard for every project. A project can 
 
 ### Ledger
 
-One entry per configured skill, kept in `$.state` for the session and mirrored to `$.store` keyed by session id so a resume finds it.
+One entry per configured skill, kept in `$.state` for the session. `$.state` is the session's truth: every event updates it, and a decision never waits for anything else. A copy goes to `$.store`, keyed by session id, so a resume finds it. The copy is written on the first persist of a session, at the end of a main-loop turn, after a compaction, when the proposal queue changes and in the `session.end` hook, not on every tool call. A resume after a crash mid-turn therefore sees the state of the last turn end. The copy keeps the newest 20 `observed` entries and 10 errors. A failed copy, status update or band update is logged to debug, records one `store:` error (the status shows `degraded`) and never drops the actions of the event. At session start the store drops copies untouched for 14 days and keeps at most 50 copies, the oldest first.
 
 | State | Meaning | Entered by |
 |---|---|---|

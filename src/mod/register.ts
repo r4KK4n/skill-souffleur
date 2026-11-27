@@ -166,42 +166,71 @@ function say($: Dollar, l: Loaded, line: string): boolean {
   }
 }
 
+/** Session ids this process has written a store copy for: the first persist of a session always writes one. */
+const mirrored = new Set<string>()
+
+/** The copy kept in the store: the newest 20 observed entries and 10 errors are enough for `/souffleur` after a resume. */
+function slim(s: Session): Session {
+  return { ...s, observed: s.observed.slice(-20), errors: s.errors.slice(-10) }
+}
+
 /**
  * Stores `s0` and writes the notices for what changed since the copy this process stored last. `quiet` skips the
  * comparison (a subagent's change, a session start): another session id has no relation to the last copy either.
+ * `$.state` is the session's truth; the store copy (`mirror`) only serves a resume, so it is written when it matters
+ * and its failure, like that of the status and the band, never costs the caller its actions.
  */
-async function persist($: Dollar, l: Loaded, s0: Session, quiet = false): Promise<void> {
+async function persist($: Dollar, l: Loaded, s0: Session, quiet = false, mirror = true): Promise<void> {
   let next = s0
   let lines: string[] = []
   if (!quiet && latest && latest.id === s0.id) ({ lines, session: next } = notices(l.config, latest, s0, l.root))
-  const s: Session = { ...next, rev: (next.rev ?? 0) + 1, touched: now() }
+  let s: Session = { ...next, rev: (next.rev ?? 0) + 1, touched: now() }
+  if (mirror || !mirrored.has(s.id)) {
+    try {
+      await $.store.set(`session:${s.id}`, slim(s))
+      mirrored.add(s.id)
+      if (s.errors.some((m) => m.startsWith('store: '))) s = decide(l.config, s, { type: 'recovered', now: now(), where: 'store' }).session
+    } catch (err) {
+      $.ui.log(`store copy failed: ${message(err)}`, { to: 'debug' })
+      // Told once, through the notices at the next event.
+      if (!s.errors.some((m) => m.startsWith('store: '))) s = decide(l.config, s, { type: 'error', now: now(), where: 'store', message: message(err) }).session
+    }
+  }
   latest = s
   for (const line of lines) say($, l, line)
-  // A broken file shows as degraded; only a clean start without a user file says "not set up".
-  const notSetUp = !l.setUp && !s.errors.length
-  const text = notSetUp ? NOT_SET_UP : statusLine(s, l.config.mode, sectionNotes(l.config, l.root).leftOut.length, l.config, l.root)
-  $.ui.status(text)
-  // The apps draw no status line: a band stands in for it, but only while something needs attention.
-  const tag = l.config.update === 'off' ? undefined : (await readCheck($))?.latest
-  const newer = tag !== undefined && compareVersions(shown(tag), PLUGIN_VERSION) === 1
-  const attention = notSetUp || needsAttention(s, l.config, l.root)
-  const bandText = newer ? [text, `${shown(tag)} is out, see /souffleur`].filter(Boolean).join(' · ') : attention ? text : undefined
-  await updateAtom($, band, () => (bandText === undefined ? null : { text: bandText }))
+  try {
+    // A broken file shows as degraded; only a clean start without a user file says "not set up".
+    const notSetUp = !l.setUp && !s.errors.length
+    const text = notSetUp ? NOT_SET_UP : statusLine(s, l.config.mode, sectionNotes(l.config, l.root).leftOut.length, l.config, l.root)
+    $.ui.status(text)
+    // The apps draw no status line: a band stands in for it, but only while something needs attention.
+    const tag = l.config.update === 'off' ? undefined : (await readCheck($, false))?.latest
+    const newer = tag !== undefined && compareVersions(shown(tag), PLUGIN_VERSION) === 1
+    const attention = notSetUp || needsAttention(s, l.config, l.root)
+    const bandText = newer ? [text, `${shown(tag)} is out, see /souffleur`].filter(Boolean).join(' · ') : attention ? text : undefined
+    await updateAtom($, band, () => (bandText === undefined ? null : { text: bandText }))
+  } catch (err) {
+    $.ui.log(`status or band failed: ${message(err)}`, { to: 'debug' })
+  }
   await $.state.set(REF, s)
-  await $.store.set(`session:${s.id}`, s)
 }
 
 /** Plugin store key of the last release check. */
 const UPDATE_KEY = 'updateCheck'
 const REPO_URL = 'https://github.com/r4KK4n/skill-souffleur'
 
-async function readCheck($: Dollar): Promise<{ at: number; latest?: string } | undefined> {
+/** The last release check as this process knows it: read at session start and when the check runs, not at every persist. */
+let checkCache: { value: { at: number; latest?: string } | undefined } | undefined
+
+async function readCheck($: Dollar, fresh = true): Promise<{ at: number; latest?: string } | undefined> {
+  if (!fresh && checkCache) return checkCache.value
   try {
     const stored: unknown = await $.store.get(UPDATE_KEY)
-    return isUpdateCheck(stored) ? stored : undefined
+    checkCache = { value: isUpdateCheck(stored) ? stored : undefined }
   } catch {
     return undefined
   }
+  return checkCache.value
 }
 
 const KIND_KEY = 'installKind'
@@ -254,6 +283,7 @@ export async function checkForUpdate($: Dollar, l: Loaded, at: number): Promise<
       check = { at, ...(before?.latest === undefined ? {} : { latest: before.latest }) }
     }
     await $.store.set(UPDATE_KEY, check)
+    checkCache = { value: check }
   } catch {
     // A courtesy check: the next start tries again.
   }
@@ -380,24 +410,33 @@ async function runUpdate($: Dollar, l: Loaded): Promise<string> {
 }
 
 /** Stored copies of sessions not touched for this long are removed at session start. */
-const SESSION_TTL_MS = 30 * 86_400_000
+const SESSION_TTL_MS = 14 * 86_400_000
+/** Stored session copies kept, the one in use included. */
+const SESSION_KEEP = 50
 
 /**
- * Housekeeping at session start: removes `session:*` entries of the plugin store whose copy was stored more than 30 days
- * ago. A copy without a timestamp (stored before this existed) gets one now and goes after 30 days. Never touches the
+ * Housekeeping at session start: removes `session:*` entries of the plugin store whose copy was stored more than 14 days
+ * ago, then the oldest ones beyond 50. A copy without a timestamp (stored before this existed) gets one now and goes after 14 days. Never touches the
  * session in use or other keys. A failure here is not an error of the session: the next start tries again.
  */
 async function pruneStore($: Dollar, currentId: string): Promise<void> {
   try {
     const keys: string[] = await $.store.keys()
+    const kept: { key: string; touched: number }[] = []
     for (const key of keys) {
       if (!key.startsWith('session:') || key === `session:${currentId}`) continue
       const copy: unknown = await $.store.get(key)
       const touched = typeof copy === 'object' && copy !== null ? (copy as { touched?: unknown }).touched : undefined
       if (typeof touched === 'number') {
         if (now() - touched > SESSION_TTL_MS) await $.store.delete(key)
-      } else if (typeof copy === 'object' && copy !== null) await $.store.set(key, { ...copy, touched: now() })
+        else kept.push({ key, touched })
+      } else if (typeof copy === 'object' && copy !== null) {
+        await $.store.set(key, { ...copy, touched: now() })
+        kept.push({ key, touched: now() })
+      }
     }
+    kept.sort((a, b) => b.touched - a.touched)
+    for (const { key } of kept.slice(SESSION_KEEP - 1)) await $.store.delete(key)
   } catch {
     // housekeeping only
   }
@@ -458,13 +497,17 @@ function serial<T>(work: () => Promise<T>): Promise<T> {
 }
 
 /** Feeds one event to the core and stores the result. */
-function apply($: Dollar, make: (l: Loaded) => CoreEvent): Promise<{ actions: Action[]; l: Loaded }> {
+function apply($: Dollar, make: (l: Loaded) => CoreEvent, mirror = false): Promise<{ actions: Action[]; l: Loaded }> {
   return serial(async () => {
     const { l, session } = await current($)
     const event = make(l)
     const r = decide(l.config, session, event)
-    // What a subagent does is not the main session's news.
-    await persist($, l, r.session, 'agentId' in event && event.agentId !== undefined)
+    // An event that changes nothing stores nothing, unless the caller asked for the copy.
+    if (r.session !== session || mirror) {
+      // What a subagent does is not the main session's news. The store copy follows proposals, not every event.
+      const proposalsChanged = JSON.stringify(r.session.proposals) !== JSON.stringify(session.proposals)
+      await persist($, l, r.session, 'agentId' in event && event.agentId !== undefined, mirror || proposalsChanged)
+    }
     return { actions: r.actions, l }
   })
 }
@@ -1973,7 +2016,7 @@ export const register: Register = (on) => {
       const first = notices(l.config, s, s, l.root)
       s = first.session
       // A newer release found earlier is shown once per session (the mark survives reload and resume).
-      const found = l.config.update === 'off' ? undefined : (await readCheck($))?.latest
+      const found = l.config.update === 'off' ? undefined : (await readCheck($))?.latest // refreshes the cache
       const tell = found !== undefined && compareVersions(found.slice(1), PLUGIN_VERSION) === 1 && s.updateShown !== found ? found : undefined
       const kind = tell === undefined ? undefined : await cachedKind($)
       await persist($, l, s, true)
@@ -2039,6 +2082,18 @@ export const register: Register = (on) => {
     return next(e)
   })
 
+  // The last chance to store the copy a resume reads: the turn may have ended without a turn.complete (exit, signal, -p).
+  on('session.end', async ($, e, next) => {
+    try {
+      await serial(async () => {
+        if (latest) await $.store.set(`session:${latest.id}`, slim(latest))
+      })
+    } catch (err) {
+      $.ui.log(`store copy at session end failed: ${message(err)}`, { to: 'debug' })
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   on('session.compact', async ($, e, next) => {
     const agentId = e.agentId === undefined ? {} : { agentId: e.agentId }
     await safe($, 'session.compact.before', undefined, async () => {
@@ -2048,7 +2103,7 @@ export const register: Register = (on) => {
     const r = await next(Array.isArray(e.messages) ? e : { ...e, messages: [{ role: 'user' as const, text: '', toolUses: [] }] })
     await safe($, 'session.compact.after', undefined, async () => {
       const skipped = 'skip' in r && r.skip !== undefined
-      await apply($, () => ({ type: 'compact', now: now(), phase: 'after', trigger: e.trigger, skipped, ...agentId }))
+      await apply($, () => ({ type: 'compact', now: now(), phase: 'after', trigger: e.trigger, skipped, ...agentId }), true)
     })
     return r
   }).catch(($, e, next) => next(e))
@@ -2169,7 +2224,7 @@ export const register: Register = (on) => {
     // The main loop is alive: stamp the time the status line shows. A subagent's turn end says nothing about the session.
     if (e.agentId === undefined) {
       await safe($, 'turn.seen', undefined, async () => {
-        await apply($, () => ({ type: 'seen', now: now() }))
+        await apply($, () => ({ type: 'seen', now: now() }), true)
       })
     }
     if (e.agentId === undefined && e.reason === 'answer' && personTurn && typeof e.answer === 'string') {

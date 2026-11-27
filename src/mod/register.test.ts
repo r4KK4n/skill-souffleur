@@ -28,6 +28,8 @@ type World = {
   /** After `n` more reads of `path` its text changes under the reader. */
   driftAfter: (path: string, n: number) => void
   stored: Record<string, unknown>
+  /** The keys written with `$.store.set`, in order. */
+  storeSets: string[]
   /** How many classifier calls the mod made. */
   classifyCalls: () => number
   /** The lines written with `$.ui.log` (transcript). */
@@ -83,6 +85,7 @@ type Opts = {
   listMode?: 'hidden' | 'throws' | 'junk' | 'hangs'
   /** `$.ui.log` throws. */
   failLog?: boolean
+  failStatus?: boolean
   /** The usage every answered `$.model.complete` returns. */
   usage?: Record<string, number>
   /** Every classifier request (call A and B). */
@@ -120,8 +123,10 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   const hidden = new Set<string>()
   const answers = opts.answers === 'reject' ? [] : [...(opts.answers ?? [])]
   const storeData: Record<string, unknown> = opts.stored ?? {}
+  const storeSets: string[] = []
   on('store.get', (_, e) => ({ value: storeData[e.key] === undefined ? undefined : JSON.parse(JSON.stringify(storeData[e.key])) }) as never)
   on('store.set', (_, e) => {
+    storeSets.push(e.key)
     if (opts.failStoreKey === e.key) throw new Error('disk full')
     if (opts.holdTotal && e.key === 'modelUseTotal') return opts.holdTotal.then(() => { storeData[e.key] = JSON.parse(JSON.stringify(e.value)); return { value: undefined } as never })
     storeData[e.key] = JSON.parse(JSON.stringify(e.value))
@@ -192,6 +197,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   let classifyCalls = 0
   on('store.keys', () => ({ value: Object.keys(storeData) }) as never)
   on('ui.status', (_, e) => {
+    if (opts.failStatus) throw new Error('no status here')
     statuses.push(e.text)
     return { value: undefined }
   })
@@ -266,7 +272,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   on('turn.complete', (_, e) => ({ text: e.answer }))
   on('session.compact', () => (opts.skipCompact ? { skip: 'vetoed' } : { messages: [{ role: 'user', text: 'summary', toolUses: [] }] }))
   on('command.run', () => ({}))
-  return { statuses, setId: (next) => { id = next }, seen, writes, asked, options, clock, hide: (path) => void hidden.add(path), files, tools, toasts, failRead, answers, driftAfter: (path, n) => { drift.path = path; drift.left = n }, stored: storeData, classifyCalls: () => classifyCalls, logs, runs, debugLogs, dropTool: () => { toolGone = true } }
+  return { statuses, setId: (next) => { id = next }, seen, writes, asked, options, clock, hide: (path) => void hidden.add(path), files, tools, toasts, failRead, answers, driftAfter: (path, n) => { drift.path = path; drift.left = n }, stored: storeData, storeSets, classifyCalls: () => classifyCalls, logs, runs, debugLogs, dropTool: () => { toolGone = true } }
 }
 
 const COMPOSE = { model: 'm', promptModel: 'm', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] } as never
@@ -1987,10 +1993,10 @@ test('a hand edit of the user file shows in /souffleur at once and at the next s
   expect(await table($)).toMatch(/invalid JSON/)
 })
 
-test('a session stores its timestamp, and session entries older than 30 days are removed at session start', async ($, on) => {
+test('a session stores its timestamp, and session entries older than 14 days are removed at session start', async ($, on) => {
   const day = 86_400_000
-  const old = { id: 'old', ledger: {}, touched: Date.now() - 31 * day }
-  const recent = { id: 'recent', ledger: {}, touched: Date.now() - 29 * day }
+  const old = { id: 'old', ledger: {}, touched: Date.now() - 15 * day }
+  const recent = { id: 'recent', ledger: {}, touched: Date.now() - 13 * day }
   const unstamped = { id: 'unstamped', ledger: {} }
   const w = world(on, { [USER_FILE]: ALWAYS }, { stored: { 'session:old': old, 'session:recent': recent, 'session:unstamped': unstamped, 'souffleur:declined': ['h'], 'souffleur:skill-hash:abc': { done: true } } })
   await start($)
@@ -1999,7 +2005,7 @@ test('a session stores its timestamp, and session entries older than 30 days are
   expect(w.stored['souffleur:declined']).toEqual(['h'])
   expect(w.stored['souffleur:skill-hash:abc']).toEqual({ done: true })
   expect(typeof (w.stored['session:s1'] as { touched: number }).touched).toBe('number')
-  expect(typeof (w.stored['session:unstamped'] as { touched?: number }).touched, 'a legacy copy gets a stamp and goes after 30 days').toBe('number')
+  expect(typeof (w.stored['session:unstamped'] as { touched?: number }).touched, 'a legacy copy gets a stamp and goes after 14 days').toBe('number')
 })
 
 test('a skill version is done only when its proposals were answered; a dropped queue offers it again, three times at most', async ($, on) => {
@@ -4465,4 +4471,79 @@ test('a mounted band goes away when the restoring skill loads, with no new promp
   await skillLoaded($, 'writing-guide')
   expect(await ui.find({ type: 'Text' })).toBeUndefined()
   await ui.unmount()
+})
+
+test('a failing store copy does not drop a deny', async ($, on) => {
+  const w = world(on, { [USER_FILE]: UI }, { classify: 'match', failStoreKey: 'session:s1' })
+  await start($)
+  await $.prompt.submit({ text: 'build me a login screen' })
+  const r = await $.tool.call({ tool: 'Write', file_path: '/work/proj/x.html', content: '' } as never)
+  expect(r.deny).toMatch(/ui-checklist/)
+  expect(w.debugLogs.join('\n')).toMatch(/store copy failed/)
+  expect(await table($)).toMatch(/Errors:\n- store: /)
+})
+
+test('a failing status call does not drop a deny', async ($, on) => {
+  world(on, { [USER_FILE]: UI }, { classify: 'match', failStatus: true })
+  await start($)
+  await $.prompt.submit({ text: 'build me a login screen' })
+  const r = await $.tool.call({ tool: 'Write', file_path: '/work/proj/x.html', content: '' } as never)
+  expect(r.deny).toMatch(/ui-checklist/)
+})
+
+test('tool calls leave the stored copy alone until the turn ends', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  const key = (k: string) => k === 'session:s1'
+  const before = w.storeSets.filter(key).length
+  for (let i = 0; i < 20; i++) await $.tool.call({ tool: 'Read', path: `a${i}.txt` } as never)
+  expect(w.storeSets.filter(key).length).toBe(before)
+  await turnEnd($)
+  expect(w.storeSets.filter(key).length).toBe(before + 1)
+})
+
+test('a resume after a turn end restores the state', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  await skillLoaded($, 'writing-guide')
+  await $.tool.call({ tool: 'Read', path: 'a.txt' } as never)
+  await turnEnd($)
+  const copy = w.stored['session:s1']
+  expect(JSON.stringify(copy)).toMatch(/loaded/)
+})
+
+test('compaction writes the stored copy', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  await skillLoaded($, 'writing-guide')
+  const n = w.storeSets.filter((k) => k === 'session:s1').length
+  await $.session.compact({ trigger: 'manual' })
+  expect(w.storeSets.filter((k) => k === 'session:s1').length).toBeGreaterThan(n)
+  expect(JSON.stringify(w.stored['session:s1'])).toMatch(/stale/)
+})
+
+test('the stored copy keeps the newest 20 observed entries', async ($, on) => {
+  const { config } = parseConfig(ALWAYS, undefined)
+  const base = initSession(config, 's1', 1, 'startup', '2.1.331')
+  const fat = { ...base, observed: Array.from({ length: 25 }, (_, i) => ({ at: i, reason: `r${i}` })) }
+  const w = world(on, { [USER_FILE]: ALWAYS }, { stored: { 'session:s1': fat } })
+  await start($)
+  await turnEnd($)
+  const copy = w.stored['session:s1'] as { observed: { reason: string }[] }
+  expect(copy.observed.length).toBe(20)
+  expect(copy.observed.at(-1)?.reason).toBe('r24')
+})
+
+test('session start keeps at most 50 stored sessions and drops copies older than 14 days', async ($, on) => {
+  const { config } = parseConfig(ALWAYS, undefined)
+  const stored: Record<string, unknown> = {}
+  for (let i = 0; i < 60; i++) stored[`session:old${i}`] = { ...initSession(config, `old${i}`, 1, 'startup', '2.1.331'), touched: Date.now() - i * 1000 }
+  stored['session:ancient'] = { ...initSession(config, 'ancient', 1, 'startup', '2.1.331'), touched: Date.now() - 15 * 86_400_000 }
+  world(on, { [USER_FILE]: ALWAYS }, { stored })
+  await start($)
+  const keys = Object.keys(stored).filter((k) => k.startsWith('session:'))
+  expect(keys.length).toBeLessThanOrEqual(50)
+  expect(keys).not.toContain('session:ancient')
+  expect(keys).toContain('session:old0')
+  expect(keys).not.toContain('session:old59')
 })
