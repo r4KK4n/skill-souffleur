@@ -35,7 +35,7 @@ const loadSkill = (skill: string): CoreEvent => ({ type: 'skill', now: at(), ski
 const compact = (extra: Partial<Extract<CoreEvent, { type: 'compact' }>> = {}): CoreEvent => ({ type: 'compact', now: at(), phase: 'after', trigger: 'manual', ...extra })
 const agentStart = (agentId = 'a1'): CoreEvent => ({ type: 'agentStart', now: at(), agentId })
 const agentDone = (agentId = 'a1'): CoreEvent => ({ type: 'agentDone', now: at(), agentId })
-const agentsKnown = (ids: string[]): CoreEvent => ({ type: 'agentsKnown', now: at(), ids })
+const agentsEnded = (ids: string[], now = at()): CoreEvent => ({ type: 'agentsEnded', now, ids })
 const command = (args: string): CoreEvent => ({ type: 'command', now: at(), args })
 
 /** Feeds events in order; returns the final session and the actions of each event. */
@@ -203,11 +203,29 @@ test('a main Skill call by the bare name announces the plugin skill key of the l
   assert.notEqual(other.s.ledger['terse:terse-mode']!.state, 'loaded')
 })
 
-test('agentsKnown drops live ids the engine no longer lists and keeps spawn placeholders', () => {
-  const s = run(base, [agentStart('a1'), agentStart('a2'), agentStart('spawn:1'), agentsKnown(['a2'])]).s
-  assert.deepEqual(s.liveAgents, ['a2', 'spawn:1'])
-  const r = run(base, [prompt('screen', ['ui']), agentStart('a1'), agentsKnown([]), loadSkill('ui-checklist')]).s
+test('agentsEnded drops the ids the list reports ended and keeps the ones it never named', () => {
+  const s = run(base, [agentStart('a1'), agentStart('a2'), agentStart('wf1'), agentsEnded(['a1', 'unknown'])]).s
+  assert.deepEqual(s.liveAgents, ['a2', 'wf1'])
+  const r = run(base, [prompt('screen', ['ui']), agentStart('a1'), agentsEnded(['a1']), loadSkill('ui-checklist')]).s
   assert.equal(r.ledger['ui-checklist']!.state, 'loaded')
+})
+
+test('agentsEnded drops a spawn placeholder only when it is old', () => {
+  const s = run(base, [agentStart('spawn:1000:1'), agentStart('spawn:200000:2'), agentsEnded([], 201000)]).s
+  assert.deepEqual(s.liveAgents, ['spawn:200000:2'])
+})
+
+test('a load of a plugin skill books a bare ledger key; an ambiguous bare name books nothing', () => {
+  const c = cfg({ skills: { 'terse-mode': { always: true, from: 'user' } } })
+  assert.equal(run(c, [loadSkill('terse:terse-mode')]).s.ledger['terse-mode']!.state, 'loaded')
+  const two = cfg({ skills: { 'a:x': { always: true, from: 'user' }, 'b:x': { always: true, from: 'user' } } })
+  const r = run(two, [loadSkill('x')]).s
+  assert.notEqual(r.ledger['a:x']!.state, 'loaded')
+  assert.notEqual(r.ledger['b:x']!.state, 'loaded')
+  const exact = cfg({ skills: { 'terse-mode': { always: true, from: 'user' }, 'terse:terse-mode': { always: true, from: 'user' } } })
+  const e = run(exact, [loadSkill('terse:terse-mode')]).s
+  assert.equal(e.ledger['terse:terse-mode']!.state, 'loaded')
+  assert.notEqual(e.ledger['terse-mode']!.state, 'loaded')
 })
 
 test('the Agent call itself no longer counts a run', () => {

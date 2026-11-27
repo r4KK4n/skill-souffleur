@@ -22,8 +22,9 @@ export function initLedger(config: Config, now: number, start: 'startup' | 'clea
 }
 
 /** A skill's text entered the context. Names the ledger does not know are ignored. */
-export function skillLoaded(l: Ledger, skill: SkillName, now: number, reason: string): Ledger {
-  if (!(skill in l)) return l
+export function skillLoaded(l: Ledger, loaded: SkillName, now: number, reason: string): Ledger {
+  const skill = ledgerKey(l, loaded)
+  if (skill === undefined) return l
   // A load is newer than any compaction: the text is back, so the compaction origin is gone.
   const { lastCompactAt: _cut, ...row } = l[skill]!
   return { ...l, [skill]: { ...row, state: 'loaded', since: now, reason, requests: 0 } }
@@ -96,3 +97,10 @@ export function markInstalled(l: Ledger, names: string[], now: number): Ledger {
 
 /** Two names stand for one skill: the same name, or a bare name against a plugin name with the same part after the colon. */
 export const sameSkill = (a: string, b: string): boolean => isListed(a, [b])
+
+/** The ledger key a load belongs to: the exact name, else the one key that is the same skill by its bare name; none when that is ambiguous. */
+export function ledgerKey(l: Ledger, name: string): string | undefined {
+  if (name in l) return name
+  const same = Object.keys(l).filter((k) => sameSkill(k, name))
+  return same.length === 1 ? same[0] : undefined
+}

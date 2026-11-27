@@ -94,8 +94,8 @@ export type CoreEvent =
   /** An agent run began or ended (`turn.start`, `turn.complete`, `agent.report` with its `agentId`). Only these end a run, never the Agent tool call returning, because a background agent returns at launch. */
   | { type: 'agentStart'; now: number; agentId: string }
   | { type: 'agentDone'; now: number; agentId: string }
-  /** The engine's own list of agents that are not ended: a live id that is not in it lost its end event. A `spawn:` placeholder stays, its spawn is still in flight. */
-  | { type: 'agentsKnown'; now: number; ids: string[] }
+  /** The engine's list reports these agents ended (completed, failed, killed): their end event was lost. An id the list never named stays live (a workflow's agents are not listed). A `spawn:<ms>:<n>` placeholder older than `SPAWN_STALE_MS` goes too. */
+  | { type: 'agentsEnded'; now: number; ids: string[] }
   /** A main-loop turn ended (any reason): the session is alive. */
   | { type: 'seen'; now: number }
   /** A main-session turn ended with this answer. `fromCommand`: the turn's prompt was a typed command. */
@@ -125,6 +125,8 @@ type Result = { session: Session; actions: Action[] }
 const KEEP = 20
 /** Marks a live-run placeholder the adapter holds while an agent spawns, before its id is known. */
 export const SPAWN_PREFIX = 'spawn:'
+const SPAWN_STALE_MS = 120_000
+const staleSpawn = (id: string, now: number) => id.startsWith(SPAWN_PREFIX) && Number(id.split(':')[1]) < now - SPAWN_STALE_MS
 const MAX_REQUESTS = 2
 const COMPACT_TRIGGERS = ['manual', 'auto', 'plugin']
 const BRIEF_SKILLS = /^skills:\s*\S/im
@@ -237,9 +239,9 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
       const live = s.liveAgents ?? []
       return { session: live.includes(e.agentId) ? s : { ...s, liveAgents: [...live, e.agentId].slice(-KEEP) }, actions: [] }
     }
-    case 'agentsKnown': {
+    case 'agentsEnded': {
       const live = s.liveAgents ?? []
-      const kept = live.filter((id) => id.startsWith(SPAWN_PREFIX) || e.ids.includes(id))
+      const kept = live.filter((id) => !e.ids.includes(id) && !staleSpawn(id, e.now))
       return { session: kept.length === live.length ? s : { ...s, liveAgents: kept }, actions: [] }
     }
     case 'agentDone':

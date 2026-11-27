@@ -592,9 +592,9 @@ test('a spawn that fails leaves no placeholder behind', async ($, on) => {
   expect(await table($)).toMatch(/ui-checklist \| loaded/)
 })
 
-test('a stale live run the engine no longer lists is pruned at the next prompt', async ($, on) => {
+test('a live run the engine lists as failed is pruned at the next prompt', async ($, on) => {
   world(on, { [USER_FILE]: UI }, { classify: 'match' })
-  on('agent.list', () => ({ value: [] }) as never)
+  on('agent.list', () => ({ value: [{ id: 'a1', status: 'failed' }] }) as never)
   await start($)
   await agentRuns($, 'a1')
   await $.prompt.submit({ text: 'build me a login screen' })
@@ -614,6 +614,35 @@ test('a run the engine lists as completed is pruned, a running one is kept', asy
   await agentEnds($, 'a2')
   await skillLoaded($, 'ui-checklist')
   expect(await table($)).toMatch(/ui-checklist \| loaded/)
+})
+
+test('a live run the list does not name survives a prompt (a workflow agent)', async ($, on) => {
+  world(on, { [USER_FILE]: UI }, { classify: 'match' })
+  on('agent.list', () => ({ value: [] }) as never)
+  await start($)
+  await agentRuns($, 'wf1')
+  await $.prompt.submit({ text: 'build me a login screen' })
+  await skillLoaded($, 'ui-checklist')
+  expect(await table($)).not.toMatch(/ui-checklist \| loaded/)
+})
+
+test('the agent list is not asked while no run is live, and a slow list prunes nothing', async ($, on) => {
+  world(on, { [USER_FILE]: UI }, { classify: 'match' })
+  let asked = 0
+  let slow = false
+  on('agent.list', () => {
+    asked += 1
+    return slow ? (new Promise(() => {}) as never) : ({ value: [{ id: 'a1', status: 'completed' }] } as never)
+  })
+  await start($)
+  await $.prompt.submit({ text: 'hello' })
+  expect(asked).toBe(0)
+  await agentRuns($, 'a1')
+  slow = true
+  await $.prompt.submit({ text: 'build me a login screen' })
+  expect(asked).toBe(1)
+  await skillLoaded($, 'ui-checklist')
+  expect(await table($)).not.toMatch(/ui-checklist \| loaded/)
 })
 
 test('nothing is pruned when the agent list fails', async ($, on) => {

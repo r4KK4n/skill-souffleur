@@ -2144,19 +2144,31 @@ export const register: Register = (on) => {
     if (fromUser) lastPromptKind = e.origin?.kind
     personTurn = fromUser || (e.command !== undefined && isUserOrigin(e))
     lastPromptCommand = e.command !== undefined
-    // An end event can be lost (a failed update, a reload that kept the state): the engine's own list says which runs are not over.
-    let known: string[] | undefined
-    try {
-      known = (await $.agent.list()).filter((a: { status: string }) => !['completed', 'failed', 'killed'].includes(a.status)).map((a: { id: string }) => a.id)
-    } catch {
-      // no list, no pruning
-    }
-    if (known !== undefined) {
-      const ids = known
-      await safe($, 'agent.prune', undefined, async () => {
-        await apply($, () => ({ type: 'agentsKnown', now: now(), ids }))
-      })
-    }
+    // An end event can be lost (a failed update, a reload that kept the state): the engine's own list names the runs that are over.
+    // A run the list never names (a workflow's agent) stays live. No run to check, or a list that does not answer in time: nothing is pruned.
+    await safe($, 'agent.prune', undefined, async () => {
+      const { session } = await current($)
+      const checkable = (session.liveAgents ?? []).some((id) => !id.startsWith(SPAWN_PREFIX))
+      let ended: string[] = []
+      if (checkable) {
+        let timer: ReturnType<typeof setTimeout> | undefined
+        try {
+          const list = await Promise.race([
+            $.agent.list() as Promise<{ id: string; status: string }[]>,
+            new Promise<undefined>((resolve) => {
+              timer = setTimeout(() => resolve(undefined), 2000)
+            }),
+          ])
+          if (list === undefined) return
+          ended = list.filter((a) => ['completed', 'failed', 'killed'].includes(a.status)).map((a) => a.id)
+        } catch {
+          return
+        } finally {
+          clearTimeout(timer)
+        }
+      }
+      await apply($, () => ({ type: 'agentsEnded', now: now(), ids: ended }))
+    })
     if (fromUser) await safe($, 'tool.reconnect', undefined, () => reconnectTool($))
     // Only a prompt of the person (composer or bridge, no command) answers; any prompt of the person ends the offer.
     if (e.command !== undefined && isUserOrigin(e)) endOffer()
@@ -2257,7 +2269,7 @@ export const register: Register = (on) => {
   // placeholder holds the window of the spawn; the agent's id replaces it once the result names it.
   let spawnSeq = 0
   on('agent.spawn', async ($, e, next) => {
-    const token = `${SPAWN_PREFIX}${++spawnSeq}`
+    const token = `${SPAWN_PREFIX}${now()}:${++spawnSeq}`
     await safe($, 'agent.spawn', undefined, async () => {
       await apply($, () => ({ type: 'agentStart', now: now(), agentId: token }))
     })
