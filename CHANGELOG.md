@@ -8,6 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Security
 
+- `/souffleur init` and `migrate` follow an `@path` import in a project's CLAUDE.md only when the real path of the file lies inside the project root or `~/.claude`. An absolute path, a `../` path or a symlink that leads elsewhere is skipped (#101).
 - A command without an `origin` is no longer treated as the person's: `/souffleur update`, `accept`, `pause` and the other state-changing verbs now refuse it. Only `composer`, `bridge` and `sdk` count (#93).
 
 ### Changed
@@ -16,6 +17,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- Session start no longer waits for the housekeeping of the plugin store: pruning runs in the background and a failure goes to the debug log. Records of read skill versions (`souffleur:skill-hash:*`) now carry a timestamp and go after 14 days like old session copies, and `trustProjects` in the user file follows the same rules as the other lists: at most 20 entries, one-line absolute paths of at most 200 characters (#102).
+- A run whose prompts come from an SDK host (`claude -p`) no longer opens the proposal dialog at a turn end (Remote Control sessions still get it), so a client that never answers cannot hold the end of a turn for two minutes per waiting proposal. The proposal is shown as a notice instead (#99).
+- Names that match an `Object.prototype` member (`constructor`, `toString`, `__proto__`) are no longer taken for a configured need, skill or rule: `/souffleur need constructor` now answers "Unknown need" (#98).
 - A session switch inside the running process (`/resume` of another session) is no longer read as `/clear`: the old session's copy is stored, and the stored copy of the new id is restored with its ledger, proposals and stops, through the same resume step as a session start (a pause of need detection ends there too). Only an id with no stored copy starts fresh (#94).
 - Every write of `~/.claude/souffleur.json` now goes through one path: a uniquely named temporary copy that is parsed back and moved over the file (a symlinked file is written through), a re-read right before the move with up to 3 retries when another session saved meanwhile (far fewer lost entries; a save in the instant between the re-read and the move can still win), one backup per session start with the newest 3 kept (only `.bak-<13-digit ms>` copies are pruned), and a reload of the config at the next prompt when either config file changed on disk (#91).
 

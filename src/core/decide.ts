@@ -233,7 +233,7 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
     case 'typed':
       return { session: { ...(Object.keys(s.ledger).some((k) => sameSkill(k, e.name)) ? { ...s, mainSkillCalls: [...s.mainSkillCalls, e.name], ruleSkills: withRuleSkill(config, s, e.name) } : s), learnCalls: [...(s.learnCalls ?? []), e.name].slice(-KEEP) }, actions: [] }
     case 'config':
-      return { session: { ...s, ledger: syncLedger(s.ledger, config, e.now, ruleSkillNames(config)), ruleSkills: s.ruleSkills.filter((n) => ruleSkillNames(config).includes(n)), openRules: s.openRules.filter((o) => config.rules.some((r) => r.id === o.id)), needs: Object.fromEntries(Object.entries(s.needs).filter(([name]) => name in config.needs)), duties: s.duties.filter((d) => d.skill in config.skills), errors: [...s.errors.filter((m) => !m.startsWith('config: ')), ...e.errors.map((m) => `config: ${m}`)].slice(-KEEP) }, actions: [] }
+      return { session: { ...s, ledger: syncLedger(s.ledger, config, e.now, ruleSkillNames(config)), ruleSkills: s.ruleSkills.filter((n) => ruleSkillNames(config).includes(n)), openRules: s.openRules.filter((o) => config.rules.some((r) => r.id === o.id)), needs: Object.fromEntries(Object.entries(s.needs).filter(([name]) => Object.hasOwn(config.needs, name))), duties: s.duties.filter((d) => Object.hasOwn(config.skills, d.skill)), errors: [...s.errors.filter((m) => !m.startsWith('config: ')), ...e.errors.map((m) => `config: ${m}`)].slice(-KEEP) }, actions: [] }
     case 'installed':
       return { session: { ...s, ledger: markInstalled(s.ledger, e.names, e.now) }, actions: [] }
     case 'reply':
@@ -393,7 +393,7 @@ function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'pro
   let ledger = s.ledger
   if (!s.paused) {
     for (const name of e.matched) {
-      if (name in needs) {
+      if (Object.hasOwn(needs, name)) {
         const { dormant: _d, evidence: _e, ...rest } = needs[name]!
         needs[name] = { ...rest, ...(rest.misses ? { misses: 0 } : {}) }
         continue
@@ -455,7 +455,7 @@ function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'pro
   const bDown = !aDown && (next.workFails ?? 0) >= FAIL_LIMIT && e.deliverable === 'code-or-repo-work'
   if ((aDown || bDown) && !s.paused) {
     const listed = Object.entries(config.needs)
-      .filter(([name, n]) => n.for === 'work' && !(name in next.needs) && (trusted || !(config.projectNeeds ?? []).includes(name)))
+      .filter(([name, n]) => n.for === 'work' && !(Object.hasOwn(next.needs, name)) && (trusted || !(config.projectNeeds ?? []).includes(name)))
       .map(([name, n]) => {
         const skills = Object.entries(config.skills)
           .filter(([skill, rule]) => rule.need === name && next.ledger[skill]?.state !== 'not installed here' && next.ledger[skill]?.state !== 'loaded' && !excludedIn(rule, e.root) && (trusted || rule.from !== 'project'))
@@ -703,10 +703,10 @@ function onCommand(config: Config, s: Session, e: Extract<CoreEvent, { type: 'co
     case 'resume':
       return s.paused ? reply({ ...s, paused: false }, 'Souffleur: checks are on again.') : reply(s, 'Souffleur: not paused.')
     case 'need':
-      if (!(arg in config.needs)) return reply(s, `Unknown need "${arg}". ${known()}`)
+      if (!(Object.hasOwn(config.needs, arg))) return reply(s, `Unknown need "${arg}". ${known()}`)
       return reply({ ...s, needs: { ...s.needs, [arg]: { since: e.now, reason: 'command' } } }, `Need ${arg} is on.`)
     case 'drop': {
-      if (!(arg in config.needs)) return reply(s, `Unknown need "${arg}". ${known()}`)
+      if (!(Object.hasOwn(config.needs, arg))) return reply(s, `Unknown need "${arg}". ${known()}`)
       const { [arg]: _gone, ...rest } = s.needs
       return reply({ ...s, needs: rest }, `Need ${arg} is off.`)
     }

@@ -16,7 +16,7 @@ export function initLedger(config: Config, now: number, start: 'startup' | 'clea
       : { state: 'absent', since: now, reason: '', requests: 0 }
   }
   for (const name of extra) {
-    if (!(name in ledger)) ledger[name] = { state: 'absent', since: now, reason: '', requests: 0 }
+    if (!(Object.hasOwn(ledger, name))) ledger[name] = { state: 'absent', since: now, reason: '', requests: 0 }
   }
   return ledger
 }
@@ -100,7 +100,7 @@ export const sameSkill = (a: string, b: string): boolean => isListed(a, [b])
 
 /** The ledger key a load belongs to: the exact name, else the one key that is the same skill by its bare name; none when that is ambiguous. */
 export function ledgerKey(l: Ledger, name: string): string | undefined {
-  if (name in l) return name
+  if (Object.hasOwn(l, name)) return name
   const same = Object.keys(l).filter((k) => sameSkill(k, name))
   return same.length === 1 ? same[0] : undefined
 }

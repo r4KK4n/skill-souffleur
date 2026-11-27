@@ -85,7 +85,7 @@ export function candidates(config: Config, installed: string[], reloadHooked: st
   const out: Candidate[] = []
   const has = (skill: string) => out.some((c) => c.skill === skill) || skip.includes(skill)
   for (const [skill, rule] of Object.entries(config.skills)) if (rule.from === 'user' && !skip.includes(skill)) out.push({ skill, source: 'user' })
-  const known = (skill: string) => !(skill in config.skills) && !has(skill) && installed.includes(skill)
+  const known = (skill: string) => !(Object.hasOwn(config.skills, skill)) && !has(skill) && installed.includes(skill)
   for (const skill of reloadHooked) if (known(skill)) out.push({ skill, source: 'hook' })
   for (const skill of picked) if (known(skill)) out.push({ skill, source: 'model' })
   for (const [skill, rule] of Object.entries(config.skills)) if (rule.from === 'project' && !skip.includes(skill)) out.push({ skill, source: 'project' })
@@ -144,7 +144,7 @@ export function configProblem(userConfig: unknown): string | undefined {
 function forkKey(needs: Record<string, unknown>, key: string, skill: string): string {
   const base = `${key}-${bare(skill).replace(/[^A-Za-z0-9:_-]/g, '-')}`.slice(0, 60)
   let candidate = base
-  for (let n = 2; candidate in needs; n++) candidate = `${base}-${n}`
+  for (let n = 2; Object.hasOwn(needs, candidate); n++) candidate = `${base}-${n}`
   return candidate
 }
 
@@ -185,7 +185,7 @@ export function ignoreInProject(userConfig: unknown, root: string, skill: string
 export function addSkillToProject(userConfig: unknown, root: string, skill: string, choice: 'start' | 'injected' | 'need', need?: NeedText): { config: unknown; note?: string; pruned?: string[] } {
   const o = openBlock(userConfig, root)
   const skills: Record<string, unknown> = isObject(o.block.skills) ? { ...o.block.skills } : {}
-  if (!(skill in skills) && Object.keys(skills).length >= MAX_LIST) return { config: userConfig, note: `${skill}: this project's block already holds ${MAX_LIST} skills, so nothing was written for it.` }
+  if (!(Object.hasOwn(skills, skill)) && Object.keys(skills).length >= MAX_LIST) return { config: userConfig, note: `${skill}: this project's block already holds ${MAX_LIST} skills, so nothing was written for it.` }
   const needText = (n: unknown): string | undefined => (typeof n === 'string' ? n : isObject(n) && typeof n.what === 'string' ? n.what : undefined)
   if (choice === 'start') skills[skill] = { always: true }
   else if (choice === 'injected') skills[skill] = { always: true, startup: 'injected' }
@@ -194,12 +194,12 @@ export function addSkillToProject(userConfig: unknown, root: string, skill: stri
     const std = isObject(o.doc.needs) ? o.doc.needs : {}
     const own: Record<string, unknown> = isObject(o.block.needs) ? { ...o.block.needs } : {}
     let key = want.key
-    if (key in std && needText(std[key]) === want.text) {
+    if (Object.hasOwn(std, key) && needText(std[key]) === want.text) {
       // the standard has exactly this need: use it
-    } else if (key in own && needText(own[key]) === want.text) {
+    } else if (Object.hasOwn(own, key) && needText(own[key]) === want.text) {
       // the block already has it
     } else {
-      if (key in std || key in own) key = forkKey({ ...std, ...own }, key, skill)
+      if (Object.hasOwn(std, key) || Object.hasOwn(own, key)) key = forkKey({ ...std, ...own }, key, skill)
       own[key] = { for: 'work', what: want.text }
       o.block.needs = own
     }
@@ -225,8 +225,8 @@ export function applyChoice(
 ): { config: unknown; note?: string; pruned?: string[] } {
   const problem = configProblem(userConfig)
   if (problem) return { config: userConfig, note: `${skill}: the config file was not changed because ${problem}.` }
-  const inStandard = isObject(userConfig) && isObject(userConfig.skills) && skill in userConfig.skills
-  if (!inStandard && isObject(userConfig) && isObject(userConfig.projects) && Object.values(userConfig.projects).some((b) => isObject(b) && isObject(b.skills) && skill in b.skills)) {
+  const inStandard = isObject(userConfig) && isObject(userConfig.skills) && Object.hasOwn(userConfig.skills, skill)
+  if (!inStandard && isObject(userConfig) && isObject(userConfig.projects) && Object.values(userConfig.projects).some((b) => isObject(b) && isObject(b.skills) && Object.hasOwn(b.skills, skill))) {
     return { config: userConfig, note: `${skill} is already a skill of a project block, so it was not added to the standard. Rename or remove it there first.` }
   }
   if (need && (!NEED_KEY.test(need.key) || cleanNeedText(need.text) !== need.text)) {
@@ -257,13 +257,13 @@ export function applyChoice(
     let key = want.key
     const existing = needs[key]
     const unchanged = existing !== undefined && needWhat(existing) === want.text
-    if (key in needs && !unchanged) {
+    if (Object.hasOwn(needs, key) && !unchanged) {
       const uses = (all: Record<string, unknown>) => Object.entries(all).some(([name, r]) => name !== skill && isObject(r) && r.need === key)
       if (uses(skills) || uses(projectSkills)) key = forkKey(needs, key, skill)
     }
     const prior = needs[key] ?? existing
     // Keep an object need (and its audience) when the text is unchanged; write the object form when the old one was an object.
-    if (!(key in needs && unchanged)) needs[key] = isObject(prior) ? { for: needFor(prior) ?? 'work', what: want.text } : want.text
+    if (!(Object.hasOwn(needs, key) && unchanged)) needs[key] = isObject(prior) ? { for: needFor(prior) ?? 'work', what: want.text } : want.text
     skills[skill] = { need: key, ...restNoFor }
   }
 

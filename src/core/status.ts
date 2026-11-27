@@ -33,7 +33,7 @@ export function renderTable(config: Config, s: Session, now: number, root?: stri
     const state = config.skills[name] !== undefined && excludedIn(config.skills[name]!, root) ? 'excluded in this project' : e.state
     lines.push(`| ${cell(name)} | ${state === 'absent' ? 'not needed yet' : state} | ${clock(e.since)} | ${cell(e.reason)} |`)
   }
-  for (const name of p?.blockedSkills ?? []) if (!(name in s.ledger)) lines.push(`| ${cell(name)} | blocked here | | removed from the standard in this project |`)
+  for (const name of p?.blockedSkills ?? []) if (!(Object.hasOwn(s.ledger, name))) lines.push(`| ${cell(name)} | blocked here | | removed from the standard in this project |`)
   if (!isTrustedRoot(config, root) && Object.values(config.skills).some((r) => r.from === 'project')) {
     lines.push('', 'The project file defines skills, but this project is not trusted (trustProjects in the user file): they are listed here and neither requested nor allowed to deny a call.')
   }
@@ -103,7 +103,7 @@ function baseLine(s: Session, mode: Mode, notesLeftOut: number, config?: Config,
   const counts = { loaded: 0, restoring: 0, stale: 0, unavailable: 0, 'not installed here': 0 }
   for (const [name, e] of Object.entries(s.ledger)) {
     if (config?.skills[name] !== undefined && excludedIn(config.skills[name]!, root)) continue
-    if (e.state in counts) counts[e.state as keyof typeof counts] += 1
+    if (Object.hasOwn(counts, e.state)) counts[e.state as keyof typeof counts] += 1
   }
   if (Object.keys(s.ledger).length === 0 && s.proposals.length === 0 && notesLeftOut === 0) return undefined
   const prefix = mode === 'observe' ? 'observe ·' : ''

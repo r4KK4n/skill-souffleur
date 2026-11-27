@@ -352,3 +352,9 @@ test('Everywhere may still change a standard skill that a block also redefines',
   assert.equal(gone.note, undefined)
   assert.deepEqual((gone.config as { skills: unknown }).skills, {})
 })
+
+test('a prototype name is not taken for a skill of the standard block', () => {
+  const cfg = { skills: {}, projects: { '/w': { skills: { toString: { always: true } } } } }
+  const r = applyChoice(cfg, 'toString', 'start')
+  assert.match(r.note ?? '', /already a skill of a project block/)
+})

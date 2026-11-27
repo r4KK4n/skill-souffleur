@@ -170,7 +170,7 @@ function heal(l: Loaded, held: Session): Session {
   const s = normalizeSession(held)
   const want = [...new Set([...Object.keys(l.config.skills), ...ruleSkillNames(l.config)])]
   const have = Object.keys(s.ledger)
-  if (want.length === have.length && want.every((name) => name in s.ledger)) return s
+  if (want.length === have.length && want.every((name) => Object.hasOwn(s.ledger, name))) return s
   return decide(l.config, s, { type: 'config', now: now(), errors: l.errors }).session
 }
 
@@ -454,32 +454,32 @@ const SESSION_TTL_MS = 14 * 86_400_000
 /** Stored session copies kept, the one in use included. */
 const SESSION_KEEP = 50
 
+/** Plugin store prefix of the per-skill-version read records; they follow the same age rule as the session copies. */
+const HASH_PREFIX = hashKey('')
+
 /**
- * Housekeeping at session start: removes `session:*` entries of the plugin store whose copy was stored more than 14 days
- * ago, then the oldest ones beyond 50. A copy without a timestamp (stored before this existed) gets one now and goes after 14 days. Never touches the
- * session in use or other keys. A failure here is not an error of the session: the next start tries again.
+ * Housekeeping at session start, run in the background: removes `session:*` and `souffleur:skill-hash:*` entries of the plugin store whose copy was stored more than 14 days
+ * ago, then the oldest session copies beyond 50. A copy without a timestamp (stored before this existed) gets one now and goes after 14 days. Never touches the
+ * session in use or other keys. The caller logs a failure to debug: it is not an error of the session, and the next start tries again.
  */
 async function pruneStore($: Dollar, currentId: string): Promise<void> {
-  try {
-    const keys: string[] = await $.store.keys()
-    const kept: { key: string; touched: number }[] = []
-    for (const key of keys) {
-      if (!key.startsWith('session:') || key === `session:${currentId}`) continue
-      const copy: unknown = await $.store.get(key)
-      const touched = typeof copy === 'object' && copy !== null ? (copy as { touched?: unknown }).touched : undefined
-      if (typeof touched === 'number') {
-        if (now() - touched > SESSION_TTL_MS) await $.store.delete(key)
-        else kept.push({ key, touched })
-      } else if (typeof copy === 'object' && copy !== null) {
-        await $.store.set(key, { ...copy, touched: now() })
-        kept.push({ key, touched: now() })
-      }
+  const keys: string[] = await $.store.keys()
+  const kept: { key: string; touched: number }[] = []
+  for (const key of keys) {
+    const isSession = key.startsWith('session:')
+    if (!(isSession || key.startsWith(HASH_PREFIX)) || key === `session:${currentId}`) continue
+    const copy: unknown = await $.store.get(key)
+    const touched = typeof copy === 'object' && copy !== null ? (copy as { touched?: unknown }).touched : undefined
+    if (typeof touched === 'number') {
+      if (now() - touched > SESSION_TTL_MS) await $.store.delete(key)
+      else if (isSession) kept.push({ key, touched })
+    } else if (typeof copy === 'object' && copy !== null) {
+      await $.store.set(key, { ...copy, touched: now() })
+      if (isSession) kept.push({ key, touched: now() })
     }
-    kept.sort((a, b) => b.touched - a.touched)
-    for (const { key } of kept.slice(SESSION_KEEP - 1)) await $.store.delete(key)
-  } catch {
-    // housekeeping only
   }
+  kept.sort((a, b) => b.touched - a.touched)
+  for (const { key } of kept.slice(SESSION_KEEP - 1)) await $.store.delete(key)
 }
 
 /** The fixed instruction of both classifier calls; the labels and the text go in the prompt. */
@@ -710,6 +710,53 @@ async function installedWithDescriptions($: Dollar): Promise<{ name: string; des
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 
+/** Collapses `.` and `..` segments of an absolute path, so a `../` escape is seen as the path it names. */
+function collapsePath(path: string): string {
+  const out: string[] = []
+  for (const part of path.split('/')) {
+    if (part === '' || part === '.') continue
+    if (part === '..') out.pop()
+    else out.push(part)
+  }
+  return `/${out.join('/')}`
+}
+
+const insideDir = (path: string, dir: string) => path === dir || path.startsWith(dir === '/' ? '/' : `${dir}/`)
+
+/**
+ * A project CLAUDE.md may import only files inside the given project roots, or `.md` files under `claudeDir`, by their real path too:
+ * a symlink out does not count. A stat that fails says nothing about where the path leads, so the import is skipped.
+ */
+async function importAllowed($: Dollar, target: string, roots: string[], claudeDir: string): Promise<boolean> {
+  const flat = collapsePath(target)
+  const okIn = (path: string, projectRoots: string[], claude: string) => projectRoots.some((r) => insideDir(path, r)) || (insideDir(path, claude) && /\.md$/i.test(path))
+  const flatRoots = roots.map(collapsePath)
+  const flatClaude = collapsePath(claudeDir)
+  if (!okIn(flat, flatRoots, flatClaude)) return false
+  let real: string | undefined
+  try {
+    real = (await $.fs.stat(flat, { resolve: true }))?.realPath
+  } catch (err) {
+    try {
+      $.ui.log(`import skipped: could not resolve ${flat}: ${message(err)}`, { to: 'debug' })
+    } catch {
+      // A surface without a log must not fail init or migrate.
+    }
+    return false
+  }
+  if (real === undefined) return true
+  const resolved = async (r: string) => {
+    const rr = (await $.fs.stat(r, { resolve: true }).catch(() => undefined))?.realPath
+    return rr === undefined ? undefined : collapsePath(rr)
+  }
+  const realRoots = [...flatRoots]
+  for (const r of roots) {
+    const rr = await resolved(r)
+    if (rr !== undefined) realRoots.push(rr)
+  }
+  return okIn(collapsePath(real), realRoots, (await resolved(claudeDir)) ?? flatClaude)
+}
+
 /**
  * The standing instructions to scan: user and project CLAUDE.md, the files a CLAUDE.md imports with `@path` (one level),
  * and the memory index of the project (named after the main repository root).
@@ -731,6 +778,7 @@ async function readStanding($: Dollar, l: Loaded, home: string, notes: string[])
       const target = ref.startsWith('/') ? ref : ref.startsWith('~/') ? `${home}/${ref.slice(2)}` : `${dir}/${ref.replace(/^\.\//, '')}`
       if (seen.has(target)) continue
       seen.add(target)
+      if (project && !(await importAllowed($, target, [l.root, l.tree, l.cwd], `${home}/.claude`))) continue
       const imported = await readOptional($, target, notes, home)
       if (imported !== undefined) files.push({ file: shownPath(home, target), text: imported, project })
     }
@@ -795,7 +843,7 @@ async function runInit($: Dollar, l0: Loaded, only?: string[]): Promise<string> 
   const installed = described.map((x) => x.name)
   const configured = Object.keys(config.skills)
   const hooks = findHookOverlaps(settings.value, configured, installed.filter((n) => !configured.includes(n)))
-  const reloadHooked = [...new Set(hooks.flatMap((o) => (o.skill !== undefined && installed.includes(o.skill) && !(o.skill in config.skills) ? [o.skill] : [])))]
+  const reloadHooked = [...new Set(hooks.flatMap((o) => (o.skill !== undefined && installed.includes(o.skill) && !(Object.hasOwn(config.skills, o.skill)) ? [o.skill] : [])))]
   const startHooked = new Set(hooks.flatMap((o) => (o.event === 'SessionStart' && o.skill !== undefined ? [o.skill] : [])))
   const passages = only === undefined ? findPassages(await readStanding($, l0, home, notes), configured, Infinity) : []
 
@@ -822,7 +870,7 @@ async function runInit($: Dollar, l0: Loaded, only?: string[]): Promise<string> 
   }
 
   // Skills of this project that nothing names yet: asked again here, for this project or everywhere.
-  const ownHere = new Set((await projectInstalled($)).filter((n) => !(n in config.skills) && !skip.includes(n)))
+  const ownHere = new Set((await projectInstalled($)).filter((n) => !(Object.hasOwn(config.skills, n)) && !skip.includes(n)))
   const plans: Plan[] = candidates(config, installed, reloadHooked, [...picks.map((x) => x.skill), ...ownHere], skip).filter((c) => only === undefined || only.includes(c.skill)).map(({ skill, source }) => {
     const current = currentChoice(config.skills[skill])
     const pick = picks.find((x) => x.skill === skill)
@@ -1351,7 +1399,7 @@ async function runBlock($: Dollar, l0: Loaded, verb: 'block' | 'unblock', name: 
     if (verb === 'block') {
       if (names.includes(name)) return refuse(`${name} is already blocked in ${root}.`)
       if (names.length >= MAX_LIST) return refuse(`the block of ${root} already has ${MAX_LIST} names, so nothing was written.`)
-      if (!(key in projects) && Object.keys(projects).length >= MAX_PROJECT_ROOTS) return refuse(`at most ${MAX_PROJECT_ROOTS} project blocks are read, so nothing was written.`)
+      if (!(Object.hasOwn(projects, key)) && Object.keys(projects).length >= MAX_PROJECT_ROOTS) return refuse(`at most ${MAX_PROJECT_ROOTS} project blocks are read, so nothing was written.`)
       names.push(name)
       block.block = names
     } else {
@@ -1398,7 +1446,7 @@ async function runProject($: Dollar, l: Loaded): Promise<string> {
   const notes = c.notes.filter((n) => !own.has(n.id))
   const rules = c.rules.filter((r) => !own.has(r.id))
   const off = [...offSkills, ...notes.filter((n) => !here(n.where)).map((n) => n.id), ...rules.filter((r) => !here(r.where)).map((r) => r.id)]
-  const mine = [...(p?.own ?? [])].map((n) => `${n in c.skills ? 'skill' : c.notes.some((x) => x.id === n) ? 'note' : 'rule'} ${n}`)
+  const mine = [...(p?.own ?? [])].map((n) => `${Object.hasOwn(c.skills, n) ? 'skill' : c.notes.some((x) => x.id === n) ? 'note' : 'rule'} ${n}`)
   const repo = Object.entries(c.skills).filter(([, r]) => r.from === 'project').map(([n]) => n)
   const lines = [`Souffleur: project ${root}`]
   if (blocked.length) lines.push(`Blocked here: ${blocked.join(', ')}`)
@@ -1460,7 +1508,7 @@ async function askOwnSkills($: Dollar, dialog: boolean): Promise<void> {
     return
   }
   if (configProblem(doc) || hasProjectKey(doc, l.root)) return
-  const names = (await projectInstalled($)).filter((n) => !(n in l.config.skills))
+  const names = (await projectInstalled($)).filter((n) => !(Object.hasOwn(l.config.skills, n)))
   if (!names.length) return
   const notice = () => void say($, l, `Souffleur: this project has ${names.length} skills not in your config. /souffleur init asks about them.`)
   if (!dialog) return notice()
@@ -1555,7 +1603,7 @@ async function stillUnnamed($: Dollar, l: Loaded, names: string[]): Promise<stri
   // The effective config (user file and trusted repository file), read fresh like the in-time path.
   loaded = undefined
   const fresh = (await current($)).l
-  return names.filter((n) => !(n in fresh.config.skills))
+  return names.filter((n) => !(Object.hasOwn(fresh.config.skills, n)))
 }
 
 /** At a turn end: runs the set-up a late `Set up now` asked for, if it still applies. True when it ran. */
@@ -1674,6 +1722,15 @@ async function askFirst($: Dollar, atTurnEnd = false): Promise<string | undefine
   const waiting = await withStoredDeclined($, session)
   const q = nextQuestion({ ...waiting, proposals: waiting.proposals.filter((p) => !timedOutAsk.has(p.hash)) })
   if (!q) return undefined
+  if (!interactive && lastPromptKind === 'sdk') {
+    // Nobody can answer a dialog in a headless run (Remote Control also reports not interactive, but its prompts are a person's), and a client that never answers would hold the turn end for two minutes per proposal.
+    if (atTurnEnd) {
+      noDialog = true
+      askStopped = true
+      noticeFirst($, l, session)
+    }
+    return undefined
+  }
   let label: unknown
   const asking = Promise.resolve().then(() => $.ui.ask(q.question, { options: q.options, header: 'Souffleur' }))
   try {
@@ -1691,7 +1748,7 @@ async function askFirst($: Dollar, atTurnEnd = false): Promise<string | undefine
       // The person closed the dialog: a skip. Nothing more is asked at turn end, and the model proposes no more.
       await markStopped($, { proposals: true, ...(atTurnEnd ? { ask: true } : {}) })
     } else if (atTurnEnd) {
-      // Nobody can answer a dialog here: show the proposal once and let a one-word reply answer it.
+      // A rejection that is no dismissal is not kept: show the proposal once and let a one-word reply answer it.
       // Only this process knows it: a session resumed in a client that can open a dialog asks again, and no stop is set.
       noDialog = true
       askStopped = true
@@ -1830,6 +1887,7 @@ async function learnFrom($: Dollar, a: LearnAction): Promise<void> {
     const l = await serial(async () => {
       const { l, session } = await current($)
       const stored = await $.store.get(key)
+      await refreshStamp($, key, stored)
       // A version whose proposals still wait in this session is not read again.
       if (!l.setUp || !interactive || session.proposals.some((p) => p.skillHash === hash) || !shouldRead(session, l.config, stored)) return undefined
       const count = (name: 'fails' | 'offers') => (typeof stored === 'object' && stored !== null && typeof (stored as Record<string, unknown>)[name] === 'number' ? (stored as Record<string, number>)[name]! : 0)
@@ -1863,7 +1921,7 @@ async function learnFrom($: Dollar, a: LearnAction): Promise<void> {
       })
     }
     // Done when nothing is left to ask; otherwise the version counts as offered, and done only once its proposals are answered.
-    if (!full) await $.store.set(key, queued.length === 0 ? { done: true } : { offers: offers + 1 })
+    if (!full) await $.store.set(key, queued.length === 0 ? { done: true, touched: now() } : { offers: offers + 1, touched: now() })
   } catch {
     if (claimed && hash !== undefined) {
       try {
@@ -1871,7 +1929,7 @@ async function learnFrom($: Dollar, a: LearnAction): Promise<void> {
         await serial(async () => {
           const { l, session } = await current($)
           await persist($, l, { ...session, skillReads: Math.max(0, (session.skillReads ?? 0) - 1) })
-          await $.store.set(hashKey(hash!), { fails: fails + 1 })
+          await $.store.set(hashKey(hash!), { fails: fails + 1, touched: now() })
         })
       } catch {
         // the version stays as it was
@@ -1889,9 +1947,21 @@ async function markVersionDone($: Dollar, before: Session, after: Session, hash:
   const version = before.proposals.find((q) => q.hash === hash)?.skillHash
   if (version === undefined || after.proposals.some((q) => q.skillHash === version)) return
   try {
-    await $.store.set(hashKey(version), { done: true })
+    await $.store.set(hashKey(version), { done: true, touched: now() })
   } catch {
     // the version stays offered and is read again next time, within the cap
+  }
+}
+
+/** A hash record in use keeps its age rule from running out: its stamp moves up when it is read, at most once a day. */
+async function refreshStamp($: Dollar, key: string, stored: unknown): Promise<void> {
+  if (typeof stored !== 'object' || stored === null) return
+  const touched = (stored as { touched?: unknown }).touched
+  if (typeof touched === 'number' && now() - touched < 86_400_000) return
+  try {
+    await $.store.set(key, { ...stored, touched: now() })
+  } catch {
+    // the stamp stays; a failed refresh only means the age rule counts from the older one
   }
 }
 
@@ -2123,7 +2193,15 @@ export const register: Register = (on) => {
         }
       })().catch(() => {})
     })
-    await pruneStore($, await $.session.id())
+    const pruneId = await $.session.id()
+    // Not awaited: a store with thousands of keys must not hold the session start.
+    void pruneStore($, pruneId).catch((err) => {
+      try {
+        $.ui.log(`store pruning failed: ${message(err)}`, { to: 'debug' })
+      } catch {
+        // a log line is a courtesy
+      }
+    })
     await safe($, 'installed', undefined, () => refreshInstalled($))
     await safe($, 'command.register', undefined, async () => {
       await $.command.register({ name: 'souffleur', description: 'Show which skills Souffleur keeps loaded', argumentHint: '[status | need <name> | drop <name> | pause | resume | init | migrate | rule <text> | review | accept <id> | decline <id> | block <name> | unblock <name> | project | update]' })

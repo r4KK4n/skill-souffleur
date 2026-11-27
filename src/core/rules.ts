@@ -139,7 +139,7 @@ export const CONTEXT_CAP = 2000
 export function contextNotes(config: Config, s: Session, root: string | undefined): { kept: Note[]; leftOut: Note[] } {
   const due = config.notes.filter((n) => {
     if (!appliesHere(n, root)) return false
-    if (n.need !== undefined) return n.need in s.needs && !s.needs[n.need]!.dormant && !s.notesSent.includes(n.id)
+    if (n.need !== undefined) return Object.hasOwn(s.needs, n.need) && !s.needs[n.need]!.dormant && !s.notesSent.includes(n.id)
     return s.freshNotes.includes(n.id)
   })
   const kept: Note[] = []

@@ -14,7 +14,7 @@ Stores, in Claude Code's plugin store on your machine:
 
 - `session:<id>`: the ledger, active needs, open duties, waiting proposals and errors of one session, stamped with the time it was stored. At session start Souffleur removes `session:*` entries that were not stored for 14 days, and keeps at most 50 copies.
 - `souffleur:declined`: the hashes of the last 200 proposals you declined, so they are not proposed again.
-- `souffleur:skill-hash:<hash>`: one small entry per skill version that was read, with its state (done, offered or failed). These stay.
+- `souffleur:skill-hash:<hash>`: one small entry per skill version that was read, with its state (done, offered or failed) and the time it was last stored or read (refreshed at most once a day). At session start Souffleur removes the ones not stored or read for 14 days, so a version you no longer use is read again if it comes back.
 
 Network:
 
