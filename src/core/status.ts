@@ -116,11 +116,11 @@ function baseLine(s: Session, mode: Mode, notesLeftOut: number, config?: Config,
   return prefix ? `${prefix} ${parts.join(', ')}` : parts.join(', ')
 }
 
-/** True when the band above the prompt has something to say: a skill restoring, stale or missing, or a degraded mod. */
+/** True when the band above the prompt has something to say: a skill restoring, stale or unavailable, or a degraded mod. A skill `not installed here` belongs to another project and does not count. */
 export function needsAttention(s: Session, config: Config, root?: string): boolean {
   if (s.errors.length) return true
   return Object.entries(s.ledger).some(([name, e]) => {
     if (config.skills[name] !== undefined && excludedIn(config.skills[name]!, root)) return false
-    return e.state === 'restoring' || e.state === 'stale' || e.state === 'unavailable' || e.state === 'not installed here'
+    return e.state === 'restoring' || e.state === 'stale' || e.state === 'unavailable'
   })
 }

@@ -1928,10 +1928,17 @@ async function reconnectTool($: Dollar): Promise<void> {
   if (announce) say($, await getLoaded($), 'Souffleur: tool reconnected.')
 }
 
+let lastBand: string | undefined // last band draw logged in this process, so the debug log skips repeats
+
 export const register: Register = (on) => {
   // On the terminal the status line says the same; any other surface gets one row while something needs attention.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const b = e.surface === 'terminal' || e.props.hasSurvey ? null : await read($, band)
+    const key = `band: surface=${e.surface} shown=${b ? 'true' : 'false'}`
+    if (key !== lastBand) {
+      lastBand = key
+      $.ui.log(key, { to: 'debug' })
+    }
     if (!b) return next(e)
     const { Box, Text } = $.ui.resolve(e)
     return h(Box, null, h(Text, { wrap: 'truncate' }, b.text)) as RenderElement
@@ -1941,6 +1948,7 @@ export const register: Register = (on) => {
     await safe($, 'session.start', undefined, async () => {
       loaded = undefined
       ownHandled = false
+      lastBand = undefined
       pendingSetUp = undefined
       backedUp = false // a session start is a fresh run: the first change saves a new backup
       const l = await getLoaded($)

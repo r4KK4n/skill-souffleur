@@ -4411,11 +4411,23 @@ test('on the desktop a restoring skill shows the status text', async ($, on) => 
   expect(await bandText($, 'desktop')).toBe(w.statuses.at(-1))
 })
 
-test('on the desktop a skill that is not installed here shows the status text', async ($, on) => {
+test('on the desktop a skill that is not installed here draws no band', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS }, { skills: ['pdf'] })
   await start($)
-  const text = await bandText($, 'desktop')
-  expect(text).toBe(w.statuses.at(-1))
+  expect(w.statuses.at(-1)).toMatch(/1 not installed here/)
+  expect(await bandText($, 'desktop')).toBeUndefined()
+})
+
+test('a band draw is logged to debug only when the surface or the shown value changes', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS }, { skills: ['pdf'] })
+  await start($)
+  await bandText($, 'desktop')
+  await bandText($, 'desktop')
+  await bandText($, 'terminal')
+  const lines = w.debugLogs.filter((l) => l.startsWith('band:'))
+  expect(lines.length).toBe(2)
+  expect(lines[0]).toBe('band: surface=desktop shown=false')
+  expect(lines[1]).toBe('band: surface=terminal shown=false')
 })
 
 test('on the desktop a session that is not set up shows the not-set-up text', async ($, on) => {
