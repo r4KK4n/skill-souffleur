@@ -40,6 +40,8 @@ const DECLINED_KEY = 'souffleur:declined'
 
 // Module variables start over on a reload; the config is read again by `session.start`, which a reload runs.
 let loaded: Loaded | undefined
+/** The stat fingerprint of the user and repository files when `loaded` was read; a prompt drops the cache when it changed. */
+let loadedSig: string | undefined
 /** The session this process stored last, with its revision. */
 let latest: Session | undefined
 /** Set by `session.start`: a person is at the prompt, and the propose tool is registered. */
@@ -103,6 +105,7 @@ async function getLoaded($: Dollar): Promise<Loaded> {
   const home = await $.env.get('HOME')
   const root = (await $.session.repo())?.root ?? (await $.session.cwd())
   const cwd: string = await $.session.cwd()
+  const sig = await configSig($, root) // before the reads: a save in between only costs one extra reload
   const userText = home ? await readOptional($, `${home}/.claude/souffleur.json`, errors, home) : undefined
   const projectText = await readOptional($, `${root}/.claude/souffleur.json`, errors, home)
   const parsed = parseConfig(userText === undefined ? undefined : stripBom(userText), projectText === undefined ? undefined : stripBom(projectText), root)
@@ -114,6 +117,7 @@ async function getLoaded($: Dollar): Promise<Loaded> {
     // outside a repository, or no detection: the working directory is the tree
   }
   loaded = { config: parsed.config, errors: [...errors, ...parsed.errors], root, tree, cwd, setUp: userText !== undefined }
+  loadedSig = sig
   return loaded
 }
 
@@ -838,66 +842,57 @@ async function runInit($: Dollar, l0: Loaded, only?: string[]): Promise<string> 
     return { need: { key: needKeyFor(p.skill), text: `The task calls for ${p.skill}.` }, fallback: true }
   }
 
-  /** Writes one answer through the user file: read again, apply, back up once, write. False when init must stop. */
+  /** Writes one answer through the user file's one edit path: read again, apply, back up once, write atomically. False when init must stop. */
   const writeAnswer = async (p: Plan, choice: LoadChoice, need: NeedText | undefined, scope: 'project' | 'everywhere'): Promise<boolean> => {
-    // Read again: the file may have changed since the scan, and earlier answers are already in it.
-    const now2 = await readState($, configPath, home)
-    if (now2.kind === 'error') {
-      done.push(`Stopped: could not read ${shown(configPath)} (${now2.why}). Nothing was written for ${p.skill}.`)
+    let applied: { pruned?: string[] } = {}
+    const e = await editUserFile(
+      $,
+      (doc) => {
+        const r =
+          scope === 'everywhere'
+            ? applyChoice(doc, p.skill, choice, need, projectSkills)
+            : choice === 'none'
+              ? ignoreInProject(doc, l0.root, p.skill)
+              : addSkillToProject(doc, l0.root, p.skill, choice === 'need' ? 'need' : choice, need)
+        applied = r
+        if (r.note) return new Refusal(r.note)
+        return doc === undefined && choice === 'none' ? doc : r.config
+      },
+      { missing: user.kind === 'ok' ? 'refuse' : 'allow' },
+    )
+    if (!e.ok) {
+      if (e.kind === 'refused') {
+        done.push(e.detail)
+        return true
+      }
+      const why =
+        e.kind === 'missing' ? `${shown(configPath)} was there at the start and is not now`
+        : e.kind === 'read' ? `could not read ${shown(configPath)} (${e.detail})`
+        : e.kind === 'json' ? `${shown(configPath)} is not valid JSON now (${e.detail})`
+        : e.kind === 'problem' ? `${shown(configPath)} cannot be edited because ${e.detail}`
+        : e.kind === 'changed' ? `${shown(configPath)} kept changing while it was written`
+        : `could not write ${shown(configPath)} (${e.detail})`
+      done.push(`Stopped: ${why}. Nothing was written for ${p.skill}.`)
       return false
     }
-    if (now2.kind === 'missing' && user.kind === 'ok') {
-      done.push(`Stopped: ${shown(configPath)} was there at the start and is not now. Nothing was written for ${p.skill}.`)
-      return false
-    }
-    let doc: unknown
-    if (now2.kind === 'ok') {
-      try {
-        doc = parseJson(now2.text)
-      } catch (err) {
-        done.push(`Stopped: ${shown(configPath)} is not valid JSON now (${message(err)}). Nothing was written for ${p.skill}.`)
-        return false
-      }
-      const problem = configProblem(doc)
-      if (problem) {
-        done.push(`Stopped: ${shown(configPath)} cannot be edited because ${problem}. Nothing was written for ${p.skill}.`)
-        return false
-      }
-    }
-    const r =
-      scope === 'everywhere'
-        ? applyChoice(doc, p.skill, choice, need, projectSkills)
-        : choice === 'none'
-          ? ignoreInProject(doc, l0.root, p.skill)
-          : addSkillToProject(doc, l0.root, p.skill, choice === 'need' ? 'need' : choice, need)
-    if (r.note) done.push(r.note)
     const label = choice === 'none' ? 'not watched' : CHOICE_LABEL[choice]
-    if (r.note || JSON.stringify(r.config) === JSON.stringify(doc) || (now2.kind === 'missing' && choice === 'none')) {
-      if (!r.note) {
-        done.push(`Kept ${p.skill}: ${label}. Nothing was written.`)
-        if (choice === 'injected') {
-          const line = await injectedLine(p.skill)
-          if (line) done.push(line)
-        }
+    if (!e.wrote) {
+      done.push(`Kept ${p.skill}: ${label}. Nothing was written.`)
+      if (choice === 'injected') {
+        const line = await injectedLine(p.skill)
+        if (line) done.push(line)
       }
       return true
     }
-    if (!backedUp && now2.kind === 'ok') {
-      await $.fs.write(`${configPath}.bak-${Date.now()}`, now2.text)
-      backedUp = true
-    }
-    await $.fs.write(configPath, `${JSON.stringify(r.config, null, 2)}\n`)
     wrote = true
     const need2 = choice === 'need' ? `for ${need?.text ?? 'its description'}` : choice === 'start' ? 'from the start' : choice === 'injected' ? 'as its plugin injects it' : ''
     setUp.push(choice === 'none' ? `${p.skill}: ${scope === 'project' ? 'ignored here' : 'not watched'}` : `${p.skill}: watched ${need2.replace(/\.$/, '')} ${scope === 'project' ? 'in this project' : 'everywhere'}`)
-    loaded = undefined // the session reads the new file on its next event
     done.push(`${p.skill}: ${label}.`)
     if (choice === 'injected') {
       const line = await injectedLine(p.skill)
       if (line) done.push(line)
     }
-    if (r.pruned?.length) done.push(`Removed the unused ${r.pruned.length === 1 ? 'need' : 'needs'} ${r.pruned.join(', ')}.`)
-  
+    if (applied.pruned?.length) done.push(`Removed the unused ${applied.pruned.length === 1 ? 'need' : 'needs'} ${applied.pruned.join(', ')}.`)
     return true
   }
   /** Skills a group answer already wrote or kept, and the skills it left for later. */
@@ -1201,10 +1196,120 @@ const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'obj
 const BLOCK_NAME = /^[A-Za-z0-9:_-]{1,64}$/
 let backedUp = false
 
+/** What a `change` returns to stop an edit: the text is the answer, and nothing is written. */
+class Refusal {
+  constructor(readonly text: string) {}
+}
+type EditFailure = { ok: false; kind: 'home' | 'read' | 'missing' | 'json' | 'problem' | 'refused' | 'changed' | 'write'; detail: string; text: string }
+type Edited = { ok: true; wrote: boolean } | EditFailure
+const EDIT_TRIES = 3
+const BACKUPS_KEPT = 3
+const same = (a: unknown, b: unknown) => Object.is(a, b) || JSON.stringify(a) === JSON.stringify(b)
+
+/** The one way the user file is written: `<file>.tmp-<time>-<random>` (its own name per write), parsed back, then moved over the file. */
+async function editUserFile(
+  $: Dollar,
+  change: (doc: unknown) => unknown,
+  opts: { missing?: 'allow' | 'refuse' } = {},
+): Promise<Edited> {
+  const home: string | undefined = await $.env.get('HOME')
+  const fail = (kind: EditFailure['kind'], detail: string, text: string): EditFailure => ({ ok: false, kind, detail, text })
+  if (!home) return fail('home', '', 'the home folder is unknown, so nothing was written')
+  const path = `${home}/.claude/souffleur.json`
+  // A symlinked config is written through: the copy goes next to, and over, what the link leads to.
+  const target = (await $.fs.stat(path, { resolve: true }).catch(() => undefined))?.realPath ?? path
+  const tmp = `${target}.tmp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const shown = shownPath(home, path)
+  const dropTmp = () => $.process.run(['rm', '-f', tmp], { timeoutMs: 10_000 }).catch(() => undefined)
+  for (let attempt = 0; attempt < EDIT_TRIES; attempt++) {
+    const st = await readState($, path, home)
+    if (st.kind === 'error') return fail('read', st.why, `could not read ${shown} (${st.why}), so nothing was written`)
+    if (st.kind === 'missing' && opts.missing !== 'allow') return fail('missing', '', 'there is no user file, so nothing was written')
+    let doc: unknown
+    if (st.kind === 'ok') {
+      try {
+        doc = parseJson(st.text)
+      } catch (err) {
+        const why = scrub(home, message(err))
+        return fail('json', why, `${shown} is not valid JSON (${why}), so nothing was written`)
+      }
+      const problem = configProblem(doc)
+      if (problem) return fail('problem', problem, `${shown} cannot be edited because ${problem}, so nothing was written`)
+    }
+    const next = change(doc)
+    if (next instanceof Refusal) return fail('refused', next.text, next.text)
+    if (same(next, doc)) return { ok: true, wrote: false }
+    const after = configProblem(next)
+    if (after) return fail('problem', after, `${shown} would not be a usable config because ${after}, so nothing was written`)
+    const text = `${JSON.stringify(next, null, 2)}\n`
+    try {
+      await $.fs.write(tmp, text)
+      const back: string = await $.fs.read(tmp)
+      parseJson(back)
+      if (back !== text) throw new Error('the temp copy does not read back as written')
+    } catch (err) {
+      await dropTmp()
+      const why = scrub(home, message(err))
+      return fail('write', why, `could not write ${shown} (${why})`)
+    }
+    // Read once more right before the move: another session or the user may have saved the file since. Then apply the change to what is there now.
+    const again = await readState($, path, home)
+    if (again.kind !== st.kind || (again.kind === 'ok' && st.kind === 'ok' && again.text !== st.text) || again.kind === 'error') {
+      await dropTmp()
+      continue
+    }
+    try {
+      if (!backedUp && st.kind === 'ok') {
+        await $.fs.write(`${path}.bak-${Date.now()}`, st.text)
+        backedUp = true
+      }
+      const moved = await $.process.run(['mv', '-f', tmp, target], { timeoutMs: 10_000 })
+      if (moved.exitCode !== 0) throw new Error(`mv exited ${moved.exitCode}${moved.stderr ? `: ${moved.stderr.trim()}` : ''}`)
+    } catch (err) {
+      await dropTmp()
+      const why = scrub(home, message(err))
+      return fail('write', why, `could not write ${shown} (${why})`)
+    }
+    loaded = undefined // the next event reads the new file
+    await pruneBackups($, `${home}/.claude`)
+    return { ok: true, wrote: true }
+  }
+  return fail('changed', '', `${shown} kept changing while it was written, so nothing was written`)
+}
+
+const USER_BACKUP = /^souffleur\.json\.bak-(\d{13})$/
+/** Keeps the newest `BACKUPS_KEPT` copies named `souffleur.json.bak-<13-digit ms>`; any other suffix is somebody's own copy and stays. */
+async function pruneBackups($: Dollar, dir: string): Promise<void> {
+  try {
+    const stamps = (await $.fs.list(dir)).flatMap((f: { name: string }) => {
+      const m = USER_BACKUP.exec(f.name)
+      return m ? [{ name: f.name, at: Number(m[1]) }] : []
+    })
+    const old = stamps.sort((a, b) => b.at - a.at).slice(BACKUPS_KEPT)
+    if (old.length) await $.process.run(['rm', '-f', ...old.map((f) => `${dir}/${f.name}`)], { timeoutMs: 10_000 })
+  } catch {
+    // an old copy left behind costs disk space only
+  }
+}
+
+/** The cheap fingerprint of a config file: changes when it is saved, by anyone. */
+async function fileSig($: Dollar, path: string): Promise<string> {
+  try {
+    const st = await $.fs.stat(path)
+    return `${st.mtimeMs}:${st.size}`
+  } catch {
+    return 'none'
+  }
+}
+/** The user file and the repository file together. */
+async function configSig($: Dollar, root: string): Promise<string> {
+  const home: string | undefined = await $.env.get('HOME')
+  return `${home ? await fileSig($, `${home}/.claude/souffleur.json`) : 'none'}|${await fileSig($, `${root}/.claude/souffleur.json`)}`
+}
+
 /**
- * `/souffleur block <name>` and `unblock <name>`: edits `projects[<this root>].block` in the user file.
- * Reads fresh, stops on a read error or a file that cannot be edited, keeps every other key, and saves
- * `souffleur.json.bak-<epoch ms>` before the first write of this process.
+ * `/souffleur block <name>` and `unblock <name>`: edits `projects[<this root>].block` in the user file through `editUserFile`
+ * (read fresh, retried on a concurrent save, atomic, one backup per process).
  */
 async function runBlock($: Dollar, l0: Loaded, verb: 'block' | 'unblock', name: string): Promise<string> {
   const home: string | undefined = await $.env.get('HOME')
@@ -1212,60 +1317,44 @@ async function runBlock($: Dollar, l0: Loaded, verb: 'block' | 'unblock', name: 
   if (name === '') return `Souffleur: usage /souffleur ${verb} <skill, note or rule name>.`
   if (!BLOCK_NAME.test(name) || name === '__proto__') return `Souffleur: ${JSON.stringify(name.slice(0, 80))} is not a valid name.`
   const path = `${home}/.claude/souffleur.json`
-  const st = await readState($, path, home)
-  if (st.kind === 'error') return `Souffleur: could not read ${shownPath(home, path)} (${st.why}), so nothing was written.`
-  if (st.kind === 'missing') return 'Souffleur: there is no ~/.claude/souffleur.json yet, so there is no standard to block in. Run /souffleur init.'
-  let doc: unknown
-  try {
-    doc = parseJson(st.text)
-  } catch (err) {
-    return `Souffleur: ${shownPath(home, path)} is not valid JSON (${scrub(home, message(err))}), so nothing was written.`
-  }
-  const problem = configProblem(doc)
-  if (problem) return `Souffleur: ${shownPath(home, path)} cannot be edited because ${problem}, so nothing was written.`
   const root = normRoot(l0.root)
   if (!/^(\/|[A-Za-z]:[\\/])/.test(root)) return 'Souffleur: the project root is unknown, so nothing was written.'
-  const base = doc as Record<string, unknown>
-  if (base.projects !== undefined && !isRecord(base.projects)) return `Souffleur: "projects" in ${shownPath(home, path)} is not an object, so nothing was written.`
-  const projects: Record<string, unknown> = { ...(base.projects as Record<string, unknown> | undefined) }
-  const key = Object.keys(projects).find((k) => normRoot(k) === root) ?? root
-  if (projects[key] !== undefined && !isRecord(projects[key])) return `Souffleur: the block for ${root} in ${shownPath(home, path)} is not an object, so nothing was written.`
-  const block: Record<string, unknown> = { ...(projects[key] as Record<string, unknown> | undefined) }
-  if (block.block !== undefined && !(Array.isArray(block.block) && block.block.every((n) => typeof n === 'string'))) return `Souffleur: "block" for ${root} is not a list of names, so nothing was written.`
-  const names: string[] = [...((block.block as string[] | undefined) ?? [])]
   const projectText = await readOptional($, `${l0.root}/.claude/souffleur.json`, [], home)
-  const std = standardNames(parseConfig(stripBom(st.text), projectText === undefined ? undefined : stripBom(projectText)).config)
-  if (!std.has(name) && !names.includes(name)) return `Souffleur: ${name} is not in your standard or this project's block.`
-  if (verb === 'block') {
-    if (names.includes(name)) return `Souffleur: ${name} is already blocked in ${root}.`
-    if (names.length >= MAX_LIST) return `Souffleur: the block of ${root} already has ${MAX_LIST} names, so nothing was written.`
-    if (!(key in projects) && Object.keys(projects).length >= MAX_PROJECT_ROOTS) return `Souffleur: at most ${MAX_PROJECT_ROOTS} project blocks are read, so nothing was written.`
-    names.push(name)
-    block.block = names
-  } else {
-    if (!names.includes(name)) return `Souffleur: ${name} is not blocked in ${root}.`
-    const left = names.filter((n) => n !== name)
-    if (left.length) block.block = left
-    else delete block.block
-  }
-  if (Object.keys(block).length) projects[key] = block
-  else delete projects[key]
-  const next: Record<string, unknown> = { ...base }
-  if (Object.keys(projects).length) next.projects = projects
-  else delete next.projects
-  // Read once more right before the write: another session or the user may have saved the file since.
-  const again = await readState($, path, home)
-  if (again.kind !== 'ok' || again.text !== st.text) return `Souffleur: ${shownPath(home, path)} changed since it was read, so nothing was written.`
-  try {
-    if (!backedUp) {
-      await $.fs.write(`${path}.bak-${Date.now()}`, st.text)
-      backedUp = true
+  const e = await editUserFile($, (doc) => {
+    const refuse = (text: string) => new Refusal(`Souffleur: ${text}`)
+    const base = doc as Record<string, unknown>
+    if (base.projects !== undefined && !isRecord(base.projects)) return refuse(`"projects" in ${shownPath(home, path)} is not an object, so nothing was written.`)
+    const projects: Record<string, unknown> = { ...(base.projects as Record<string, unknown> | undefined) }
+    const key = Object.keys(projects).find((k) => normRoot(k) === root) ?? root
+    if (projects[key] !== undefined && !isRecord(projects[key])) return refuse(`the block for ${root} in ${shownPath(home, path)} is not an object, so nothing was written.`)
+    const block: Record<string, unknown> = { ...(projects[key] as Record<string, unknown> | undefined) }
+    if (block.block !== undefined && !(Array.isArray(block.block) && block.block.every((n) => typeof n === 'string'))) return refuse(`"block" for ${root} is not a list of names, so nothing was written.`)
+    const names: string[] = [...((block.block as string[] | undefined) ?? [])]
+    const std = standardNames(parseConfig(JSON.stringify(doc), projectText === undefined ? undefined : stripBom(projectText)).config)
+    if (!std.has(name) && !names.includes(name)) return refuse(`${name} is not in your standard or this project's block.`)
+    if (verb === 'block') {
+      if (names.includes(name)) return refuse(`${name} is already blocked in ${root}.`)
+      if (names.length >= MAX_LIST) return refuse(`the block of ${root} already has ${MAX_LIST} names, so nothing was written.`)
+      if (!(key in projects) && Object.keys(projects).length >= MAX_PROJECT_ROOTS) return refuse(`at most ${MAX_PROJECT_ROOTS} project blocks are read, so nothing was written.`)
+      names.push(name)
+      block.block = names
+    } else {
+      if (!names.includes(name)) return refuse(`${name} is not blocked in ${root}.`)
+      const left = names.filter((n) => n !== name)
+      if (left.length) block.block = left
+      else delete block.block
     }
-    await $.fs.write(path, `${JSON.stringify(next, null, 2)}\n`)
-  } catch (err) {
-    return `Souffleur: could not write ${shownPath(home, path)} (${scrub(home, message(err))}).`
+    if (Object.keys(block).length) projects[key] = block
+    else delete projects[key]
+    const next: Record<string, unknown> = { ...base }
+    if (Object.keys(projects).length) next.projects = projects
+    else delete next.projects
+    return next
+  })
+  if (!e.ok) {
+    if (e.kind === 'missing') return 'Souffleur: there is no ~/.claude/souffleur.json yet, so there is no standard to block in. Run /souffleur init.'
+    return e.kind === 'refused' ? e.text : `Souffleur: ${e.text}.`
   }
-  loaded = undefined // the next event reads the new block
   await apply($, (l) => ({ type: 'config', now: now(), errors: l.errors }))
   return verb === 'block' ? `Souffleur: ${name} blocked in ${root}; other projects keep it.` : `Souffleur: ${name} unblocked in ${root}; the standard applies here again.`
 }
@@ -1315,42 +1404,6 @@ async function projectInstalled($: Dollar): Promise<string[]> {
   } catch {
     return []
   }
-}
-
-/**
- * Changes the user file through the same careful path as `block`: read fresh, stop on a read error or a file that cannot be edited,
- * read again right before the write, save `souffleur.json.bak-<epoch ms>` before the first write of a session, then reload.
- */
-async function editUserFile($: Dollar, change: (doc: unknown) => { config: unknown; note?: string }): Promise<{ ok: boolean; text: string }> {
-  const home: string | undefined = await $.env.get('HOME')
-  if (!home) return { ok: false, text: 'the home folder is unknown, so nothing was written' }
-  const path = `${home}/.claude/souffleur.json`
-  const st = await readState($, path, home)
-  if (st.kind !== 'ok') return { ok: false, text: st.kind === 'error' ? `could not read ${shownPath(home, path)} (${st.why}), so nothing was written` : 'there is no user file, so nothing was written' }
-  let doc: unknown
-  try {
-    doc = parseJson(st.text)
-  } catch (err) {
-    return { ok: false, text: `${shownPath(home, path)} is not valid JSON (${scrub(home, message(err))}), so nothing was written` }
-  }
-  const problem = configProblem(doc)
-  if (problem) return { ok: false, text: `${shownPath(home, path)} cannot be edited because ${problem}, so nothing was written` }
-  const r = change(doc)
-  if (r.note) return { ok: false, text: r.note }
-  const again = await readState($, path, home)
-  if (again.kind !== 'ok' || again.text !== st.text) return { ok: false, text: `${shownPath(home, path)} changed since it was read, so nothing was written` }
-  try {
-    if (!backedUp) {
-      await $.fs.write(`${path}.bak-${Date.now()}`, st.text)
-      backedUp = true
-    }
-    await $.fs.write(path, `${JSON.stringify(r.config, null, 2)}\n`)
-  } catch (err) {
-    return { ok: false, text: `could not write ${shownPath(home, path)} (${scrub(home, message(err))})` }
-  }
-  loaded = undefined
-  await apply($, (l) => ({ type: 'config', now: now(), errors: l.errors }))
-  return { ok: true, text: 'written' }
 }
 
 /** Set once the question about the project's own skills was handled in this session. */
@@ -1440,10 +1493,11 @@ async function actOnOwnAnswer($: Dollar, l: Loaded, names: string[], answer: unk
   const r = await editUserFile($, (d) => {
     let config: unknown = d
     for (const name of kept) config = ignoreInProject(config, l.root, name).config
-    return { config }
+    return config
   })
   if (!r.ok) say($, l, `Souffleur: ${r.text}.`)
   else {
+    if (r.wrote) await apply($, (l1) => ({ type: 'config', now: now(), errors: l1.errors }))
     say($, l, `Souffleur: ${kept.length} skill${kept.length === 1 ? '' : 's'} ignored in this project.`)
     if (names.length > kept.length) say($, l, `Souffleur: the ignored list of this project holds ${MAX_LIST} names; ${names.length - kept.length} skills stay unasked. /souffleur init asks about them.`)
   }
@@ -1506,34 +1560,16 @@ async function runPendingSetUp($: Dollar): Promise<boolean> {
 }
 
 /**
- * Adds one entry to the user file. Same care as `init`: read fresh, stop on a read error or a file that cannot be edited,
- * write only now (the caller has the user's yes), keep every other key. Returns the user-facing line.
+ * Adds one entry to the user file through `editUserFile`: write only now (the caller has the user's yes), keep every other key. Returns the user-facing line.
  */
 async function writeEntry($: Dollar, kind: 'rule' | 'note', entry: Rule | Note): Promise<{ ok: boolean; text: string; wrote?: boolean }> {
+  const e = await editUserFile($, (doc) => {
+    const r = addEntry(doc, kind, entry)
+    return r.note ? new Refusal(r.note) : r.config
+  }, { missing: 'allow' })
+  if (!e.ok) return { ok: e.kind === 'refused', text: e.text }
   const home: string | undefined = await $.env.get('HOME')
-  if (!home) return { ok: false, text: 'the home folder is unknown, so nothing was written' }
-  const path = `${home}/.claude/souffleur.json`
-  const st = await readState($, path, home)
-  if (st.kind === 'error') return { ok: false, text: `could not read ${shownPath(home, path)} (${st.why}), so nothing was written` }
-  let doc: unknown
-  if (st.kind === 'ok') {
-    try {
-      doc = parseJson(st.text)
-    } catch (err) {
-      return { ok: false, text: `${shownPath(home, path)} is not valid JSON (${scrub(home, message(err))}), so nothing was written` }
-    }
-    const problem = configProblem(doc)
-    if (problem) return { ok: false, text: `${shownPath(home, path)} cannot be edited because ${problem}, so nothing was written` }
-  }
-  const r = addEntry(doc, kind, entry)
-  if (r.note) return { ok: true, text: r.note }
-  // Read once more right before the write: another session or the user may have saved the file since.
-  const again = await readState($, path, home)
-  if (again.kind === 'error' || again.kind !== st.kind || (again.kind === 'ok' && st.kind === 'ok' && again.text !== st.text)) {
-    return { ok: false, text: `${shownPath(home, path)} changed since it was read, so nothing was written` }
-  }
-  await $.fs.write(path, `${JSON.stringify(r.config, null, 2)}\n`)
-  return { ok: true, wrote: true, text: `added ${kind} ${entry.id} to ${shownPath(home, path)}${entry.where === undefined ? '' : ` for ${entry.where}`}` }
+  return { ok: true, wrote: true, text: `added ${kind} ${entry.id} to ${shownPath(home, `${home}/.claude/souffleur.json`)}${entry.where === undefined ? '' : ` for ${entry.where}`}` }
 }
 
 /** The session after a change the core has no event for: read, change, store. */
@@ -2144,6 +2180,12 @@ export const register: Register = (on) => {
     if (fromUser) lastPromptKind = e.origin?.kind
     personTurn = fromUser || (e.command !== undefined && isUserOrigin(e))
     lastPromptCommand = e.command !== undefined
+    // A hand edit or another session's save: read the files again before this prompt is judged.
+    await safe($, 'config.reload', undefined, async () => {
+      if (!loaded || (await configSig($, loaded.root)) === loadedSig) return
+      loaded = undefined
+      await apply($, (l) => ({ type: 'config', now: now(), errors: l.errors }))
+    })
     // An end event can be lost (a failed update, a reload that kept the state): the engine's own list names the runs that are over.
     // A run the list never names (a workflow's agent) stays live. No run to check, or a list that does not answer in time: nothing is pruned.
     await safe($, 'agent.prune', undefined, async () => {
