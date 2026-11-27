@@ -2,6 +2,12 @@
 
 The reference for `~/.claude/souffleur.json` (the user file) and a project's `.claude/souffleur.json`. The [README](../README.md) has the quick start. For how the parts work together, see [design.md](design.md).
 
+## Where the user file lives
+
+The user file sits in your Claude folder: `~/.claude` (`%USERPROFILE%\.claude` on Windows, where `HOME` is not set), or the folder named by `CLAUDE_CONFIG_DIR` when that is set. Souffleur reads and writes `settings.json`, `CLAUDE.md`, the memory index, `plugins/installed_plugins.json` and its own backups in the same folder.
+
+If you set `CLAUDE_CONFIG_DIR` after you already had a file in `~/.claude`, and `<CLAUDE_CONFIG_DIR>/souffleur.json` does not exist, Souffleur keeps using `~/.claude/souffleur.json` so your setup does not disappear. `/souffleur` then shows once per session: `Config: using ~/.claude/souffleur.json; CLAUDE_CONFIG_DIR is <dir>. Move the file there to follow it.` Souffleur never moves or copies the file itself. Once `<CLAUDE_CONFIG_DIR>/souffleur.json` exists, it wins and the old file is ignored.
+
 ## Skills and needs
 
 A skill entry says when Souffleur needs it. A need is a kind of work, named by you, that a skill serves (for example `prose` for writing). A gate holds back a step, such as a file write, until the skill is loaded. A duty requires evidence after a step, such as a detector run. The classifier is the small model that Claude Code runs for Souffleur. Each prompt sends it at most 2,000 characters (the first 1,500 and the last 500), and it is not called, after three failures in a row, for the next 10 prompts.

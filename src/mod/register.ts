@@ -26,7 +26,7 @@ import { isFromUser, isUserOrigin, presentArgs, toolFields } from './map.ts'
 // The hooks' `$` is the engine interface; the adapter calls only documented members.
 type Dollar = any
 /** `root` is the main repository root (what `where` names), `tree` the session's own working tree (what globs are relative to). */
-type Loaded = { config: Config; errors: string[]; root: string; tree: string; cwd: string; setUp: boolean }
+type Loaded = { config: Config; errors: string[]; root: string; tree: string; cwd: string; setUp: boolean; legacy?: string }
 
 const REF = { plugin: 'skill-souffleur', key: 'session' } as const
 /** What the band above the prompt shows: the status text, or null while nothing needs attention. */
@@ -74,9 +74,65 @@ const message = (err: unknown) => (err instanceof Error ? err.message : String(e
 
 const stripBom = (text: string) => text.replace(/^\uFEFF/, '')
 const parseJson = (text: string): unknown => JSON.parse(stripBom(text))
-const shownPath = (home: string | undefined, path: string) => (home && path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path)
+const dropSlash = (p: string) => p.replace(/[\\/]+$/, '') || p
+/** The home folder as written with `\` (Windows) and with `/`, without a trailing separator. */
+const homeForms = (home: string): string[] => [...new Set([dropSlash(home), dropSlash(home).replace(/\\/g, '/')])]
+const shownPath = (home: string | undefined, path: string) => {
+  for (const h of home ? homeForms(home) : []) {
+    if (path.startsWith(`${h}/`) || path.startsWith(`${h}\\`)) return `~${path.slice(h.length)}`
+  }
+  return path
+}
 /** An error text with the home folder written as `~`. */
-const scrub = (home: string | undefined, text: string) => (home ? text.split(home).join('~') : text)
+const scrub = (home: string | undefined, text: string) => (home ? homeForms(home).reduce((t, h) => t.split(h).join('~'), text) : text)
+
+/** The home folder: `HOME`, or `USERPROFILE` where there is no `HOME` (Windows). */
+async function homeOf($: Dollar): Promise<string | undefined> {
+  return (await $.env.get('HOME').catch(() => undefined)) || (await $.env.get('USERPROFILE').catch(() => undefined)) || undefined
+}
+
+/**
+ * The user's Claude folder. The mod API has no accessor for it (checked against the 2.1.332 typings), so this is
+ * `CLAUDE_CONFIG_DIR` when set, else `<home>/.claude`. Every path under the user's folder is built from this.
+ */
+async function userDir($: Dollar): Promise<string | undefined> {
+  const cfg: string | undefined = await $.env.get('CLAUDE_CONFIG_DIR').catch(() => undefined)
+  if (cfg?.trim()) return dropSlash(cfg.trim())
+  const home = await homeOf($)
+  return home ? `${dropSlash(home)}/.claude` : undefined
+}
+
+/** The user file as shown to the person (`~` for the home folder), for texts that name it. */
+async function shownUserFile($: Dollar): Promise<string> {
+  const uc = await userConfig($)
+  return uc ? shownPath(await homeOf($), uc.path) : '~/.claude/souffleur.json'
+}
+
+const dirOf = (path: string) => path.slice(0, Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')))
+const fileExists = async ($: Dollar, path: string): Promise<boolean> => {
+  try {
+    return Boolean(await $.fs.exists(path))
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The user file: `<userDir>/souffleur.json`. When `CLAUDE_CONFIG_DIR` is set, that file is missing and `~/.claude/souffleur.json`
+ * exists, the legacy file is used (`legacy` names the config folder it should move to). Souffleur never moves or copies it.
+ */
+async function userConfig($: Dollar): Promise<{ path: string; dir: string; legacy?: string } | undefined> {
+  const dir = await userDir($)
+  if (!dir) return undefined
+  const path = `${dir}/souffleur.json`
+  const cfg: string | undefined = await $.env.get('CLAUDE_CONFIG_DIR').catch(() => undefined)
+  const home = await homeOf($)
+  if (cfg?.trim() && home) {
+    const old = `${dropSlash(home)}/.claude/souffleur.json`
+    if (old !== path && !(await fileExists($, path)) && (await fileExists($, old))) return { path: old, dir, legacy: dir }
+  }
+  return { path, dir }
+}
 
 async function readOptional($: Dollar, path: string, errors: string[], home?: string): Promise<string | undefined> {
   try {
@@ -102,11 +158,12 @@ async function readState($: Dollar, path: string, home: string): Promise<FileSta
 async function getLoaded($: Dollar): Promise<Loaded> {
   if (loaded) return loaded
   const errors: string[] = []
-  const home = await $.env.get('HOME')
+  const home = await homeOf($)
+  const uc = await userConfig($)
   const root = (await $.session.repo())?.root ?? (await $.session.cwd())
   const cwd: string = await $.session.cwd()
   const sig = await configSig($, root) // before the reads: a save in between only costs one extra reload
-  const userText = home ? await readOptional($, `${home}/.claude/souffleur.json`, errors, home) : undefined
+  const userText = uc ? await readOptional($, uc.path, errors, home) : undefined
   const projectText = await readOptional($, `${root}/.claude/souffleur.json`, errors, home)
   const parsed = parseConfig(userText === undefined ? undefined : stripBom(userText), projectText === undefined ? undefined : stripBom(projectText), root)
   let tree = cwd
@@ -116,7 +173,7 @@ async function getLoaded($: Dollar): Promise<Loaded> {
   } catch {
     // outside a repository, or no detection: the working directory is the tree
   }
-  loaded = { config: parsed.config, errors: [...errors, ...parsed.errors], root, tree, cwd, setUp: userText !== undefined }
+  loaded = { config: parsed.config, errors: [...errors, ...parsed.errors], root, tree, cwd, setUp: userText !== undefined, ...(uc?.legacy === undefined ? {} : { legacy: uc.legacy }) }
   loadedSig = sig
   return loaded
 }
@@ -289,9 +346,10 @@ async function realOf($: Dollar, path: string): Promise<string> {
 
 /** True when Claude Code owns the plugin root: its real path lies under the real `<user config dir>/plugins/` or equals the real path of an `installPath` in `installed_plugins.json`. A missing or unreadable file means no ownership found; an unknown home folder counts as owned (fail safe: no install). */
 async function ownedByMarketplace($: Dollar): Promise<boolean> {
-  const home = await $.env.get('HOME').catch(() => undefined)
-  if (!home) return true
-  const plugins = `${collapsePath(home)}/.claude/plugins`
+  const dir = await userDir($)
+  // collapsePath reads `/` only: a Windows-style folder cannot be compared, so it counts as owned (no install).
+  if (!dir || dir.includes('\\')) return true
+  const plugins = `${collapsePath(dir)}/plugins`
   const realPlugins = await realOf($, plugins)
   const roots = new Set([collapsePath($.plugin.root), await realOf($, $.plugin.root)])
   if ([...roots].some((r) => underDir(r, plugins) || underDir(r, realPlugins))) return true
@@ -622,6 +680,10 @@ const TOTAL_KEY = 'modelUseTotal'
 
 const isUse = (v: unknown): v is ModelUse => typeof v === 'object' && v !== null && typeof (v as ModelUse).calls === 'number' && typeof (v as ModelUse).usd === 'number'
 
+/** The session id that was told the legacy config line, so it is said once per session. */
+let legacyTold: string | undefined
+const legacyLine = (cfgDir: string) => `Config: using ~/.claude/souffleur.json; CLAUDE_CONFIG_DIR is ${cfgDir}. Move the file there to follow it.`
+
 /** The small-model count over all sessions; undefined when none is stored or the store fails. */
 async function readTotal($: Dollar): Promise<ModelUse | undefined> {
   try {
@@ -735,12 +797,12 @@ async function refreshInstalled($: Dollar): Promise<void> {
  * `hooks/hooks.json` and the hooks declared in `plugin.json`. `mentions`: a hook command names the skill. `none` only
  * when every file could be read and none declares one; anything unsure is `unknown`.
  */
-async function pluginStartHooks($: Dollar, home: string, skill: string): Promise<StartHooks> {
+async function pluginStartHooks($: Dollar, dir: string, skill: string): Promise<StartHooks> {
   const plugin = skill.split(':')[0]!
   const bareName = skill.split(':').pop()!
   const names = new RegExp(`(^|[^A-Za-z0-9])${bareName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^A-Za-z0-9]|$)`)
   try {
-    const listed: unknown = parseJson(await $.fs.read(`${home}/.claude/plugins/installed_plugins.json`))
+    const listed: unknown = parseJson(await $.fs.read(`${dir}/plugins/installed_plugins.json`))
     const plugins = (listed as { plugins?: Record<string, { installPath?: unknown }[]> }).plugins ?? {}
     const dirs = Object.entries(plugins)
       .filter(([key]) => key.split('@')[0] === plugin)
@@ -893,16 +955,16 @@ async function importAllowed($: Dollar, target: string, roots: string[], claudeD
  * The standing instructions to scan: user and project CLAUDE.md, the files a CLAUDE.md imports with `@path` (one level),
  * and the memory index of the project (named after the main repository root).
  */
-async function readStanding($: Dollar, l: Loaded, home: string, notes: string[]): Promise<{ file: string; text: string; project: boolean }[]> {
+async function readStanding($: Dollar, l: Loaded, home: string, claudeDir: string, notes: string[]): Promise<{ file: string; text: string; project: boolean }[]> {
   const slug = l.root.replace(/[^A-Za-z0-9]/g, '-')
-  const claudeMds = [...new Set([`${home}/.claude/CLAUDE.md`, `${l.root}/CLAUDE.md`, `${l.cwd}/CLAUDE.md`])]
+  const claudeMds = [...new Set([`${claudeDir}/CLAUDE.md`, `${l.root}/CLAUDE.md`, `${l.cwd}/CLAUDE.md`])]
   const files: { file: string; text: string; project: boolean }[] = []
   const seen = new Set<string>()
   for (const path of claudeMds) {
     const text = await readOptional($, path, notes, home)
     if (text === undefined) continue
     seen.add(path)
-    const project = path !== `${home}/.claude/CLAUDE.md`
+    const project = path !== `${claudeDir}/CLAUDE.md`
     files.push({ file: shownPath(home, path), text, project })
     const dir = path.slice(0, path.lastIndexOf('/'))
     for (const m of text.matchAll(/(?:^|\s)@([^\s@]+\.[A-Za-z0-9]+)/g)) {
@@ -910,12 +972,12 @@ async function readStanding($: Dollar, l: Loaded, home: string, notes: string[])
       const target = ref.startsWith('/') ? ref : ref.startsWith('~/') ? `${home}/${ref.slice(2)}` : `${dir}/${ref.replace(/^\.\//, '')}`
       if (seen.has(target)) continue
       seen.add(target)
-      if (project && !(await importAllowed($, target, [l.root, l.tree, l.cwd], `${home}/.claude`))) continue
+      if (project && !(await importAllowed($, target, [l.root, l.tree, l.cwd], claudeDir))) continue
       const imported = await readOptional($, target, notes, home)
       if (imported !== undefined) files.push({ file: shownPath(home, target), text: imported, project })
     }
   }
-  const memory = `${home}/.claude/projects/${slug}/memory/MEMORY.md`
+  const memory = `${claudeDir}/projects/${slug}/memory/MEMORY.md`
   const text = await readOptional($, memory, notes, home)
   if (text !== undefined) files.push({ file: shownPath(home, memory), text, project: false })
   return files
@@ -930,10 +992,11 @@ const withNotes = (text: string, notes: string[]) => (notes.length ? `${text}\n\
  */
 async function runInit($: Dollar, l0: Loaded, only?: string[]): Promise<string> {
   const notes: string[] = []
-  const home: string | undefined = await $.env.get('HOME')
-  if (!home) return 'Souffleur init: the home folder is unknown, so nothing was changed.'
-  const configPath = `${home}/.claude/souffleur.json`
-  const settingsPath = `${home}/.claude/settings.json`
+  const home: string | undefined = await homeOf($)
+  const uc = await userConfig($)
+  if (!home || !uc) return 'Souffleur init: the home folder is unknown, so nothing was changed.'
+  const configPath = uc.path
+  const settingsPath = `${uc.dir}/settings.json`
   const shown = (path: string) => shownPath(home, path)
   const stop = (why: string) => `Souffleur init: ${why}, so nothing was changed. Fix that and run /souffleur init again.`
 
@@ -977,7 +1040,7 @@ async function runInit($: Dollar, l0: Loaded, only?: string[]): Promise<string> 
   const hooks = findHookOverlaps(settings.value, configured, installed.filter((n) => !configured.includes(n)))
   const reloadHooked = [...new Set(hooks.flatMap((o) => (o.skill !== undefined && installed.includes(o.skill) && !(Object.hasOwn(config.skills, o.skill)) ? [o.skill] : [])))]
   const startHooked = new Set(hooks.flatMap((o) => (o.event === 'SessionStart' && o.skill !== undefined ? [o.skill] : [])))
-  const passages = only === undefined ? findPassages(await readStanding($, l0, home, notes), configured, Infinity) : []
+  const passages = only === undefined ? findPassages(await readStanding($, l0, home, uc.dir, notes), configured, Infinity) : []
 
   // One small-model call over the installed skills that have no need yet: unconfigured, hook-reloaded, or in the user file without one.
   // Skills whose description says they run only on an explicit request are not sent; they are advised against watching.
@@ -1017,7 +1080,7 @@ async function runInit($: Dollar, l0: Loaded, only?: string[]): Promise<string> 
   const setUp: string[] = []
 
   /** The line for an injected result: the plugin's SessionStart hooks decide which one. */
-  const injectedLine = async (skill: string) => injectedWarning(skill, await pluginStartHooks($, home, skill))
+  const injectedLine = async (skill: string) => injectedWarning(skill, await pluginStartHooks($, uc.dir, skill))
   const noDialog = async () => {
     const warnings: string[] = []
     for (const p of toAsk) {
@@ -1254,14 +1317,15 @@ async function runInit($: Dollar, l0: Loaded, only?: string[]): Promise<string> 
  */
 async function runMigrate($: Dollar, l: Loaded): Promise<string> {
   const notes: string[] = []
-  const home: string | undefined = await $.env.get('HOME')
-  if (!home) return 'Souffleur migrate: the home folder is unknown, so nothing was changed.'
-  const settingsPath = `${home}/.claude/settings.json`
+  const home: string | undefined = await homeOf($)
+  const dir = await userDir($)
+  if (!home || !dir) return 'Souffleur migrate: the home folder is unknown, so nothing was changed.'
+  const settingsPath = `${dir}/settings.json`
   const shown = (path: string) => shownPath(home, path)
   const settings = await readSettings($, settingsPath, home)
   if (settings.error) return `Souffleur migrate: ${settings.error}, so nothing was changed.`
 
-  const files = await readStanding($, l, home, notes)
+  const files = await readStanding($, l, home, dir, notes)
   const configured = Object.keys(l.config.skills)
   // Only skills of the user file count as watched: a project file's entry works in that project alone.
   const watched = Object.entries(l.config.skills).filter(([, r]) => r.from === 'user').map(([name]) => name)
@@ -1408,10 +1472,11 @@ async function editUserFile(
   change: (doc: unknown) => unknown,
   opts: { missing?: 'allow' | 'refuse' } = {},
 ): Promise<Edited> {
-  const home: string | undefined = await $.env.get('HOME')
+  const home: string | undefined = await homeOf($)
+  const uc = await userConfig($)
   const fail = (kind: EditFailure['kind'], detail: string, text: string): EditFailure => ({ ok: false, kind, detail, text })
-  if (!home) return fail('home', '', 'the home folder is unknown, so nothing was written')
-  const path = `${home}/.claude/souffleur.json`
+  if (!home || !uc) return fail('home', '', 'the home folder is unknown, so nothing was written')
+  const path = uc.path
   // A symlinked config is written through: the copy goes next to, and over, what the link leads to.
   const target = (await $.fs.stat(path, { resolve: true }).catch(() => undefined))?.realPath ?? path
   const tmp = `${target}.tmp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -1467,7 +1532,7 @@ async function editUserFile(
       return fail('write', why, `could not write ${shown} (${why})`)
     }
     loaded = undefined // the next event reads the new file
-    await pruneBackups($, `${home}/.claude`)
+    await pruneBackups($, dirOf(path))
     return { ok: true, wrote: true }
   }
   return fail('changed', '', `${shown} kept changing while it was written, so nothing was written`)
@@ -1499,8 +1564,8 @@ async function fileSig($: Dollar, path: string): Promise<string> {
 }
 /** The user file and the repository file together. */
 async function configSig($: Dollar, root: string): Promise<string> {
-  const home: string | undefined = await $.env.get('HOME')
-  return `${home ? await fileSig($, `${home}/.claude/souffleur.json`) : 'none'}|${await fileSig($, `${root}/.claude/souffleur.json`)}`
+  const uc = await userConfig($)
+  return `${uc ? await fileSig($, uc.path) : 'none'}|${await fileSig($, `${root}/.claude/souffleur.json`)}`
 }
 
 /**
@@ -1508,11 +1573,12 @@ async function configSig($: Dollar, root: string): Promise<string> {
  * (read fresh, retried on a concurrent save, atomic, one backup per process).
  */
 async function runBlock($: Dollar, l0: Loaded, verb: 'block' | 'unblock', name: string): Promise<string> {
-  const home: string | undefined = await $.env.get('HOME')
-  if (!home) return 'Souffleur: the home folder is unknown, so nothing was written.'
+  const home: string | undefined = await homeOf($)
+  const uc = await userConfig($)
+  if (!home || !uc) return 'Souffleur: the home folder is unknown, so nothing was written.'
   if (name === '') return `Souffleur: usage /souffleur ${verb} <skill, note or rule name>.`
   if (!BLOCK_NAME.test(name) || name === '__proto__') return `Souffleur: ${JSON.stringify(name.slice(0, 80))} is not a valid name.`
-  const path = `${home}/.claude/souffleur.json`
+  const path = uc.path
   const root = normRoot(l0.root)
   if (!/^(\/|[A-Za-z]:[\\/])/.test(root)) return 'Souffleur: the project root is unknown, so nothing was written.'
   const projectText = await readOptional($, `${l0.root}/.claude/souffleur.json`, [], home)
@@ -1548,7 +1614,7 @@ async function runBlock($: Dollar, l0: Loaded, verb: 'block' | 'unblock', name: 
     return next
   })
   if (!e.ok) {
-    if (e.kind === 'missing') return 'Souffleur: there is no ~/.claude/souffleur.json yet, so there is no standard to block in. Run /souffleur init.'
+    if (e.kind === 'missing') return `Souffleur: there is no ${await shownUserFile($)} yet, so there is no standard to block in. Run /souffleur init.`
     return e.kind === 'refused' ? e.text : `Souffleur: ${e.text}.`
   }
   await apply($, (l) => ({ type: 'config', now: now(), errors: l.errors }))
@@ -1562,8 +1628,9 @@ function standardNames(c: Config): Set<string> {
 
 /** `/souffleur project`: what applies here, as a few short lines. Empty lines are left out. */
 async function runProject($: Dollar, l: Loaded): Promise<string> {
-  const home: string | undefined = await $.env.get('HOME')
-  const st = home ? await readState($, `${home}/.claude/souffleur.json`, home) : ({ kind: 'missing' } as FileState)
+  const home: string | undefined = await homeOf($)
+  const uc = await userConfig($)
+  const st = home && uc ? await readState($, uc.path, home) : ({ kind: 'missing' } as FileState)
   const std = parseConfig(st.kind === 'ok' ? stripBom(st.text) : undefined, undefined).config
   const c = l.config
   const root = normRoot(l.root)
@@ -1629,9 +1696,10 @@ async function askOwnSkills($: Dollar, dialog: boolean): Promise<void> {
   const token = ++ownToken
   ownActed = false
   pendingSetUp = undefined
-  const home: string | undefined = await $.env.get('HOME')
-  if (!home) return
-  const st = await readState($, `${home}/.claude/souffleur.json`, home)
+  const home: string | undefined = await homeOf($)
+  const uc = await userConfig($)
+  if (!home || !uc) return
+  const st = await readState($, uc.path, home)
   if (st.kind !== 'ok') return
   let doc: unknown
   try {
@@ -1726,9 +1794,10 @@ async function lateOwnAnswer($: Dollar, l: Loaded, names: string[], answer: unkn
 
 /** The names that the freshly read user file still does not name, or none when the root has a block by now. */
 async function stillUnnamed($: Dollar, l: Loaded, names: string[]): Promise<string[]> {
-  const home: string | undefined = await $.env.get('HOME')
-  if (!home) return []
-  const st = await readState($, `${home}/.claude/souffleur.json`, home)
+  const home: string | undefined = await homeOf($)
+  const uc = await userConfig($)
+  if (!home || !uc) return []
+  const st = await readState($, uc.path, home)
   if (st.kind !== 'ok') return []
   const doc = parseJson(st.text)
   if (configProblem(doc) || hasProjectKey(doc, l.root)) return []
@@ -1764,8 +1833,9 @@ async function writeEntry($: Dollar, kind: 'rule' | 'note', entry: Rule | Note):
     return r.note ? new Refusal(r.note) : r.config
   }, { missing: 'allow' })
   if (!e.ok) return { ok: e.kind === 'refused', text: e.text }
-  const home: string | undefined = await $.env.get('HOME')
-  return { ok: true, wrote: true, text: `added ${kind} ${entry.id} to ${shownPath(home, `${home}/.claude/souffleur.json`)}${entry.where === undefined ? '' : ` for ${entry.where}`}` }
+  const home: string | undefined = await homeOf($)
+  const uc = await userConfig($)
+  return { ok: true, wrote: true, text: `added ${kind} ${entry.id} to ${shownPath(home, uc?.path ?? '~/.claude/souffleur.json')}${entry.where === undefined ? '' : ` for ${entry.where}`}` }
 }
 
 /** The session after a change the core has no event for: read, change, store. */
@@ -1804,7 +1874,7 @@ async function commitAnswerNow($: Dollar, hash: string, label: string): Promise<
     try {
       w = await writeEntry($, r.write.kind, r.write.entry)
     } catch (err) {
-      w = { ok: false, text: `writing failed (${scrub(await $.env.get('HOME'), message(err))}), so nothing was written` }
+      w = { ok: false, text: `writing failed (${scrub(await homeOf($), message(err))}), so nothing was written` }
     }
     if (!w.ok) {
       await persist($, l, session)
@@ -1819,7 +1889,7 @@ async function commitAnswerNow($: Dollar, hash: string, label: string): Promise<
     const kept = [...l2.config.rules, ...l2.config.notes].some((x) => x.id === r.write!.entry.id)
     if (w.wrote && !kept) {
       const why = l2.errors.filter((m) => m.startsWith('user config')).slice(-2).join('; ')
-      return `Souffleur: wrote ${r.write.entry.id} to the file, but the reader did not keep it${why ? ` (${why})` : ''}. Check ~/.claude/souffleur.json.`
+      return `Souffleur: wrote ${r.write.entry.id} to the file, but the reader did not keep it${why ? ` (${why})` : ''}. Check ${await shownUserFile($)}.`
     }
     return `Souffleur: ${w.text}.`
   }
@@ -1950,12 +2020,12 @@ async function answerShown($: Dollar, text: string): Promise<string | undefined>
     }
     const { l: l3, session: after } = await current($)
     const active = [...l3.config.rules, ...l3.config.notes].some((x) => x.id === id)
-    if (verdict === 'accept' && !after.proposals.some((x) => x.hash === hash) && !active) return `Souffleur: the user accepted proposal ${id}, but the reader did not keep the entry; it is not active. Tell the user to check ~/.claude/souffleur.json.`
+    if (verdict === 'accept' && !after.proposals.some((x) => x.hash === hash) && !active) return `Souffleur: the user accepted proposal ${id}, but the reader did not keep the entry; it is not active. Tell the user to check ${await shownUserFile($)}.`
     if (after.proposals.some((x) => x.hash === hash)) return `Souffleur: the user tried to ${verdict} proposal ${id}, but it could not be written; it stays queued. Do not retry it.`
     return `Souffleur: the user ${verdict === 'accept' ? 'accepted' : 'declined'} proposal ${id}; nothing else to do for it.`
   } catch {
     // Something failed during or after the write; the model must not assume either outcome.
-    return `Souffleur: the answer may not have been written; check ~/.claude/souffleur.json or /souffleur.`
+    return `Souffleur: the answer may not have been written; check ${await shownUserFile($)} or /souffleur.`
   }
 }
 
@@ -2680,10 +2750,16 @@ export const register: Register = (on) => {
         const total = await readTotal($)
         const update = await updateInfo($)
         const { actions, l } = await apply($, (l0) => ({ type: 'command', now: now(), args: e.args ?? '', root: l0.root, update, ...(total === undefined ? {} : { total }) }))
-        const text = actions.flatMap((a) => (a.kind === 'reply' ? [a.text] : []))[0]
+        let text = actions.flatMap((a) => (a.kind === 'reply' ? [a.text] : []))[0]
         const verb = (e.args ?? '').trim().split(/\s+/)[0] ?? ''
-        const note = '\n\nSouffleur is not set up: there is no ~/.claude/souffleur.json. Run /souffleur init to add one.'
-        return text !== undefined && !l.setUp && (verb === '' || verb === 'status') ? `${text}${note}` : text
+        const note = `\n\nSouffleur is not set up: there is no ${await shownUserFile($)}. Run /souffleur init to add one.`
+        const table = verb === '' || verb === 'status'
+        if (text !== undefined && table && l.legacy !== undefined && legacyTold !== (await $.session.id())) {
+          legacyTold = await $.session.id()
+          const cfgDir = shownPath(await homeOf($), l.legacy)
+          text = `${text}\n${legacyLine(cfgDir)}`
+        }
+        return text !== undefined && !l.setUp && table ? `${text}${note}` : text
       })
       if (reply !== undefined) return { text: reply }
       return next(e)

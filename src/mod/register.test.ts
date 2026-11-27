@@ -69,6 +69,8 @@ type Opts = {
   dirMtime?: Record<string, number>
   /** `$.env.get('HOME')` answers nothing. */
   noHome?: boolean
+  /** Other variables `$.env.get` answers by name, such as `CLAUDE_CONFIG_DIR` or `USERPROFILE`. */
+  env?: Record<string, string>
   /** `mv -f` exits 1 and moves nothing. */
   failMv?: boolean
   /** `$.fs.stat(path, { resolve: true })` says the path is a symlink to this target. */
@@ -241,7 +243,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
     return { value: undefined } as never
   })
   on('session.version', () => ({ value: { version: '2.1.332' } }))
-  on('env.get', () => ({ value: opts.noHome ? undefined : HOME }))
+  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? (opts.noHome ? undefined : HOME) : opts.env?.[e.name] }))
   on('process.hookEnv', () => ({ value: { CLAUDE_PLUGIN_DATA: '/data/souffleur' } }))
   on('fs.exists', (_, e) => ({ value: files[e.path] !== undefined && !hidden.has(e.path) }))
   on('fs.read', (_, e) => {
@@ -5425,3 +5427,98 @@ for (const [name, text] of [['missing', undefined], ['broken', '{not json'], ['w
     expect(w.stored.installKind).toBe('folder')
   })
 }
+
+// CLAUDE_CONFIG_DIR and Windows homes (#97)
+const CC = '/cc'
+const CC_USER = `${CC}/souffleur.json`
+const CC_PLUGINS = `${CC}/plugins/installed_plugins.json`
+
+test('config dir: init writes and scans under CLAUDE_CONFIG_DIR, not ~/.claude', async ($, on) => {
+  const hookSettings = JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'bash ~/.claude/hooks/writing-guide-reload.sh' }] }] } })
+  const w = world(on, { [CC_USER]: ALWAYS, [`${CC}/settings.json`]: hookSettings, [SETTINGS_PATH]: '{not json' }, { skills: SKILLS, proposals: PICKS, answers: ['When the task needs it', 'When the task needs it'], env: { CLAUDE_CONFIG_DIR: `${CC}/` } })
+  await start($)
+  const text = await run($, 'init')
+  expect(w.writes.some((x) => x.path === CC_USER)).toBe(true)
+  expect(w.writes.some((x) => x.path === USER_FILE)).toBe(false)
+  expect(text).toMatch(/hook/)
+  expect(text).not.toMatch(/not valid JSON/)
+})
+
+test('config dir: migrate reads CLAUDE_CONFIG_DIR/settings.json', async ($, on) => {
+  const settings = JSON.stringify({ hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'bash ~/.claude/hooks/rules-preload.sh' }] }] } })
+  const w = world(on, { [CC_USER]: ALWAYS, [`${CC}/settings.json`]: settings }, { skills: SKILLS, answers: ['Keep'], env: { CLAUDE_CONFIG_DIR: CC } })
+  await start($)
+  const text = await run($, 'migrate')
+  expect(w.asked[0]).toMatch(/does not watch|cannot tell which skill/)
+  expect(text).toMatch(/Kept/)
+})
+
+test('config dir: the legacy ~/.claude/souffleur.json is used and named once per session', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS }, { skills: SKILLS, env: { CLAUDE_CONFIG_DIR: CC } })
+  await start($)
+  const line = `Config: using ~/.claude/souffleur.json; CLAUDE_CONFIG_DIR is ${CC}. Move the file there to follow it.`
+  const first = await run($, '')
+  expect(first).toContain(line)
+  expect(first).not.toMatch(/is not set up/)
+  expect(await run($, '')).not.toContain(line)
+  w.setId(`legacy-${++nextId}`)
+  await start($)
+  expect(await run($, '')).toContain(line)
+})
+
+test('config dir: the legacy file is written in place, and nothing is copied into CLAUDE_CONFIG_DIR', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS }, { skills: SKILLS, env: { CLAUDE_CONFIG_DIR: CC } })
+  await start($)
+  await run($, 'block writing-guide')
+  expect(w.writes.some((x) => x.path === USER_FILE)).toBe(true)
+  expect(w.writes.some((x) => x.path.startsWith(`${CC}/`))).toBe(false)
+})
+
+test('config dir: a file under CLAUDE_CONFIG_DIR wins over the legacy one and no line is shown', async ($, on) => {
+  world(on, { [USER_FILE]: ALWAYS, [CC_USER]: ALWAYS }, { skills: SKILLS, env: { CLAUDE_CONFIG_DIR: CC } })
+  await start($)
+  expect(await run($, '')).not.toMatch(/Config: using/)
+})
+
+test('config dir: without CLAUDE_CONFIG_DIR no legacy line is shown', async ($, on) => {
+  world(on, { [USER_FILE]: ALWAYS }, { skills: SKILLS })
+  await start($)
+  expect(await run($, '')).not.toMatch(/Config: using/)
+})
+
+test('windows home: USERPROFILE stands in for a missing HOME and paths show with ~', async ($, on) => {
+  const home = 'C:\\Users\\me'
+  const w = world(on, { [`${home}/.claude/souffleur.json`]: ALWAYS }, { skills: SKILLS, noHome: true, env: { USERPROFILE: home } })
+  await start($)
+  const text = await run($, 'block writing-guide')
+  // The test engine resolves a drive path against the working folder, so the file reads as missing; the line shows the folder was found and written with `~`.
+  expect(text).toBe('Souffleur: there is no ~/.claude/souffleur.json yet, so there is no standard to block in. Run /souffleur init.')
+  expect(w.writes.length).toBe(0)
+})
+
+test('windows home: a trailing backslash on the home folder and mixed separators are scrubbed', async ($, on) => {
+  const home = 'C:\\Users\\me'
+  const w = world(on, { [`${home}/.claude/souffleur.json`]: '{not json' }, { skills: SKILLS, noHome: true, env: { USERPROFILE: `${home}\\` } })
+  await start($)
+  const text = await run($, 'block writing-guide')
+  expect(text).not.toContain('Users')
+  expect(w.writes.length).toBe(0)
+})
+
+test('update: ownership uses <userDir>/plugins under CLAUDE_CONFIG_DIR', async ($, on) => {
+  const w = world(on, { [CC_USER]: ALWAYS }, { stored: QUIET, run: gitRun(), env: { CLAUDE_CONFIG_DIR: CC } })
+  own(w)
+  const root = await learnRoot($, w)
+  const checkouts = ran(w, 'checkout').length
+  w.edit(CC_PLUGINS, JSON.stringify({ version: 2, plugins: { 'skill-souffleur@market': [{ scope: 'user', installPath: root }] } }))
+  expect(await runUser($, 'update')).toBe(MARKET_ANSWER)
+  expect(ran(w, 'checkout').length).toBe(checkouts)
+})
+
+test('update: a copy listed only under ~/.claude is not owned when CLAUDE_CONFIG_DIR points elsewhere', async ($, on) => {
+  const w = world(on, { [CC_USER]: ALWAYS }, { stored: QUIET, run: gitRun(), env: { CLAUDE_CONFIG_DIR: CC } })
+  own(w)
+  const root = await learnRoot($, w)
+  w.edit(OWNED, JSON.stringify({ version: 2, plugins: { 'skill-souffleur@market': [{ scope: 'user', installPath: root }] } }))
+  expect(await runUser($, 'update')).not.toBe(MARKET_ANSWER)
+})
