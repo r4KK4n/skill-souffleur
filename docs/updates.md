@@ -77,7 +77,7 @@ The setting `update` in `~/.claude/souffleur.json` (user file only):
 
 `updateSigner` is a public SSH key line (one line, starting with `ssh-`, `ecdsa-` or `sk-`). It is user file only. Without it, `auto` shows the notify line plus `Set updateSigner to let auto install it.` and installs nothing.
 
-`/souffleur update` installs the newest release now. With `updateSigner` set it verifies the tag first and refuses one that does not verify. Without `updateSigner` it installs the tag unsigned, because you asked, and the answer says `(unsigned; you asked for it)`. Running sessions pick the new version up at their next turn.
+`/souffleur update` installs the newest release now. With `updateSigner` set it verifies the tag first and refuses one that does not verify. Without `updateSigner` it installs the tag unsigned, because you asked, and the answer says `(unsigned; you asked for it)`. Running sessions pick the new version up at their next turn. An install happens only at a session start or through this command, and one session installs at a time: another session that finds a fresh lock skips (auto) or asks you to try again in a minute (command). The lock stops two installs at once but not a reload: a running session that hot-reloads during the few seconds of `git checkout` can load a mix of two versions, and a restart fixes it.
 
 Both ways change only a folder install. They leave the folder alone, and say why, when it has uncommitted changes or when its checkout is not exactly a `vX.Y.Z` tag (for example your own commits or a branch). In a marketplace install, `/souffleur update` answers `run /plugin update`.
 
