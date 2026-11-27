@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-11-27
+
 - A gate or skill rule on a skill that does not load now stops denying after three denials of that skill in one turn, once the model has tried to load it with a `Skill` call (#30). The calls pass and are listed under `Would have denied` as `released after 3 denials: <skill> did not load`, and one error shows through the degraded notice. A skill in state `unavailable` is no longer denied; it is only listed. The counters start again with each prompt of yours.
 
 - The status line now starts with the local time Souffleur last saw the session (`14:02 · observe · 9 loaded`), the last activity it saw: your prompts, the main session's tool calls and turn ends, and the session start (#41). A time that stops moving shows that the session is gone.
