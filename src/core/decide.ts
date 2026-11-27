@@ -676,6 +676,6 @@ function onCommand(config: Config, s: Session, e: Extract<CoreEvent, { type: 'co
       return reply({ ...s, needs: rest }, `Need ${arg} is off.`)
     }
     default:
-      return reply(s, 'Usage: /souffleur [status | need <name> | drop <name> | pause | resume | init | migrate | rule <text> | review | accept <id> | decline <id> | block <name> | unblock <name> | project]')
+      return reply(s, 'Usage: /souffleur [status | need <name> | drop <name> | pause | resume | init | migrate | rule <text> | review | accept <id> | decline <id> | block <name> | unblock <name> | project | update]')
   }
 }

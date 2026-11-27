@@ -92,6 +92,40 @@ cd ~/.claude/skills/skill-souffleur && git fetch --tags && git checkout <tag>
 
 Every running session picks up the new version, usually within half a minute. Use release tags only, never `main`: a release with a fault would reach every running session at once. To go back, check out the previous tag. A session that was already running when the folder was created does not see it; start that one once more.
 
+### Update notice and automatic update
+
+Souffleur looks up the newest release tag once a day, in the background, and shows one line at the next session start: `Souffleur v0.2.4 is out (you run 0.2.3). /souffleur update installs it.` (`/plugin update installs it.` for the marketplace install). Only tags shaped `vX.Y.Z` count, and only a newer one than the version you run. The look-up never delays a session start, and a failed one stays silent and is tried again after a day. `/souffleur` shows the version, the newest release, when it was checked and the setting.
+
+The setting `update` in `~/.claude/souffleur.json` (user file only):
+
+- `"notify"` (default): the line above.
+- `"auto"`: at session start, after the first line, Souffleur installs a newer release when its tag is signed by your key. It says `Souffleur updated to v0.2.4 (tag signed by your key).` A tag that is unsigned or signed by another key is not installed.
+- `"off"`: no look-up and no line.
+
+```json
+{
+  "update": "auto",
+  "updateSigner": "ssh-ed25519 AAAA... you@example"
+}
+```
+
+`updateSigner` is the public SSH key line (one line, starting with `ssh-`, `ecdsa-` or `sk-`) of the key that signs your releases. It is also user file only. Without it, `auto` shows the notify line plus `Set updateSigner to let auto install it.` and installs nothing.
+
+`/souffleur update` installs the newest release now. With `updateSigner` set it verifies the tag first and refuses one that does not verify. Without `updateSigner` it installs the tag unsigned, because you asked, and the answer says `(unsigned; you asked for it)`. Running sessions pick the new version up at their next turn.
+
+Both ways change only a folder install. They leave the folder alone, and say why, when it has uncommitted changes or when its checkout is not exactly a `vX.Y.Z` tag (for example your own commits or a branch). In a marketplace install, `/souffleur update` answers `run /plugin update`.
+
+How release tags are signed: the maintainer of a release signs the tag with an SSH key, and you list the matching public key as `updateSigner`.
+
+```
+git config gpg.format ssh
+git config user.signingkey ~/.ssh/<key>.pub
+git tag -s v0.2.4 -m "release 0.2.4"
+git verify-tag v0.2.4
+```
+
+Set these in the repository, not globally. For the check, `git verify-tag` needs an `allowed_signers` file; Souffleur writes one into its own data folder, with the line `souffleur namespaces="git" <updateSigner>`, each time it verifies.
+
 Use one install method, not both. While the marketplace plugin is installed, Claude Code does not load the folder at all: the installed plugin keeps the name `skill-souffleur`. The folder install keeps its own stored data. Copy the old store file if you want to keep it: in `~/.claude/plugins/store/`, the marketplace install writes `skill-souffleur_skill-souffleur-<hash>.json` and the folder install `skill-souffleur_skills-dir-<hash>.json`. Without the copy, skill texts are read again once, earlier proposals can come back (decline them again with `/souffleur decline <id>`), and a session resumed after the switch starts with an empty ledger.
 
 ## Quick start
@@ -126,6 +160,7 @@ If you edit a config file by hand, new entries apply after `/souffleur` (it read
 - `/souffleur` or `/souffleur status` shows the mode, one row per skill with its state, the active needs, open duties, and the calls that `observe` mode would have denied.
 - `/souffleur need <name>` turns a need on for this session, even when no prompt matched it. A need a prompt started ends by itself after 20 prompts in a row that did not match it (prompts of three words or fewer do not count); a need set this way ends only with `drop`.
 - `/souffleur drop <name>` turns a need off again.
+- `/souffleur update` installs the newest release now (folder install only; see [Update notice and automatic update](#update-notice-and-automatic-update)).
 - `/souffleur block <name>` and `/souffleur unblock <name>` turn a skill, note or rule of your standard off or on in this project only; other projects keep it. `/souffleur project` shows what applies here in a few lines: what is blocked, what is only for this project, what `notIn` or `where` turns off, and how many standard skills, notes and rules apply. The blocks live in the `projects` key of `~/.claude/souffleur.json`, keyed by the project's main folder (`"projects": { "/work/app": { "block": ["writing-guide"] } }`); the first change in a run saves `souffleur.json.bak-<time>` beside it.
 - Per-project blocks. The top level of `~/.claude/souffleur.json` is the standard for every project. To change it for one repository only, add a block under `projects`, keyed by the repository's main folder:
 
@@ -266,6 +301,7 @@ Costs:
 - [x] Short notices in the transcript for start, compaction and problems
 - [x] Release tags `v0.1.0` to `v0.2.3`
 - [x] Updates that reach running sessions (install from a folder)
+- [x] Update notice and signed automatic update
 
 ## Contributing
 

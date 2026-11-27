@@ -181,6 +181,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   })
   on('session.version', () => ({ value: { version: '2.1.332' } }))
   on('env.get', () => ({ value: HOME }))
+  on('process.hookEnv', () => ({ value: { CLAUDE_PLUGIN_DATA: '/data/souffleur' } }))
   on('fs.exists', (_, e) => ({ value: files[e.path] !== undefined && !hidden.has(e.path) }))
   on('fs.read', (_, e) => {
     if (failRead.includes(e.path) || opts.failRead?.includes(e.path)) throw new Error('EACCES: permission denied')
@@ -676,7 +677,7 @@ test('the /souffleur command shows its arguments in the typeahead', async ($, on
   registeredCommands.length = 0
   world(on, { [USER_FILE]: ALWAYS })
   await start($)
-  expect(JSON.stringify(registeredCommands)).toContain('"argumentHint":"[status | need <name> | drop <name> | pause | resume | init | migrate | rule <text> | review | accept <id> | decline <id> | block <name> | unblock <name> | project]"')
+  expect(JSON.stringify(registeredCommands)).toContain('"argumentHint":"[status | need <name> | drop <name> | pause | resume | init | migrate | rule <text> | review | accept <id> | decline <id> | block <name> | unblock <name> | project | update]"')
 })
 
 // ---- review fixes ----
@@ -3848,13 +3849,6 @@ test('update: the marketplace install is pointed to /plugin update', async ($, o
   expect(w.logs).toContain(`Souffleur ${NEWER} is out (you run ${PLUGIN_VERSION}). /plugin update installs it.`)
 })
 
-test('update: auto behaves like notify for now', async ($, on) => {
-  const w = world(on, { [USER_FILE]: JSON.stringify({ update: 'auto' }) }, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: runWith({ exitCode: 0, stdout: '' }) })
-  await start($)
-  await updateSettled()
-  expect(w.logs.some((l) => l.includes(`${NEWER} is out`))).toBe(true)
-})
-
 test('update: a stored latest that is not newer says nothing', async ($, on) => {
   const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now(), latest: `v${PLUGIN_VERSION}` } }, run: runWith({ exitCode: 0, stdout: '' }) })
   await start($)
@@ -3909,4 +3903,203 @@ test('update: a second start before the first detached work finishes does not sa
   await updateSettled()
   await new Promise((r) => setTimeout(r, 20))
   expect(w.logs.filter((l) => l.includes('is out')).length).toBe(1)
+})
+
+// ---- update install ----
+
+/** Waits until the detached update work has made no new git call for a while (the work is awaited through several engine round trips). */
+const settleUpdate = async (w: World) => {
+  await updateSettled()
+  for (let quiet = 0, seen = -1; quiet < 4; await new Promise((r) => setTimeout(r, 25))) {
+    quiet = w.runs.length === seen ? quiet + 1 : 0
+    seen = w.runs.length
+  }
+}
+
+let nextId = 0
+/** A session id of its own, so the module-level once-per-session guards of an earlier test do not apply. */
+const own = (w: World) => w.setId(`upd-${++nextId}`)
+
+const SIGNER = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA test@example'
+const AUTO_FILE = { [USER_FILE]: JSON.stringify({ update: 'auto', updateSigner: SIGNER }) }
+const AUTO_NO_SIGNER = { [USER_FILE]: JSON.stringify({ update: 'auto' }) }
+const OK = { exitCode: 0, stdout: '', stderr: '' }
+const STORED_NEWER = { installKind: 'folder', updateCheck: { at: Date.now(), latest: NEWER } }
+/** Nothing newer is known, so the session start does no install of its own. */
+const QUIET = { installKind: 'folder', updateCheck: { at: Date.now(), latest: 'v0.0.1' } }
+/** A folder install on a clean tag; `over` answers a git subcommand first. */
+const gitRun = (over: Record<string, { exitCode: number; stdout?: string } | Error> = {}): NonNullable<Opts['run']> => (argv) => {
+  const sub = ['rev-parse', 'status', 'describe', 'fetch', 'verify-tag', 'checkout', 'ls-remote'].find((c) => argv.includes(c))
+  if (sub !== undefined && over[sub] !== undefined) {
+    const o = over[sub]!
+    return o instanceof Error ? o : { exitCode: o.exitCode, stdout: o.stdout ?? '', stderr: '' }
+  }
+  if (sub === 'rev-parse') return { exitCode: 0, stdout: '\n', stderr: '' }
+  if (sub === 'describe') return { exitCode: 0, stdout: `v${PLUGIN_VERSION}\n`, stderr: '' }
+  if (sub === 'ls-remote') return { exitCode: 0, stdout: LS(NEWER), stderr: '' }
+  return OK
+}
+const ran = (w: World, sub: string) => w.runs.filter((r) => r.argv.includes(sub))
+/** The plugin root the mod asked git about. */
+const rootOf = (w: World) => String(w.runs[0]!.argv[2])
+const AUTO_LINE = `Souffleur updated to ${NEWER} (tag signed by your key).`
+
+test('update auto: a verified tag is fetched, verified, checked out and said once', async ($, on) => {
+  const w = world(on, AUTO_FILE, { stored: STORED_NEWER, run: gitRun() })
+  own(w)
+  await start($)
+  await settleUpdate(w)
+  expect(w.logs.filter((l) => l === AUTO_LINE).length).toBe(1)
+  expect(ran(w, 'checkout').length).toBe(1)
+  expect(ran(w, 'checkout')[0]!.argv).toContain(NEWER)
+  expect(ran(w, 'fetch')[0]!.timeoutMs).toBe(30000)
+  for (const r of ran(w, 'status').concat(ran(w, 'describe'), ran(w, 'verify-tag'), ran(w, 'checkout'))) expect(r.timeoutMs).toBe(10000)
+  expect((w.stored.updateCheck as { latest: string }).latest).toBe(NEWER)
+  await start($)
+  await settleUpdate(w)
+  expect(ran(w, 'checkout').length).toBe(1)
+  expect(w.logs.filter((l) => l === AUTO_LINE).length).toBe(1)
+})
+
+test('update auto: the allowed_signers file is written with the current key before verifying', async ($, on) => {
+  const w = world(on, AUTO_FILE, { stored: STORED_NEWER, run: gitRun() })
+  own(w)
+  await start($)
+  await settleUpdate(w)
+  const w2 = w.writes.filter((x) => x.path === '/data/souffleur/allowed_signers')
+  expect(w2.map((x) => x.text)).toEqual([`souffleur namespaces="git" ${SIGNER}\n`])
+  const v = ran(w, 'verify-tag')[0]!.argv
+  expect(v).toContain('gpg.format=ssh')
+  expect(v).toContain('gpg.ssh.allowedSignersFile=/data/souffleur/allowed_signers')
+  expect(v[v.length - 1]).toBe(NEWER)
+})
+
+test('update auto: a tag that does not verify says so and runs no checkout', async ($, on) => {
+  const w = world(on, AUTO_FILE, { stored: STORED_NEWER, run: gitRun({ 'verify-tag': { exitCode: 1 } }) })
+  own(w)
+  await start($)
+  await settleUpdate(w)
+  expect(w.logs).toContain(`Souffleur ${NEWER} is out but its tag is not signed by your updateSigner key; not installed. /souffleur update installs it anyway.`)
+  expect(ran(w, 'checkout').length).toBe(0)
+})
+
+test('update auto: without updateSigner it says the no-signer line and runs no checkout', async ($, on) => {
+  const w = world(on, AUTO_NO_SIGNER, { stored: STORED_NEWER, run: gitRun() })
+  own(w)
+  await start($)
+  await settleUpdate(w)
+  expect(w.logs).toContain(`Souffleur ${NEWER} is out (you run ${PLUGIN_VERSION}). /souffleur update installs it. Set updateSigner to let auto install it.`)
+  expect(w.logs.filter((l) => l.includes('is out')).length).toBe(1)
+  expect(ran(w, 'checkout').length).toBe(0)
+  expect(ran(w, 'fetch').length).toBe(0)
+})
+
+test('update auto: a marketplace install gets the notify line and no install', async ($, on) => {
+  const w = world(on, AUTO_FILE, { stored: { ...STORED_NEWER, installKind: 'market' }, run: gitRun({ 'rev-parse': { exitCode: 128 } }) })
+  own(w)
+  await start($)
+  await settleUpdate(w)
+  expect(w.logs).toContain(`Souffleur ${NEWER} is out (you run ${PLUGIN_VERSION}). /plugin update installs it.`)
+  expect(ran(w, 'checkout').length).toBe(0)
+})
+
+for (const [name, over, reason] of [
+  ['a dirty tree', { status: { exitCode: 0, stdout: ' M src/x.ts\n' } }, 'uncommitted changes in the install'],
+  ['HEAD not on a tag', { describe: { exitCode: 128 } }, 'the install is not on a release tag'],
+  ['HEAD on a pre-release tag', { describe: { exitCode: 0, stdout: 'v0.3.0-rc.1\n' } }, 'the install is not on a release tag'],
+] as const) {
+  test(`update auto: ${name} is refused with its reason and nothing is changed`, async ($, on) => {
+    const w = world(on, AUTO_FILE, { stored: STORED_NEWER, run: gitRun(over) })
+  own(w)
+    await start($)
+    await settleUpdate(w)
+    expect(w.logs).toContain(`Souffleur: not updated, ${reason}. Update by hand with git in ${rootOf(w)}.`)
+    expect(ran(w, 'checkout').length).toBe(0)
+    expect(ran(w, 'fetch').length).toBe(0)
+  })
+}
+
+test('update auto: a failed fetch installs nothing and says no done line', async ($, on) => {
+  const w = world(on, AUTO_FILE, { stored: STORED_NEWER, run: gitRun({ fetch: { exitCode: 1 } }) })
+  own(w)
+  await start($)
+  await settleUpdate(w)
+  expect(ran(w, 'checkout').length).toBe(0)
+  expect(w.logs.some((l) => l.includes('updated to'))).toBe(false)
+})
+
+test('update auto: never delays session.start', async ($, on) => {
+  world(on, AUTO_FILE, { stored: STORED_NEWER, run: (argv) => (argv.includes('rev-parse') ? { exitCode: 0, stdout: '\n', stderr: '' } : new Promise(() => {})) })
+  await start($)
+})
+
+const runUser = async ($: any, args: string, origin?: unknown) => (await $.command.run({ command: 'souffleur', args, ...(origin ? { origin } : {}) })).text as string
+
+test('/souffleur update: installs an unsigned tag when no signer is set, with the unsigned wording', async ($, on) => {
+  const w = world(on, SETUP, { stored: QUIET, run: gitRun() })
+  own(w)
+  await start($)
+  const text = await runUser($, 'update')
+  expect(text).toBe(`Souffleur: updated to ${NEWER} (unsigned; you asked for it)\nRunning sessions pick it up at their next turn.`)
+  expect(ran(w, 'checkout').length).toBe(1)
+  expect(ran(w, 'verify-tag').length).toBe(0)
+})
+
+test('/souffleur update: with a signer the tag is verified and the answer says signed', async ($, on) => {
+  const w = world(on, AUTO_FILE, { stored: QUIET, run: gitRun() })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toBe(`Souffleur: updated to ${NEWER} (signed)\nRunning sessions pick it up at their next turn.`)
+  expect(ran(w, 'verify-tag').length).toBe(1)
+})
+
+test('/souffleur update: with a signer a tag that does not verify is not installed', async ($, on) => {
+  const w = world(on, AUTO_FILE, { stored: QUIET, run: gitRun({ 'verify-tag': { exitCode: 1 } }) })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toMatch(/not signed by your updateSigner key; not installed/)
+  expect(ran(w, 'checkout').length).toBe(0)
+})
+
+test('/souffleur update: nothing newer says the current version is the newest', async ($, on) => {
+  const w = world(on, SETUP, { stored: QUIET, run: gitRun({ 'ls-remote': { exitCode: 0, stdout: LS(`v${PLUGIN_VERSION}`) } }) })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toBe(`Souffleur: ${PLUGIN_VERSION} is the newest release.`)
+  expect(ran(w, 'checkout').length).toBe(0)
+})
+
+test('/souffleur update: a marketplace install is pointed to /plugin update', async ($, on) => {
+  const w = world(on, SETUP, { stored: QUIET, run: gitRun({ 'rev-parse': { exitCode: 128 } }) })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toBe('Souffleur: installed through the marketplace; run /plugin update.')
+  expect(ran(w, 'checkout').length).toBe(0)
+})
+
+test('/souffleur update: a dirty tree is refused', async ($, on) => {
+  const w = world(on, SETUP, { stored: QUIET, run: gitRun({ status: { exitCode: 0, stdout: '?? x\n' } }) })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toBe(`Souffleur: not updated, uncommitted changes in the install. Update by hand with git in ${rootOf(w)}.`)
+  expect(ran(w, 'checkout').length).toBe(0)
+})
+
+test('/souffleur update: HEAD off a release tag is refused', async ($, on) => {
+  const w = world(on, SETUP, { stored: QUIET, run: gitRun({ describe: { exitCode: 128 } }) })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toBe(`Souffleur: not updated, the install is not on a release tag. Update by hand with git in ${rootOf(w)}.`)
+  expect(ran(w, 'checkout').length).toBe(0)
+})
+
+test('/souffleur update: only the user can run it', async ($, on) => {
+  const w = world(on, SETUP, { stored: QUIET, run: gitRun() })
+  own(w)
+  await start($)
+  for (const origin of [{ kind: 'plugin', name: 'other' }, { kind: 'model' }]) {
+    expect(await runUser($, 'update', origin)).toMatch(/only the user can run/i)
+  }
+  expect(ran(w, 'checkout').length).toBe(0)
+  expect(ran(w, 'fetch').length).toBe(0)
 })

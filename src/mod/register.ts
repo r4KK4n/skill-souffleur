@@ -17,7 +17,7 @@ import type { ModelUse, UsageFields } from '../core/cost.ts'
 import type { Config, Note, Rule } from '../core/types.ts'
 import { notices, startNotice } from '../core/notices.ts'
 import { PLUGIN_VERSION } from './version.ts'
-import { isCheckDue, isUpdateCheck, newestRelease, updateLine } from '../core/update.ts'
+import { isCheckDue, isUpdateCheck, newestRelease, refusalLine, updateLine } from '../core/update.ts'
 import type { UpdateInfo } from '../core/status.ts'
 import { compareVersions } from '../core/version.ts'
 import { isFromUser, isUserOrigin, presentArgs, toolFields } from './map.ts'
@@ -256,6 +256,86 @@ export async function checkForUpdate($: Dollar, l: Loaded, at: number): Promise<
 async function updateInfo($: Dollar): Promise<UpdateInfo> {
   const c = await readCheck($)
   return { current: PLUGIN_VERSION, ...(c?.latest === undefined ? {} : { latest: c.latest }), ...(c === undefined ? {} : { at: c.at }) }
+}
+
+const RELEASE_TAG = /^v\d+\.\d+\.\d+$/
+const GIT_TIMEOUT_MS = 10_000
+const FETCH_TIMEOUT_MS = 30_000
+
+type Run = { exitCode: number; stdout: string }
+
+async function git($: Dollar, args: readonly string[], timeoutMs = GIT_TIMEOUT_MS): Promise<Run> {
+  const r = await $.process.run(['git', '-C', $.plugin.root, ...args], { timeoutMs })
+  return { exitCode: r.exitCode, stdout: String(r.stdout) }
+}
+
+/** Why the folder install must be left alone, or undefined when it is clean and exactly on a release tag. */
+async function installBlocker($: Dollar): Promise<string | undefined> {
+  const status = await git($, ['status', '--porcelain'])
+  if (status.exitCode !== 0) throw new Error(`git status exited with ${status.exitCode}`)
+  if (status.stdout.trim() !== '') return 'uncommitted changes in the install'
+  const at = await git($, ['describe', '--tags', '--exact-match', 'HEAD'])
+  return at.exitCode === 0 && RELEASE_TAG.test(at.stdout.trim()) ? undefined : 'the install is not on a release tag'
+}
+
+/** True when `tag` carries a signature of the `updateSigner` key. The allowed_signers file is rewritten each time, so an older key never stays valid. */
+async function tagVerified($: Dollar, signer: string, tag: string): Promise<boolean> {
+  const dir = (await $.process.hookEnv()).CLAUDE_PLUGIN_DATA
+  if (dir === undefined || dir === '') throw new Error('no plugin data folder')
+  const file = `${dir}/allowed_signers`
+  await $.fs.write(file, `souffleur namespaces="git" ${signer}\n`)
+  const r = await git($, ['-c', 'gpg.format=ssh', '-c', `gpg.ssh.allowedSignersFile=${file}`, 'verify-tag', tag])
+  return r.exitCode === 0
+}
+
+type Install = { done: 'installed'; signed: boolean } | { done: 'refused'; reason: string } | { done: 'unverified' }
+
+/** Fetches, verifies when a signer is set (or `needSigner`), and checks out `tag`. Throws on a git failure. */
+async function installTag($: Dollar, l: Loaded, tag: string, needSigner: boolean): Promise<Install> {
+  const blocker = await installBlocker($)
+  if (blocker !== undefined) return { done: 'refused', reason: blocker }
+  const f = await git($, ['fetch', '-q', '--tags', 'origin'], FETCH_TIMEOUT_MS)
+  if (f.exitCode !== 0) throw new Error(`git fetch exited with ${f.exitCode}`)
+  const signer = l.config.updateSigner
+  if (signer === undefined && needSigner) return { done: 'unverified' }
+  if (signer !== undefined && !(await tagVerified($, signer, tag))) return { done: 'unverified' }
+  const c = await git($, ['checkout', '-q', tag])
+  if (c.exitCode !== 0) throw new Error(`git checkout exited with ${c.exitCode}`)
+  return { done: 'installed', signed: signer !== undefined }
+}
+
+/** Automatic install, run detached after the start line: only a tag signed by `updateSigner` installs, once per session and tag. */
+async function autoInstall($: Dollar, l: Loaded, sid: string): Promise<void> {
+  const tag = (await readCheck($))?.latest
+  if (tag === undefined || compareVersions(tag.slice(1), PLUGIN_VERSION) !== 1) return
+  if (latest?.id === sid && latest.updateShown === tag) return
+  if (toldKey === `${sid}:${tag}`) return
+  toldKey = `${sid}:${tag}`
+  const tell = async (line: string) => {
+    if (say($, l, line)) await markShown($, tag)
+  }
+  if (l.config.updateSigner === undefined) return tell(updateLine('auto-no-signer', tag, PLUGIN_VERSION))
+  try {
+    const r = await installTag($, l, tag, true)
+    if (r.done === 'refused') await tell(refusalLine(r.reason, $.plugin.root))
+    else if (r.done === 'unverified') await tell(updateLine('auto-unverified', tag, PLUGIN_VERSION))
+    else await tell(updateLine('auto-done', tag, PLUGIN_VERSION))
+  } catch (err) {
+    $.ui.log(`update install failed: ${message(err)}`, { to: 'debug' })
+  }
+}
+
+/** `/souffleur update`: installs the newest release now. Verifies when a signer is set; installs an unsigned tag only because the person asked. */
+async function runUpdate($: Dollar, l: Loaded): Promise<string> {
+  if ((await installKind($)) === 'market') return 'Souffleur: installed through the marketplace; run /plugin update.'
+  const r = await $.process.run(['git', 'ls-remote', '--tags', '--refs', REPO_URL], { timeoutMs: 15000 })
+  if (r.exitCode !== 0) return `Souffleur: could not look up releases (git exited with ${r.exitCode}).`
+  const tag = newestRelease(String(r.stdout), PLUGIN_VERSION)
+  if (tag === undefined) return `Souffleur: ${PLUGIN_VERSION} is the newest release.`
+  const done = await installTag($, l, tag, false)
+  if (done.done === 'refused') return refusalLine(done.reason, $.plugin.root)
+  if (done.done === 'unverified') return `Souffleur: ${tag} is not signed by your updateSigner key; not installed.`
+  return `Souffleur: updated to ${tag} (${done.signed ? 'signed' : 'unsigned; you asked for it'})\nRunning sessions pick it up at their next turn.`
 }
 
 /** Stored copies of sessions not touched for this long are removed at session start. */
@@ -1753,7 +1833,10 @@ export const register: Register = (on) => {
         // Resume or reload: the ledger stays, what the config said last time does not.
         s = decide(l.config, { ...before, errors: [] }, { type: 'start', now: now(), start: held?.id === id ? 'reload' : 'resume', version }).session
         s = decide(l.config, s, { type: 'config', now: now(), errors: l.errors }).session
-      } else s = await freshSession($, l, id, 'startup')
+      } else {
+        s = await freshSession($, l, id, 'startup')
+        toldKey = '' // a new session has told nothing yet
+      }
       restoredAskStopped = s.askStopped === true
       // Problems that hold at the start are news once; a resumed session's stored `noticed` keeps them from repeating.
       const first = notices(l.config, s, s, l.root)
@@ -1766,7 +1849,7 @@ export const register: Register = (on) => {
       say($, l, startNotice(l.config, s, l.setUp, PLUGIN_VERSION))
       for (const line of first.lines) say($, l, line)
       let said = false
-      if (tell !== undefined && kind !== undefined) {
+      if (tell !== undefined && kind !== undefined && (l.config.update === 'notify' || kind === 'market')) {
         said = say($, l, updateLine(kind === 'folder' ? 'notify' : 'notify-market', tell, PLUGIN_VERSION))
         if (said) toldKey = `${s.id}:${tell}`
         if (said) await markShown($, tell)
@@ -1776,19 +1859,20 @@ export const register: Register = (on) => {
         if (l.config.update === 'off') return
         const k = await installKind($)
         await $.store.set(KIND_KEY, k)
-        if (tell !== undefined && !said && latest?.updateShown !== tell && toldKey !== `${s.id}:${tell}`) {
+        if (tell !== undefined && !said && (l.config.update === 'notify' || k === 'market') && latest?.updateShown !== tell && toldKey !== `${s.id}:${tell}`) {
           if (say($, l, updateLine(k === 'folder' ? 'notify' : 'notify-market', tell, PLUGIN_VERSION))) {
             toldKey = `${s.id}:${tell}`
             await markShown($, tell)
           }
         }
         await checkForUpdate($, l, now())
+        if (l.config.update === 'auto' && k === 'folder') await autoInstall($, l, s.id)
       })().catch(() => {})
     })
     await pruneStore($, await $.session.id())
     await safe($, 'installed', undefined, () => refreshInstalled($))
     await safe($, 'command.register', undefined, async () => {
-      await $.command.register({ name: 'souffleur', description: 'Show which skills Souffleur keeps loaded', argumentHint: '[status | need <name> | drop <name> | pause | resume | init | migrate | rule <text> | review | accept <id> | decline <id> | block <name> | unblock <name> | project]' })
+      await $.command.register({ name: 'souffleur', description: 'Show which skills Souffleur keeps loaded', argumentHint: '[status | need <name> | drop <name> | pause | resume | init | migrate | rule <text> | review | accept <id> | decline <id> | block <name> | unblock <name> | project | update]' })
     })
     interactive = e.isInteractive === true
     lastPromptKind = undefined
@@ -2010,6 +2094,16 @@ export const register: Register = (on) => {
           loaded = undefined
           const { l } = await current($)
           return verb0 === 'project' ? runProject($, l) : runBlock($, l, verb0, rest)
+        })
+        if (text !== undefined) return { text }
+        return next(e)
+      }
+      if (verb0 === 'update') {
+        if (!isUserOrigin(e)) return { text: 'Souffleur: only the user can run /souffleur update; a plugin or the model cannot.' }
+        const text = await safe($, 'command.run.update', undefined as string | undefined, async () => {
+          loaded = undefined
+          const { l } = await current($)
+          return runUpdate($, l)
         })
         if (text !== undefined) return { text }
         return next(e)
