@@ -582,8 +582,7 @@ test('a plugin group answered All when the task needs it writes every need after
   await start($)
   await run($, 'init')
   expect(w.asked.length).toBe(1)
-  expect(w.asked[0]).toMatch(/pk:a, pk:b, pk:c|a, b, c/)
-  expect(w.asked[0]).toMatch(/Need of pk:a\./)
+    expect(w.asked[0]).toMatch(/Need of pk:a\./)
   const written = JSON.parse(groupWrites(w).at(-1).text)
   for (const n of ['a', 'b', 'c']) {
     expect(written.skills[`pk:${n}`]).toEqual({ need: `k-${n}` })
@@ -653,6 +652,29 @@ test('skills that already have a choice are not part of a group', async ($, on) 
   // pk:a and pk:b are asked one by one; pk:c alone is no group.
   expect(w.asked.length).toBe(3)
   expect(w.asked.some((q) => /All when the task needs it/.test(q))).toBe(false)
+})
+
+const GROUP2 = ['qq:a', 'qq:b']
+const BOTH_PICKS = JSON.stringify({ skills: [...GROUP, ...GROUP2].map((name) => ({ name, need: `k-${name.replace(':', '-')}`, needText: `Need of ${name}.` })) })
+
+test('a group answer is written at once: a second group dismissed keeps the first', async ($, on) => {
+  const w = world(on, { [USER_FILE]: EMPTY }, { skills: [...GROUP, ...GROUP2], proposals: BOTH_PICKS, answers: ['All when the task needs it', ''] })
+  await start($)
+  const text = await run($, 'init')
+  const written = JSON.parse(groupWrites(w).at(-1).text)
+  for (const n of ['a', 'b', 'c']) expect(written.skills[`pk:${n}`]).toBeTruthy()
+  expect(written.skills['qq:a']).toBe(undefined)
+  expect(text).toMatch(/Stopped at the plugin qq; 2 skills not asked/)
+})
+
+test('a group answer is written at once: a later per-skill dismiss keeps it', async ($, on) => {
+  const w = world(on, { [USER_FILE]: EMPTY }, { skills: [...GROUP, 'solo'], proposals: JSON.stringify({ skills: [...GROUP.map((name) => ({ name, need: `k-${name.slice(3)}`, needText: `Need of ${name}.` })), { name: 'solo', need: 'k-solo', needText: 'Solo.' }] }), answers: ['All when the task needs it', ''] })
+  await start($)
+  const text = await run($, 'init')
+  const written = JSON.parse(groupWrites(w).at(-1).text)
+  for (const n of ['a', 'b', 'c']) expect(written.skills[`pk:${n}`]).toBeTruthy()
+  expect(written.skills.solo).toBe(undefined)
+  expect(text).toMatch(/Stopped at solo; 1 skill not asked/)
 })
 
 test('init starts its first dialog with the explanation', async ($, on) => {
@@ -997,7 +1019,8 @@ test('init warns when Injected is chosen for a plugin without a SessionStart hoo
   const text = await run($, 'init')
   expect(text).toMatch(/flow:plan: Loaded by its own plugin at start \(rare\)\./)
   expect(text).toMatch(/Warning: the plugin flow has no SessionStart hook/)
-  expect(w.asked[0]).toMatch(/for example/i)
+  // The injected answer is not offered here, so its explanation is left out.
+  expect(w.asked[0]).not.toMatch(/for example/i)
 })
 
 test('init does not warn when the plugin has a SessionStart hook', async ($, on) => {
@@ -1151,9 +1174,10 @@ test('an unreadable plugin gives the unknown line, not the no-hook warning', asy
 
 test('an injected skill that init keeps still gets the warning', async ($, on) => {
   const files = { ...pluginFiles({ PostToolUse: [] }), [USER_FILE]: flowInjected }
-  world(on, files, { skills: ['flow:plan'], answers: ['Loaded by its own plugin at start (rare)'] })
+  const w = world(on, files, { skills: ['flow:plan'], answers: ['Loaded by its own plugin at start (rare)'] })
   await start($)
   const text = await run($, 'init')
+  expect(w.asked[0]).toMatch(/for example/i)
   expect(text).toMatch(/Kept flow:plan/)
   expect(text).toMatch(/Warning: the plugin flow has no SessionStart hook/)
 })

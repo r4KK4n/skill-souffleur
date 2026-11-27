@@ -762,55 +762,127 @@ async function runInit($: Dollar, l0: Loaded, only?: string[]): Promise<string> 
     return { need: { key: needKeyFor(p.skill), text: `The task calls for ${p.skill}.` }, fallback: true }
   }
 
-  /** What a plugin group question already decided per skill, and the skills it left for later. */
-  const preset = new Map<string, { choice: LoadChoice; need?: NeedText; scope: 'project' | 'everywhere' }>()
+  /** Writes one answer through the user file: read again, apply, back up once, write. False when init must stop. */
+  const writeAnswer = async (p: Plan, choice: LoadChoice, need: NeedText | undefined, scope: 'project' | 'everywhere'): Promise<boolean> => {
+    // Read again: the file may have changed since the scan, and earlier answers are already in it.
+    const now2 = await readState($, configPath, home)
+    if (now2.kind === 'error') {
+      done.push(`Stopped: could not read ${shown(configPath)} (${now2.why}). Nothing was written for ${p.skill}.`)
+      return false
+    }
+    if (now2.kind === 'missing' && user.kind === 'ok') {
+      done.push(`Stopped: ${shown(configPath)} was there at the start and is not now. Nothing was written for ${p.skill}.`)
+      return false
+    }
+    let doc: unknown
+    if (now2.kind === 'ok') {
+      try {
+        doc = parseJson(now2.text)
+      } catch (err) {
+        done.push(`Stopped: ${shown(configPath)} is not valid JSON now (${message(err)}). Nothing was written for ${p.skill}.`)
+        return false
+      }
+      const problem = configProblem(doc)
+      if (problem) {
+        done.push(`Stopped: ${shown(configPath)} cannot be edited because ${problem}. Nothing was written for ${p.skill}.`)
+        return false
+      }
+    }
+    const r =
+      scope === 'everywhere'
+        ? applyChoice(doc, p.skill, choice, need, projectSkills)
+        : choice === 'none'
+          ? ignoreInProject(doc, l0.root, p.skill)
+          : addSkillToProject(doc, l0.root, p.skill, choice === 'need' ? 'need' : choice, need)
+    if (r.note) done.push(r.note)
+    const label = choice === 'none' ? 'not watched' : CHOICE_LABEL[choice]
+    if (r.note || JSON.stringify(r.config) === JSON.stringify(doc) || (now2.kind === 'missing' && choice === 'none')) {
+      if (!r.note) {
+        done.push(`Kept ${p.skill}: ${label}. Nothing was written.`)
+        if (choice === 'injected') {
+          const line = await injectedLine(p.skill)
+          if (line) done.push(line)
+        }
+      }
+      return true
+    }
+    if (!backedUp && now2.kind === 'ok') {
+      await $.fs.write(`${configPath}.bak-${Date.now()}`, now2.text)
+      backedUp = true
+    }
+    await $.fs.write(configPath, `${JSON.stringify(r.config, null, 2)}\n`)
+    wrote = true
+    const need2 = choice === 'need' ? `for ${need?.text ?? 'its description'}` : choice === 'start' ? 'from the start' : choice === 'injected' ? 'as its plugin injects it' : ''
+    setUp.push(choice === 'none' ? `${p.skill}: ${scope === 'project' ? 'ignored here' : 'not watched'}` : `${p.skill}: watched ${need2.replace(/\.$/, '')} ${scope === 'project' ? 'in this project' : 'everywhere'}`)
+    loaded = undefined // the session reads the new file on its next event
+    done.push(`${p.skill}: ${label}.`)
+    if (choice === 'injected') {
+      const line = await injectedLine(p.skill)
+      if (line) done.push(line)
+    }
+    if (r.pruned?.length) done.push(`Removed the unused ${r.pruned.length === 1 ? 'need' : 'needs'} ${r.pruned.join(', ')}.`)
+  
+    return true
+  }
+  /** Skills a group answer already wrote or kept, and the skills it left for later. */
+  const handled = new Set<string>()
   const later = new Set<string>()
   let stopped = false
 
   try {
     for (const g of groupByPlugin(toAsk).groups) {
       const short = (skill: string) => skill.slice(g.plugin.length + 1)
-      const names = g.plans.map((p) => short(p.skill))
-      const shownNames = names.length > 8 ? `${names.slice(0, 8).join(', ')}, and ${names.length - 8} more` : names.join(', ')
       let budget = 600
       const props: string[] = []
       for (const p of g.plans) {
         const line = `${short(p.skill)}: ${proposal(p).need.text}`
-        if (line.length > budget) break
+        if (props.length >= 8 || line.length > budget) break
         budget -= line.length + 3
         props.push(line)
       }
       const lines = [
-        `The plugin ${g.plugin} has ${g.plans.length} skills with no setting yet: ${shownNames}.`,
-        `Descriptions proposed for "When the task needs it": ${props.join(' | ')}${props.length < g.plans.length ? ` | and ${g.plans.length - props.length} more` : ''}.`,
+        `The plugin ${g.plugin} has ${g.plans.length} skills with no setting yet. Proposed descriptions for "When the task needs it": ${props.join(' | ')}${props.length < g.plans.length ? ` | and ${g.plans.length - props.length} more skills` : ''}`,
         'How should Souffleur keep them all? Ask one by one lets you choose per skill, and so does text typed under Other.',
       ]
       const answer: unknown = await $.ui.ask(`${asked ? '' : `${SETUP_INTRO}\n\n`}${lines.join(' ')}`, { options: [GROUP_ALL, GROUP_NONE, GROUP_ONE, LATER], header: 'Souffleur' })
       asked = true
       if (typeof answer !== 'string' || answer === '') {
-        done.push(`Stopped at the plugin ${g.plugin}; ${plural(toAsk.filter((p) => !preset.has(p.skill) && !later.has(p.skill)).length, 'skill')} not asked.`)
+        done.push(`Stopped at the plugin ${g.plugin}; ${plural(toAsk.filter((p) => !handled.has(p.skill) && !later.has(p.skill)).length, 'skill')} not asked.`)
         stopped = true
         break
       }
       if (answer === LATER) {
         for (const p of g.plans) later.add(p.skill)
       } else if (answer === GROUP_NONE) {
-        for (const p of g.plans) preset.set(p.skill, { choice: 'none', scope: ownHere.has(p.skill) ? 'project' : 'everywhere' })
+        for (const p of g.plans) {
+          handled.add(p.skill)
+          if (!(await writeAnswer(p, 'none', undefined, ownHere.has(p.skill) ? 'project' : 'everywhere'))) {
+            stopped = true
+            break
+          }
+        }
+        if (stopped) break
       } else if (answer === GROUP_ALL) {
         // One scope question for the group's skills that only this project has.
         let scope: 'project' | 'everywhere' | undefined = 'everywhere'
         if (g.plans.some((p) => ownHere.has(p.skill))) {
-          const where = await $.ui.ask(`Where should the skills of ${g.plugin} that only this project has apply? This project only keeps them out of your other projects; Everywhere adds them to your standard.`, { options: ['This project only', 'Everywhere'], header: 'Souffleur' })
+          const where = await $.ui.ask(`Where should ${g.plans.filter((p) => ownHere.has(p.skill)).map((p) => p.skill).join(', ')} apply? These skills only this project has. This project only keeps them out of your other projects; Everywhere adds them to your standard.`, { options: ['This project only', 'Everywhere'], header: 'Souffleur' })
           scope = where === 'This project only' ? 'project' : where === 'Everywhere' ? 'everywhere' : undefined
         }
         for (const p of g.plans) {
+          handled.add(p.skill)
           if (scope === undefined && ownHere.has(p.skill)) done.push(`${p.skill}: skipped, no answer about where it applies. Nothing was written for it.`)
-          else preset.set(p.skill, { choice: 'need', need: proposal(p).need, scope: ownHere.has(p.skill) ? (scope ?? 'everywhere') : 'everywhere' })
+          else if (!(await writeAnswer(p, 'need', proposal(p).need, ownHere.has(p.skill) ? (scope ?? 'everywhere') : 'everywhere'))) {
+            stopped = true
+            break
+          }
         }
+        if (stopped) break
       }
     }
     for (const [i, p] of toAsk.entries()) {
       if (stopped) break
+      if (handled.has(p.skill)) continue
       if (later.has(p.skill)) {
         done.push(`${p.skill}: decided later; /souffleur init asks again.`)
         continue
@@ -818,17 +890,14 @@ async function runInit($: Dollar, l0: Loaded, only?: string[]): Promise<string> 
       let choice: LoadChoice
       let need: NeedText | undefined
       let scope: 'project' | 'everywhere' = 'everywhere'
-      const pre = preset.get(p.skill)
-      if (pre) {
-        ;({ choice, need, scope } = pre)
-      } else {
+      {
         const prop = proposal(p)
         const lines = [
           `${describePlan(p)}.`,
           prop.fallback
             ? `No description was proposed, so "When the task needs it" would read: "${prop.need.text}" Text typed under Other replaces it.`
             : `Description for "When the task needs it": ${prop.need.text} Text typed under Other replaces it.`,
-          ...(p.skill.includes(':') ? [INJECTED_HELP] : []),
+          ...(options(p.skill, p.current, p.recommended).includes(CHOICE_LABEL.injected) ? [INJECTED_HELP] : []),
           'How should Souffleur keep it?',
         ]
         const question = `${asked ? '' : `${SETUP_INTRO}\n\n`}${lines.join(' ')}`
@@ -836,7 +905,7 @@ async function runInit($: Dollar, l0: Loaded, only?: string[]): Promise<string> 
         asked = true
         const picked = typeof answer === 'string' && answer !== '' ? choiceOf(answer) : 'stop'
         if (picked === 'stop') {
-          done.push(`Stopped at ${p.skill}; ${plural(toAsk.length - i, 'skill')} not asked.`)
+          done.push(`Stopped at ${p.skill}; ${plural(toAsk.slice(i).filter((x) => !handled.has(x.skill) && !later.has(x.skill)).length, 'skill')} not asked.`)
           stopped = true
           break
         }
@@ -870,64 +939,7 @@ async function runInit($: Dollar, l0: Loaded, only?: string[]): Promise<string> 
           }
         }
       }
-
-      // Read again: the file may have changed since the scan, and earlier answers are already in it.
-      const now2 = await readState($, configPath, home)
-      if (now2.kind === 'error') {
-        done.push(`Stopped: could not read ${shown(configPath)} (${now2.why}). Nothing was written for ${p.skill}.`)
-        break
-      }
-      if (now2.kind === 'missing' && user.kind === 'ok') {
-        done.push(`Stopped: ${shown(configPath)} was there at the start and is not now. Nothing was written for ${p.skill}.`)
-        break
-      }
-      let doc: unknown
-      if (now2.kind === 'ok') {
-        try {
-          doc = parseJson(now2.text)
-        } catch (err) {
-          done.push(`Stopped: ${shown(configPath)} is not valid JSON now (${message(err)}). Nothing was written for ${p.skill}.`)
-          break
-        }
-        const problem = configProblem(doc)
-        if (problem) {
-          done.push(`Stopped: ${shown(configPath)} cannot be edited because ${problem}. Nothing was written for ${p.skill}.`)
-          break
-        }
-      }
-      const r =
-        scope === 'everywhere'
-          ? applyChoice(doc, p.skill, choice, need, projectSkills)
-          : choice === 'none'
-            ? ignoreInProject(doc, l0.root, p.skill)
-            : addSkillToProject(doc, l0.root, p.skill, choice === 'need' ? 'need' : choice, need)
-      if (r.note) done.push(r.note)
-      const label = choice === 'none' ? 'not watched' : CHOICE_LABEL[choice]
-      if (r.note || JSON.stringify(r.config) === JSON.stringify(doc) || (now2.kind === 'missing' && choice === 'none')) {
-        if (!r.note) {
-          done.push(`Kept ${p.skill}: ${label}. Nothing was written.`)
-          if (choice === 'injected') {
-            const line = await injectedLine(p.skill)
-            if (line) done.push(line)
-          }
-        }
-        continue
-      }
-      if (!backedUp && now2.kind === 'ok') {
-        await $.fs.write(`${configPath}.bak-${Date.now()}`, now2.text)
-        backedUp = true
-      }
-      await $.fs.write(configPath, `${JSON.stringify(r.config, null, 2)}\n`)
-      wrote = true
-      const need2 = choice === 'need' ? `for ${need?.text ?? 'its description'}` : choice === 'start' ? 'from the start' : choice === 'injected' ? 'as its plugin injects it' : ''
-      setUp.push(choice === 'none' ? `${p.skill}: ${scope === 'project' ? 'ignored here' : 'not watched'}` : `${p.skill}: watched ${need2.replace(/\.$/, '')} ${scope === 'project' ? 'in this project' : 'everywhere'}`)
-      loaded = undefined // the session reads the new file on its next event
-      done.push(`${p.skill}: ${label}.`)
-      if (choice === 'injected') {
-        const line = await injectedLine(p.skill)
-        if (line) done.push(line)
-      }
-      if (r.pruned?.length) done.push(`Removed the unused ${r.pruned.length === 1 ? 'need' : 'needs'} ${r.pruned.join(', ')}.`)
+      if (!(await writeAnswer(p, choice, need, scope))) break
     }
   } catch (err) {
     if (!asked) return noDialog()
