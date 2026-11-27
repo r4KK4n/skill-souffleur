@@ -43,9 +43,10 @@ export async function classifyDeliverable(
       const answer = await Promise.race([classify(text, asked), timer])
       if (answer === LATE) return { failure: 'timeout' }
       if (answer === undefined || answer === null || answer === '') return { failure: 'rejected' }
-      // A label with surrounding whitespace or one final period still counts; a sentence around a label does not.
-      const label = answer.trim().replace(/\.$/, '')
-      return asked.includes(label) ? { answer: label } : { failure: 'unknown-label' }
+      // A label in quotes or backticks, after `Label:`, in any case, with whitespace or a final period still counts; a sentence around a label does not.
+      const bare = answer.trim().replace(/^label\s*:\s*/i, '').replace(/^["'`*]+|["'`*]+\.?$|\.$/g, '').replace(/^["'`*]+|["'`*]+$/g, '').trim().toLowerCase()
+      const label = asked.find((x) => x.toLowerCase() === bare)
+      return label !== undefined ? { answer: label } : { failure: 'unknown-label' }
     } catch {
       return { failure: 'rejected' }
     }

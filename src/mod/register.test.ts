@@ -91,6 +91,8 @@ type Opts = {
   classifyRejected?: boolean
   /** `$.store.set` of this key throws. */
   failStoreKey?: string
+  /** `$.store.set` of the total waits for this. */
+  holdTotal?: Promise<void>
   /** An Agent tool call stays open until this resolves, as a running subagent keeps it open. */
   holdAgent?: Promise<void>
   /** A dialog never answers and never rejects, as in a session whose client does not show it. */
@@ -117,6 +119,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   on('store.get', (_, e) => ({ value: storeData[e.key] === undefined ? undefined : JSON.parse(JSON.stringify(storeData[e.key])) }) as never)
   on('store.set', (_, e) => {
     if (opts.failStoreKey === e.key) throw new Error('disk full')
+    if (opts.holdTotal && e.key === 'modelUseTotal') return opts.holdTotal.then(() => { storeData[e.key] = JSON.parse(JSON.stringify(e.value)); return { value: undefined } as never })
     storeData[e.key] = JSON.parse(JSON.stringify(e.value))
     return { value: undefined } as never
   })
@@ -3585,8 +3588,11 @@ test('every classifier call is counted with its tokens in /souffleur, the status
   const w = world(on, { [USER_FILE]: COST_CFG }, { classify: 'match', usage: { input_tokens: 1_000_000, output_tokens: 0 } })
   await start($)
   await $.prompt.submit({ text: 'fix the build' })
+  await settle()
   expect(await table($)).toMatch(/^Small model: 2 calls, 2\.0M in \/ 0 out, about \$0\.20 this session \(total 2 calls, about \$0\.20\)\. Estimate at list price\.$/m)
+  await settle()
   expect(w.statuses.at(-1)).toMatch(/ · ~\$0\.20$/)
+  await settle()
   expect(w.stored['modelUseTotal']).toMatchObject({ calls: 2, input: 2_000_000, usd: 0.2 })
 })
 
@@ -3595,6 +3601,7 @@ test('a rejected classifier call counts as a call without tokens', async ($, on)
   await start($)
   await $.prompt.submit({ text: 'fix the build' })
   expect(w.classifyCalls()).toBeGreaterThan(0)
+  await settle()
   expect(await table($)).toMatch(/^Small model: \d calls, 0 in \/ 0 out,/m)
   expect(w.debugLogs.join('\n')).toMatch(/classifier: rejected/)
 })
@@ -3611,9 +3618,12 @@ test('a late classifier result after the timeout is counted once', async ($, on)
   expect(await table($)).not.toMatch(/Small model/)
   release()
   await settle()
+  await settle()
   expect(await table($)).toMatch(/^Small model: 2 calls, 300 in \/ 4 out,/m)
   await settle()
+  await settle()
   expect(await table($)).toMatch(/^Small model: 2 calls,/m)
+  await settle()
   expect(w.stored['modelUseTotal']).toMatchObject({ calls: 2 })
 })
 
@@ -3621,8 +3631,10 @@ test('the learn call and the rule shaping call are counted', async ($, on) => {
   world(on, { [USER_FILE]: ENFORCE }, { shaped: '{"kind":"note","text":"Always say hi."}', usage: USAGE })
   await start($)
   await mainLoad($, 'skill-a', 'Always do a.')
+  await settle()
   expect(await table($)).toMatch(/^Small model: 1 call, 150 in \/ 2 out,/m)
   await run($, 'rule Always say hi')
+  await settle()
   expect(await table($)).toMatch(/^Small model: 2 calls, 300 in \/ 4 out,/m)
 })
 
@@ -3631,6 +3643,7 @@ test('the status line shows the cost with notices off', async ($, on) => {
   const w = world(on, { [USER_FILE]: cfg }, { classify: 'match', usage: { input_tokens: 1_000_000 } })
   await start($)
   await $.prompt.submit({ text: 'fix the build' })
+  await settle()
   expect(w.statuses.at(-1)).toMatch(/ · ~\$0\.20$/)
   expect(w.toasts).toEqual([])
 })
@@ -3647,8 +3660,10 @@ test('a new session starts at zero while the total keeps counting', async ($, on
   await start($)
   await $.prompt.submit({ text: 'one' })
   w.setId('s2')
+  await settle()
   expect(await table($)).toMatch(/^Small model: no calls this session \(total 2 calls,/m)
   await $.prompt.submit({ text: 'two' })
+  await settle()
   expect(await table($)).toMatch(/^Small model: 2 calls, 300 in \/ 4 out, .* this session \(total 4 calls,/m)
 })
 
@@ -3657,7 +3672,9 @@ test('the count survives a reload of the session', async ($, on) => {
   await start($)
   await $.prompt.submit({ text: 'one' })
   await start($)
+  await settle()
   expect(await table($)).toMatch(/^Small model: 2 calls,/m)
+  await settle()
   expect(w.stored['modelUseTotal']).toMatchObject({ calls: 2 })
 })
 
@@ -3666,8 +3683,22 @@ test('a store failure for the total fails no hook and keeps the session count', 
   await start($)
   const r = await $.prompt.submit({ text: 'fix the build' })
   expect(r.text).toBe('fix the build')
+  await settle()
   const t = await table($)
   expect(t).toMatch(/^Small model: 2 calls,/m)
   expect(t).not.toMatch(/Errors:/)
+  await settle()
   expect(w.stored['modelUseTotal']).toBeUndefined()
+})
+
+test('counting never delays the answer: a held total write does not hold the prompt', async ($, on) => {
+  let release!: () => void
+  const hold = new Promise<void>((r) => { release = r })
+  const w = world(on, { [USER_FILE]: COST_CFG }, { classify: 'match', usage: USAGE, holdTotal: hold })
+  await start($)
+  const first = await Promise.race([$.prompt.submit({ text: 'fix the build' }), new Promise((resolve) => setTimeout(() => resolve('timeout'), 1000))])
+  expect(first).not.toBe('timeout')
+  release()
+  await settle()
+  expect(w.stored['modelUseTotal']).toMatchObject({ calls: 2 })
 })

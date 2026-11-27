@@ -13,7 +13,7 @@ import { NO, YES_EVERYWHERE, YES_PROJECT, addEntry, answer, describeProposal, en
 import { ruleSkillNames, sectionNotes } from '../core/rules.ts'
 import { statusLine } from '../core/status.ts'
 import { addUsage } from '../core/cost.ts'
-import type { ModelUse } from '../core/cost.ts'
+import type { ModelUse, UsageFields } from '../core/cost.ts'
 import type { Config, Note, Rule } from '../core/types.ts'
 import { notices, startNotice } from '../core/notices.ts'
 import { PLUGIN_VERSION } from './version.ts'
@@ -219,26 +219,31 @@ async function readTotal($: Dollar): Promise<ModelUse | undefined> {
   }
 }
 
-/**
- * Every small-model call goes through here. A call that came back is counted once in the session and once in the total,
- * with its tokens when it was answered, however late it comes back. The total is read, changed and written (best effort:
- * another process may add a call in between, and that call is lost). A failure to count never fails the caller.
- */
-async function callModel($: Dollar, request: { model: string; [key: string]: unknown }): Promise<any> {
-  const r = await $.model.complete(request)
-  const usage = r?.isAnswered === true ? r.usage : undefined
+/** Adds one returned call to the session count and the total. Never throws. */
+async function countCall($: Dollar, model: string, usage: UsageFields | undefined): Promise<void> {
   try {
-    await update($, (_l, s) => ({ ...s, modelUse: addUsage(s.modelUse, request.model, usage) }))
+    await update($, (_l, s) => ({ ...s, modelUse: addUsage(s.modelUse, model, usage) }))
   } catch {
     // the count is a courtesy
   }
   try {
     await serial(async () => {
-      await $.store.set(TOTAL_KEY, addUsage(await readTotal($), request.model, usage))
+      await $.store.set(TOTAL_KEY, addUsage(await readTotal($), model, usage))
     })
   } catch {
     // the total is best effort
   }
+}
+
+/**
+ * Every small-model call goes through here. A call that came back is counted once in the session and once in the total,
+ * with its tokens when it was answered, however late it comes back. The counting runs detached, so it never delays the
+ * answer. The total is read, changed and written (best effort: another process may add a call in between, and that
+ * call is lost). A failure to count never fails the caller.
+ */
+async function callModel($: Dollar, request: { model: string; [key: string]: unknown }): Promise<any> {
+  const r = await $.model.complete(request)
+  void countCall($, request.model, r?.isAnswered === true ? r.usage : undefined)
   return r
 }
 

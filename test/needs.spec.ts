@@ -154,8 +154,16 @@ test('an answer with whitespace or a trailing period still matches its label', a
   assert.equal((await classifyDeliverable('x', needs, kind('code-or-repo-work', ' debug. '), never)).matched[0], 'debug')
 })
 
+test('quotes, backticks, a Label: prefix and case differences still match', async () => {
+  for (const answer of ['"code-or-repo-work"', '`code-or-repo-work`', "'Code-Or-Repo-Work'.", 'Label: code-or-repo-work', 'label:  `CODE-or-repo-work`.', 'LABEL: "code-or-repo-work"\n']) {
+    const r = await classifyDeliverable('x', needs, kind(answer, 'Plan'), never)
+    assert.deepEqual(r, { matched: ['plan'], failed: false, kind: 'code-or-repo-work' }, JSON.stringify(answer))
+  }
+  assert.equal((await classifyDeliverable('x', needs, kind('Chat-Reply'), never)).kind, 'chat-reply')
+})
+
 test('an answer that holds a label inside a sentence does not match', async () => {
-  for (const answer of ['I think chat-reply fits.', 'chat-reply or screen', 'The label is code-or-repo-work.', 'Chat-Reply']) {
+  for (const answer of ['I think chat-reply fits.', 'chat-reply or screen', 'The label is code-or-repo-work.', 'Label: chat-reply is right', '`chat-reply` or `screen`']) {
     const r = await classifyDeliverable('x', needs, kind(answer), never)
     assert.deepEqual(r, { matched: [], failed: true, failure: 'unknown-label' }, answer)
   }

@@ -6,7 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
-- `/souffleur` and the status line now show what the small model costs. `/souffleur` lists the calls, tokens and an estimated dollar cost for this session and in total, at list price; the status line adds `· ~$0.03` for the session. The classifier calls now go through `$.model.complete` (same speed as `$.model.classify`), which reports the tokens. A classifier answer with spaces or a final period still counts. The total is kept in the plugin store and is best effort: two sessions at the same moment can lose a count.
+- `/souffleur` and the status line now show what the small model costs. `/souffleur` lists the calls, tokens and an estimated dollar cost for this session and in total, at list price; the status line adds `· ~$0.03` for the session. The classifier calls now go through `$.model.complete` (same speed as `$.model.classify`), which reports the tokens. A classifier answer in quotes or backticks, after `Label:`, in another case, or with spaces or a final period still counts; a label inside a sentence does not. Counting runs after the answer, so it never delays a prompt. The total is kept in the plugin store and is best effort: two sessions at the same moment can lose a count.
 
 ## [0.2.1] - 2026-11-27
 
