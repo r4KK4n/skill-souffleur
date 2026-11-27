@@ -1065,10 +1065,17 @@ async function actOnOwnAnswer($: Dollar, l: Loaded, names: string[], answer: unk
 async function lateOwnAnswer($: Dollar, l: Loaded, names: string[], answer: unknown, token: number): Promise<void> {
   if (token !== ownToken || ownActed || (answer !== OWN_NOW && answer !== OWN_IGNORE)) return
   try {
-    if ((await current($)).session.paused) return
+    if ((await current($)).session.paused) {
+      say($, l, 'Souffleur: Souffleur is paused; /souffleur init sets them up later.')
+      return
+    }
     const left = await stillUnnamed($, l, names)
     if (!left.length) return
     if (answer === OWN_NOW) {
+      if (askStopped || noDialog) {
+        say($, l, 'Souffleur: run /souffleur init in this project to set them up.')
+        return
+      }
       pendingSetUp = { token, names: left }
       say($, l, 'Souffleur: set-up starts at the next turn end.')
       return
@@ -1087,15 +1094,17 @@ async function stillUnnamed($: Dollar, l: Loaded, names: string[]): Promise<stri
   if (st.kind !== 'ok') return []
   const doc = parseJson(st.text)
   if (configProblem(doc) || hasProjectKey(doc, l.root)) return []
-  const skills = (doc as { skills?: Record<string, unknown> }).skills ?? {}
-  return names.filter((n) => !(n in skills))
+  // The effective config (user file and trusted repository file), read fresh like the in-time path.
+  loaded = undefined
+  const fresh = (await current($)).l
+  return names.filter((n) => !(n in fresh.config.skills))
 }
 
 /** At a turn end: runs the set-up a late `Set up now` asked for, if it still applies. True when it ran. */
 async function runPendingSetUp($: Dollar): Promise<boolean> {
   const p = pendingSetUp
   pendingSetUp = undefined
-  if (!p || p.token !== ownToken || ownActed) return false
+  if (!p) return false
   const { l } = await current($)
   try {
     const left = await stillUnnamed($, l, p.names)

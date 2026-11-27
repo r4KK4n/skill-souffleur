@@ -3174,6 +3174,7 @@ const ownLate = (opts: Opts = {}) => {
   const held = new Promise<string>((r) => { tap = r })
   return { tap, held, opts: { repoRoot: MAIN, projectSkills: ['a-skill', 'b-skill'], holdFirstAsk: held, ...opts } as Opts }
 }
+const PAUSED_LINE = 'Souffleur: Souffleur is paused; /souffleur init sets them up later.'
 const ownTimedOut = async ($: any, w: World) => {
   const t = turnEnd($)
   await new Promise((r) => setTimeout(r, 50))
@@ -3222,6 +3223,7 @@ test('a late Set up now while paused starts nothing', async ($, on) => {
   await idle()
   await turnEnd($)
   expect(w.logs.some((l) => /set-up starts/.test(l))).toBe(false)
+  expect(w.logs.filter((l) => l === PAUSED_LINE).length).toBe(1)
   expect(w.asked.length).toBe(1)
 })
 
@@ -3234,19 +3236,92 @@ test('a late Ignore all here while paused writes nothing', async ($, on) => {
   tap('Ignore all here')
   await idle()
   expect(w.writes.filter((x) => x.path === USER_FILE).length).toBe(0)
+  expect(w.logs.filter((l) => l === PAUSED_LINE).length).toBe(1)
 })
 
 test('/souffleur init typed meanwhile clears the pending set-up', async ($, on) => {
-  const { tap, opts } = ownLate({ answers: ['When the task needs it', 'This project only', "Don't watch", 'When the task needs it', 'This project only', "Don't watch"] })
+  // init names one skill in the standard, then stops: no key is written and b-skill stays unnamed
+  const { tap, opts } = ownLate({ answers: ['From the start', 'Everywhere', ''] })
   const w = world(on, { [USER_FILE]: STD }, opts)
   await start($)
   await ownTimedOut($, w)
   tap('Set up now')
   await idle()
   await run($, 'init')
+  expect(JSON.parse(w.files[USER_FILE]!).projects).toBeUndefined()
+  expect(JSON.parse(w.files[USER_FILE]!).skills['b-skill']).toBeUndefined()
   const n = w.asked.length
   await turnEnd($)
   expect(w.asked.length).toBe(n)
+})
+
+test('a pending set-up is cleared at the next session start', async ($, on) => {
+  const { tap, opts } = ownLate({ answers: ['__undefined__'] })
+  const w = world(on, { [USER_FILE]: STD }, opts)
+  await start($)
+  await ownTimedOut($, w)
+  tap('Set up now')
+  await idle()
+  await start($)
+  await propose($, note('Reply in German.')) // a waiting proposal keeps the project question from asking again
+  await turnEnd($)
+  expect(w.asked.some((q) => /a-skill/.test(q) && !/not in your config/.test(q))).toBe(false)
+})
+
+test('a late Set up now where no dialog can open says what to type', async ($, on) => {
+  const { tap, opts } = ownLate({ answers: ['__undefined__'] })
+  const w = world(on, { [USER_FILE]: STD }, opts)
+  await start($)
+  await ownTimedOut($, w)
+  await propose($, note('Reply in German.'))
+  await turnEnd($) // the proposal dialog is dismissed: nothing more is asked at turn end
+  tap('Set up now')
+  await idle()
+  expect(w.logs.filter((l) => l === 'Souffleur: run /souffleur init in this project to set them up.').length).toBe(1)
+  expect(w.logs.some((l) => /set-up starts/.test(l))).toBe(false)
+  const n = w.asked.length
+  await turnEnd($)
+  expect(w.asked.length).toBe(n)
+})
+
+test('a late answer that cannot be applied says so in one line', async ($, on) => {
+  const { tap, opts } = ownLate()
+  const w = world(on, { [USER_FILE]: STD }, opts)
+  await start($)
+  await ownTimedOut($, w)
+  w.files[USER_FILE] = '{ not json' // the file was damaged meanwhile
+  tap('Ignore all here')
+  await idle()
+  expect(w.logs.filter((l) => /^Souffleur: could not act on your answer \(.+\)\. \/souffleur init asks again\.$/.test(l)).length).toBe(1)
+})
+
+test('a late answer counts names against the repository file too', async ($, on) => {
+  const user = JSON.stringify({ mode: 'enforce', trustProjects: ['/work/proj/'], skills: { 'writing-guide': { always: true } } })
+  const { tap, opts } = ownLate({ repoRoot: '/work/proj' })
+  const w = world(on, { [USER_FILE]: user }, opts)
+  await start($)
+  await ownTimedOut($, w)
+  w.files[PROJECT_FILE] = JSON.stringify({ skills: { 'a-skill': { always: true } } })
+  tap('Ignore all here')
+  await idle()
+  expect(JSON.parse(userWrites(w).at(-1)!.text).projects['/work/proj']).toEqual({ ignored: ['b-skill'] })
+})
+
+test('each question acts once: an earlier in-time set-up does not block a later late answer', async ($, on) => {
+  let t2!: (l: string) => void
+  const p2 = new Promise<string>((r) => { t2 = r })
+  const R = (l: string) => Promise.resolve(l)
+  // question 1 in time: Set up now, a-skill goes to the standard, then Stop; no key, b-skill stays unnamed
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['a-skill', 'b-skill'], holdQueue: [R('Set up now'), R('From the start'), R('Everywhere'), R(''), p2] })
+  await start($)
+  await turnEnd($)
+  expect(JSON.parse(w.files[USER_FILE]!).projects).toBeUndefined()
+  await start($)
+  await ownTimedOut($, w)
+  expect(w.asked.filter((q) => /not in your config/.test(q)).length).toBe(2)
+  t2('Ignore all here')
+  await idle()
+  expect(rootBlock(w)).toEqual({ ignored: ['b-skill'] })
 })
 
 test('a late answer to a question of an earlier session start is stale; the current one acts', async ($, on) => {
