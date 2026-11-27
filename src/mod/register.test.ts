@@ -26,7 +26,11 @@ type World = {
   /** Answers a later dialog gives. */
   answers: string[]
   /** After `n` more reads of `path` its text changes under the reader. */
-  driftAfter: (path: string, n: number) => void
+  driftAfter: (path: string, n: number, forever?: boolean) => void
+  /** A hand edit or another writer: sets the file and moves its mtime. */
+  edit: (path: string, text: string) => void
+  /** The writes to `<path>.tmp`, which `writes` leaves out. */
+  tmpWrites: { path: string; text: string }[]
   stored: Record<string, unknown>
   /** The keys written with `$.store.set`, in order. */
   storeSets: string[]
@@ -58,6 +62,8 @@ type Opts = {
   failRead?: string[]
   /** Writes to a path that matches throw. */
   failWrite?: RegExp
+  /** `mv -f` exits 1 and moves nothing. */
+  failMv?: boolean
   /** Runs after each successful write, with its path. */
   onWrite?: (path: string) => void
   /** The skill listing is empty and `$.command.list` names these. */
@@ -143,7 +149,14 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   on('session.repo', () => ({ value: opts.repoRoot ? { root: opts.repoRoot, remote: null, internal: false, name: null } : null }))
   const tools: { name: string }[] = []
   const failRead: string[] = []
-  const drift = { path: '', left: -1 }
+  const drift = { path: '', left: -1, forever: false, count: 0 }
+  const mtimes: Record<string, number> = {}
+  let tick = 0
+  const tmpWrites: World['tmpWrites'] = []
+  const put = (path: string, text: string) => {
+    files[path] = text
+    mtimes[path] = ++tick
+  }
   const toasts: string[] = []
   on('tool.register', (_, e) => {
     if (opts.failToolRegister) throw new Error('refused')
@@ -174,6 +187,19 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   on('process.run', (_, e) => {
     const init = (e as { init?: { timeoutMs?: number } }).init
     runs.push({ argv: e.argv, ...(init?.timeoutMs === undefined ? {} : { timeoutMs: init.timeoutMs }) })
+    if (e.argv[0] === 'mv' && e.argv[1] === '-f') {
+      if (opts.failMv || files[e.argv[2]!] === undefined) return { value: { exitCode: 1, stdout: '', stderr: 'mv: failed' } } as never
+      const text = files[e.argv[2]!]!
+      delete files[e.argv[2]!]
+      put(e.argv[3]!, text)
+      writes.push({ path: e.argv[3]!, text })
+      opts.onWrite?.(e.argv[3]!)
+      return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+    }
+    if (e.argv[0] === 'rm' && e.argv[1] === '-f') {
+      for (const f of e.argv.slice(2)) delete files[f]
+      return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+    }
     const out = opts.run ? opts.run(e.argv, init) : { exitCode: 0, stdout: '', stderr: '' }
     if (out instanceof Error) return { deny: out.message } as never
     return (out instanceof Promise ? out.then((value) => ({ value })) : { value: out }) as never
@@ -190,7 +216,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
     if (failRead.includes(e.path) || opts.failRead?.includes(e.path)) throw new Error('EACCES: permission denied')
     const text = files[e.path]
     if (text === undefined) throw new Error('ENOENT')
-    if (e.path === drift.path && drift.left-- < 0) return { value: `${text} ` }
+    if (e.path === drift.path && drift.left-- < 0) return { value: drift.forever ? `${text}${' '.repeat(++drift.count)}` : `${text} ` }
     return { value: text }
   })
   let classifyCalls = 0
@@ -207,10 +233,20 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   })
   on('fs.write', (_, e) => {
     if (opts.failWrite?.test(e.path)) throw new Error('ENOSPC: no space left')
-    writes.push({ path: e.path, text: e.text })
-    files[e.path] = e.text
+    if (/\.tmp$/.test(e.path)) tmpWrites.push({ path: e.path, text: e.text })
+    else writes.push({ path: e.path, text: e.text })
+    put(e.path, e.text)
     opts.onWrite?.(e.path)
     return { value: undefined }
+  })
+  on('fs.stat', (_, e) => {
+    const text = files[e.path]
+    if (text === undefined || hidden.has(e.path)) throw new Error(`stat ${e.path} failed: ENOENT`)
+    return { value: { kind: 'file', size: text.length, mtimeMs: mtimes[e.path] ?? 0, isLink: false } } as never
+  })
+  on('fs.list', (_, e) => {
+    const dir = (e as { path?: string }).path ?? ''
+    return { value: Object.keys(files).filter((f) => f.slice(0, f.lastIndexOf('/')) === dir).map((f) => ({ name: f.slice(f.lastIndexOf('/') + 1), kind: 'file', size: files[f]!.length, mtimeMs: mtimes[f] ?? 0, isLink: false })) } as never
   })
   if (opts.listOnly) on('command.list', () => ({ value: opts.listOnly!.map((name) => ({ name, description: '' })) }) as never)
   on('session.usage', () => {
@@ -271,7 +307,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('session.compact', () => (opts.skipCompact ? { skip: 'vetoed' } : { messages: [{ role: 'user', text: 'summary', toolUses: [] }] }))
   on('command.run', () => ({}))
-  return { statuses, setId: (next) => { id = next }, seen, writes, asked, options, clock, hide: (path) => void hidden.add(path), files, tools, toasts, failRead, answers, driftAfter: (path, n) => { drift.path = path; drift.left = n }, stored: storeData, storeSets, classifyCalls: () => classifyCalls, logs, runs, debugLogs, dropTool: () => { toolGone = true } }
+  return { statuses, setId: (next) => { id = next }, seen, writes, asked, options, clock, hide: (path) => void hidden.add(path), files, tools, toasts, failRead, answers, driftAfter: (path, n, forever = false) => { drift.path = path; drift.left = n; drift.forever = forever }, edit: put, tmpWrites, stored: storeData, storeSets, classifyCalls: () => classifyCalls, logs, runs, debugLogs, dropTool: () => { toolGone = true } }
 }
 
 const COMPOSE = { model: 'm', promptModel: 'm', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] } as never
@@ -1723,9 +1759,9 @@ test('the user file is read again just before the write, and a changed file stop
   const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
   await start($)
   const id = idOf(await propose($, note('Reply in German.')))
-  w.driftAfter(USER_FILE, 1)
+  w.driftAfter(USER_FILE, 1, true)
   const text = await run($, `accept ${id}`)
-  expect(text).toMatch(/changed since it was read/)
+  expect(text).toMatch(/kept changing/)
   expect(text).toMatch(/stays queued/)
   expect(w.writes.length).toBe(0)
 })
@@ -2624,7 +2660,7 @@ test('a paused session ignores replies', async ($, on) => {
 })
 
 test('a failed write is shown and told to the model as not done; the proposal stays queued', async ($, on) => {
-  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', failWrite: /souffleur\.json$/ })
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', failWrite: /souffleur\.json\.tmp$/ })
   await start($)
   const id = idOf(await propose($, note('Reply in German.')))
   await turnEnd($)
@@ -2757,7 +2793,7 @@ test('a failure after the answer was written still tells the model', async ($, o
   const id = idOf(await propose($, note('Reply in German.')))
   await turnEnd($)
   await reply($, 'accept', COMPOSER)
-  expect(w.writes.length).toBe(1)
+  expect(userWrites(w).length).toBe(1)
   expect(hasLine(w, `proposal ${id}`)).toBe(true)
 })
 
@@ -2797,7 +2833,7 @@ test('a reply first, then a late tap: one write', async ($, on) => {
   tap('Yes, everywhere')
   await idle()
   expect(userFile(w).notes.length).toBe(1)
-  expect(w.writes.length).toBe(1)
+  expect(userWrites(w).length).toBe(1)
 })
 
 test('after a timeout the next proposal still gets a dialog attempt', async ($, on) => {
@@ -3217,7 +3253,7 @@ test('a tap after a typed review timed out writes once, and a later reply word d
   expect(userFile(w).notes.length).toBe(1)
   await reply($, 'accept', COMPOSER)
   expect(userFile(w).notes.length).toBe(1)
-  expect(w.writes.length).toBe(1)
+  expect(userWrites(w).length).toBe(1)
 })
 
 test('a typed rule whose dialog never answers returns after the limit and sets no stop', async ($, on) => {
@@ -4742,4 +4778,78 @@ test('session start keeps at most 50 stored sessions and drops copies older than
   expect(keys).not.toContain('session:ancient')
   expect(keys).toContain('session:old0')
   expect(keys).not.toContain('session:old59')
+})
+
+// One careful path for every write of the user file (issue #91).
+const BAK = `${USER_FILE}.bak-`
+
+test('a failing write of the temp file leaves the user file as it was', async ($, on) => {
+  const w = world(on, { [USER_FILE]: BLOCKABLE }, { failWrite: /souffleur\.json\.tmp$/ })
+  await start($)
+  expect(await run($, 'block writing-guide')).toMatch(/could not write/)
+  expect(w.files[USER_FILE]).toBe(BLOCKABLE)
+  expect(w.runs.some((r) => r.argv[0] === 'mv')).toBe(false)
+})
+
+test('a failing move leaves the user file as it was and no temp file behind', async ($, on) => {
+  const w = world(on, { [USER_FILE]: BLOCKABLE }, { failMv: true })
+  await start($)
+  expect(await run($, 'block writing-guide')).toMatch(/could not write/)
+  expect(w.files[USER_FILE]).toBe(BLOCKABLE)
+  expect(w.files[`${USER_FILE}.tmp`]).toBe(undefined)
+})
+
+test('the file is replaced by moving a parsed temp copy over it', async ($, on) => {
+  const w = world(on, { [USER_FILE]: BLOCKABLE })
+  await start($)
+  await run($, 'block writing-guide')
+  expect(w.tmpWrites.map((x) => x.path)).toEqual([`${USER_FILE}.tmp`])
+  expect(w.runs.filter((r) => r.argv[0] === 'mv').map((r) => r.argv)).toEqual([['mv', '-f', `${USER_FILE}.tmp`, USER_FILE]])
+  expect(w.files[`${USER_FILE}.tmp`]).toBe(undefined)
+  expect(JSON.parse(w.files[USER_FILE]!).projects['/work/proj'].block).toEqual(['writing-guide'])
+})
+
+test('a second writer between read and write: both entries survive', async ($, on) => {
+  let other = false
+  const w = world(on, { [USER_FILE]: ENFORCE }, {
+    answers: 'reject',
+    onWrite: (path) => {
+      if (other || !path.endsWith('.tmp')) return
+      other = true
+      w.edit(USER_FILE, JSON.stringify({ mode: 'enforce', skills: {}, needs: {}, notes: [{ id: 'other-writer', text: 'Written by another session.' }] }))
+    },
+  })
+  await start($)
+  const id = idOf(await propose($, note('Reply in German.')))
+  expect(await run($, `accept ${id}`)).toMatch(/added note/)
+  const notes = JSON.parse(w.files[USER_FILE]!).notes as { id: string; text: string }[]
+  expect(notes.map((n) => n.text).sort()).toEqual(['Reply in German.', 'Written by another session.'])
+})
+
+test('backups: one per process, newest three kept, other suffixes untouched', async ($, on) => {
+  const old = Object.fromEntries([1, 2, 3, 4, 5].map((n) => [`${BAK}${1_700_000_000_000 + n}`, `old ${n}`]))
+  const keep = Object.fromEntries(['projects-20260101', 'notin-1', 'update-1', 'chisle-1', 'souffleur-1'].map((s) => [`${BAK}${s}`, s]))
+  const w = world(on, { [USER_FILE]: BLOCKABLE, ...old, ...keep })
+  await start($)
+  await run($, 'block writing-guide')
+  await run($, 'unblock writing-guide')
+  const digits = Object.keys(w.files).filter((f) => /souffleur\.json\.bak-\d+$/.test(f))
+  expect(digits.length).toBe(3)
+  expect(digits).toContain(`${BAK}${1_700_000_000_005}`)
+  expect(digits).toContain(`${BAK}${1_700_000_000_004}`)
+  expect(digits).not.toContain(`${BAK}${1_700_000_000_003}`)
+  for (const k of Object.keys(keep)) expect(w.files[k]).toBeDefined()
+  const fresh = digits.find((f) => Number(f.slice(BAK.length)) > 1_700_000_000_005)!
+  expect(w.files[fresh]).toBe(BLOCKABLE)
+})
+
+test('a hand edit of the user file takes effect at the next prompt', async ($, on) => {
+  const w = world(on, { [USER_FILE]: UI }, { classify: 'match' })
+  await start($)
+  await $.prompt.submit({ text: 'build me a login screen' })
+  const write = { tool: 'Write', file_path: '/work/proj/x.html', content: '' } as never
+  expect((await $.tool.call(write)).deny).toMatch(/ui-checklist/)
+  w.edit(USER_FILE, UI.replace('enforce', 'observe'))
+  await $.prompt.submit({ text: 'build me a login screen' })
+  expect((await $.tool.call(write)).deny).toBe(undefined)
 })

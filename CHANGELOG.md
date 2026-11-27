@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- Every write of `~/.claude/souffleur.json` now goes through one path: a temporary copy that is parsed back and moved over the file, a re-read right before the write with up to 3 retries when another session saved meanwhile (no lost entry), one backup per process with the newest 3 kept, and a reload of the config at the next prompt when either config file changed on disk (#91).
+
 ## [0.2.9] - 2026-11-28
 
 ### Changed
