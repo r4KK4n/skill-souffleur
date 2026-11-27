@@ -1421,3 +1421,65 @@ test('a skill loaded after the compaction asks for no invoke-again note when its
   assert.match(text, /ui-checklist/)
   assert.doesNotMatch(text, /invoke them again/)
 })
+
+// #30: a skill that never loads must not deny every call for the rest of the turn.
+const stuck = () => run(base, [prompt('screen', ['ui'])]).s
+const html = (n = 1) => Array.from({ length: n }, () => tool('Write', { path: 'x.html' }))
+
+test('release: the 4th gated call of a turn passes after 3 denials and is recorded', () => {
+  // No duty: a duty denies the next gated call once, and duties are not part of the release.
+  const { duty: _d, ...gateOnly } = base.skills['ui-checklist']!
+  const config = cfg({ skills: { ...base.skills, 'ui-checklist': gateOnly } })
+  const r = run(config, html(5), run(config, [prompt('screen', ['ui'])]).s)
+  assert.deepEqual(r.out.map((a) => denies(a).length), [1, 1, 1, 0, 0])
+  const note = r.s.observed.filter((o) => /released after 3 denials: ui-checklist did not load/.test(o.reason))
+  assert.equal(note.length, 2)
+  assert.deepEqual(r.s.errors.filter((e) => e.startsWith('gate: ')), ['gate: ui-checklist did not load after 3 denials in a turn; calls released'])
+})
+
+test('release: a skill that loads after 2 denials is gated normally, and the counter resets on the next prompt', () => {
+  const s0 = run(base, [...html(2), loadSkill('ui-checklist')], stuck()).s
+  assert.deepEqual(denies(one(base, html(1), s0)), [])
+  const stale = run(base, [compact()], s0).s
+  assert.equal(denies(one(base, html(1), stale)).length, 1, 'gated again after the compaction')
+  const released = run(base, html(4), stuck()).s
+  assert.equal(released.turnDenials?.['ui-checklist'], 3)
+  const next = run(base, [prompt('again', ['ui'])], released)
+  assert.deepEqual(next.s.turnDenials, {})
+  assert.equal(denies(one(base, html(1), next.s)).length, 1)
+})
+
+test('release: two stuck skills are counted separately', () => {
+  const two = cfg({ skills: { ...base.skills, 'css-guide': { need: 'ui', from: 'user', gate: { tools: ['Write'], paths: ['**/*.css'] } } } })
+  const s0 = run(two, [prompt('screen', ['ui'])]).s
+  const r = run(two, [...html(3), tool('Write', { path: 'a.css' }), ...html(1), tool('Write', { path: 'a.css' })], s0)
+  assert.deepEqual(r.out.map((a) => denies(a).length), [1, 1, 1, 1, 0, 1])
+})
+
+test('release: observe mode never denies, never releases and records every would-deny as before', () => {
+  const config = cfg({ mode: 'observe' })
+  const s0 = run(config, [prompt('screen', ['ui'])]).s
+  const r = run(config, html(5), s0)
+  assert.deepEqual(r.out.flatMap(denies), [])
+  assert.equal(r.s.observed.length, 5)
+  assert.ok(r.s.observed.every((o) => !/released/.test(o.reason)))
+  assert.deepEqual(r.s.errors, [])
+})
+
+test('release: an unavailable skill is never denied and is recorded as such', () => {
+  const { s } = run(base, [prompt('screen', ['ui']), prompt('2'), prompt('3')])
+  assert.equal(s.ledger['ui-checklist']!.state, 'unavailable')
+  const r = run(base, html(1), s)
+  assert.deepEqual(denies(r.out[0]!), [])
+  assert.match(r.s.observed.at(-1)!.reason, /ui-checklist.*\(skill unavailable\)/)
+})
+
+test('release: a skill rule releases after 3 denials too', () => {
+  const rule = { id: 'agent-needs-guide', before: { tools: ['Agent'] }, skill: 'writing-guide', source: 'user' }
+  const config = cfg({ rules: [rule] })
+  const s0 = run(config, [prompt()]).s
+  assert.equal(s0.ledger['writing-guide']!.state, 'absent')
+  const r = run(config, Array.from({ length: 5 }, () => tool('Agent', { brief: 'skills: none' })), s0)
+  assert.deepEqual(r.out.map((a) => denies(a).length), [1, 1, 1, 0, 0])
+  assert.ok(r.s.observed.some((o) => /released after 3 denials: writing-guide did not load/.test(o.reason)))
+})
