@@ -750,7 +750,7 @@ test('updateSigner accepts ssh-, ecdsa- and sk- key lines', () => {
 })
 
 test('updateSigner with another value → error text above', () => {
-  for (const bad of ['gpg-key', 'ssh-ed25519 AAAA\nssh-rsa BBB', '', 5, 'xssh-ed25519 A', 'ssh-', 'sk-', 'ssh- ', 'ssh-ed25519', 'ssh-ed25519 ']) {
+  for (const bad of ['gpg-key', 'ssh-ed25519 AAAA\nssh-rsa BBB', 'ssh-ed25519 AAAA c\u0000d', 'ssh-ed25519 AAAA c\u001bd', 'ssh-ed25519 AAAA c\u007fd', 'ssh-ed25519 AAAA c\rd', '', 5, 'xssh-ed25519 A', 'ssh-', 'sk-', 'ssh- ', 'ssh-ed25519', 'ssh-ed25519 ']) {
     const r = parseConfig(JSON.stringify({ updateSigner: bad }), undefined)
     assert.equal(r.config.updateSigner, undefined)
     assert.equal(r.errors.filter((e) => /updateSigner: must be an SSH public key line; ignored/.test(e)).length, 1)

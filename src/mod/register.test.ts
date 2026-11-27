@@ -3907,13 +3907,13 @@ test('update: a second start before the first detached work finishes does not sa
 
 // ---- update install ----
 
-/** Waits until the detached update work has made no new git call for a while (the work is awaited through several engine round trips). */
-const settleUpdate = async (w: World) => {
-  await updateSettled()
-  for (let quiet = 0, seen = -1; quiet < 4; await new Promise((r) => setTimeout(r, 25))) {
-    quiet = w.runs.length === seen ? quiet + 1 : 0
-    seen = w.runs.length
-  }
+/**
+ * Waits until the detached update work of `starts` session starts has said it is done (debug line `update work done`).
+ * `updateSettled()` cannot do this: the engine runs its own copy of the mod, so the copy the test imports never sets it.
+ */
+const settleUpdate = async (w: World, starts = 1) => {
+  for (let i = 0; i < 200 && w.debugLogs.filter((l) => l === 'update work done').length < starts; i++) await new Promise((r) => setTimeout(r, 15))
+  expect(w.debugLogs.filter((l) => l === 'update work done').length).toBeGreaterThanOrEqual(starts)
 }
 
 let nextId = 0
@@ -3927,17 +3927,24 @@ const OK = { exitCode: 0, stdout: '', stderr: '' }
 const STORED_NEWER = { installKind: 'folder', updateCheck: { at: Date.now(), latest: NEWER } }
 /** Nothing newer is known, so the session start does no install of its own. */
 const QUIET = { installKind: 'folder', updateCheck: { at: Date.now(), latest: 'v0.0.1' } }
-/** A folder install on a clean tag; `over` answers a git subcommand first. */
-const gitRun = (over: Record<string, { exitCode: number; stdout?: string } | Error> = {}): NonNullable<Opts['run']> => (argv) => {
-  const sub = ['rev-parse', 'status', 'describe', 'fetch', 'verify-tag', 'checkout', 'ls-remote'].find((c) => argv.includes(c))
-  if (sub !== undefined && over[sub] !== undefined) {
-    const o = over[sub]!
-    return o instanceof Error ? o : { exitCode: o.exitCode, stdout: o.stdout ?? '', stderr: '' }
+const OID = 'f'.repeat(40)
+const SSH_TAG = (name: string) => `object ${'a'.repeat(40)}\ntype commit\ntag ${name}\ntagger t <t@t> 1 +0000\n\nrelease\n-----BEGIN SSH SIGNATURE-----\nU1NIU0lH\n-----END SSH SIGNATURE-----\n`
+const GOOD = 'Good "git" signature for souffleur with ED25519 key SHA256:abc'
+type Out = { exitCode: number; stdout?: string; stderr?: string } | Error
+/** A folder install on a clean tag; `over` answers a git subcommand first (`resolve` is `rev-parse --verify`). */
+const gitRun = (over: Record<string, Out> = {}): NonNullable<Opts['run']> => (argv) => {
+  const sub = argv.includes('--verify') ? 'resolve' : ['rev-parse', 'status', 'describe', 'fetch', 'verify-tag', 'cat-file', 'checkout', 'ls-remote'].find((c) => argv.includes(c))
+  const out = (o: Out) => (o instanceof Error ? o : { exitCode: o.exitCode, stdout: o.stdout ?? '', stderr: o.stderr ?? '' })
+  if (sub !== undefined && over[sub] !== undefined) return out(over[sub]!)
+  switch (sub) {
+    case 'rev-parse': return { exitCode: 0, stdout: '\n', stderr: '' }
+    case 'resolve': return { exitCode: 0, stdout: `${OID}\n`, stderr: '' }
+    case 'describe': return { exitCode: 0, stdout: `v${PLUGIN_VERSION}\n`, stderr: '' }
+    case 'ls-remote': return { exitCode: 0, stdout: LS(NEWER), stderr: '' }
+    case 'cat-file': return { exitCode: 0, stdout: SSH_TAG(NEWER), stderr: '' }
+    case 'verify-tag': return { exitCode: 0, stdout: '', stderr: GOOD }
+    default: return OK
   }
-  if (sub === 'rev-parse') return { exitCode: 0, stdout: '\n', stderr: '' }
-  if (sub === 'describe') return { exitCode: 0, stdout: `v${PLUGIN_VERSION}\n`, stderr: '' }
-  if (sub === 'ls-remote') return { exitCode: 0, stdout: LS(NEWER), stderr: '' }
-  return OK
 }
 const ran = (w: World, sub: string) => w.runs.filter((r) => r.argv.includes(sub))
 /** The plugin root the mod asked git about. */
@@ -3951,7 +3958,7 @@ test('update auto: a verified tag is fetched, verified, checked out and said onc
   await settleUpdate(w)
   expect(w.logs.filter((l) => l === AUTO_LINE).length).toBe(1)
   expect(ran(w, 'checkout').length).toBe(1)
-  expect(ran(w, 'checkout')[0]!.argv).toContain(NEWER)
+  expect(ran(w, 'checkout')[0]!.argv.at(-1)).toBe(`${OID}^{commit}`)
   expect(ran(w, 'fetch')[0]!.timeoutMs).toBe(30000)
   for (const r of ran(w, 'status').concat(ran(w, 'describe'), ran(w, 'verify-tag'), ran(w, 'checkout'))) expect(r.timeoutMs).toBe(10000)
   expect((w.stored.updateCheck as { latest: string }).latest).toBe(NEWER)
@@ -3971,7 +3978,7 @@ test('update auto: the allowed_signers file is written with the current key befo
   const v = ran(w, 'verify-tag')[0]!.argv
   expect(v).toContain('gpg.format=ssh')
   expect(v).toContain('gpg.ssh.allowedSignersFile=/data/souffleur/allowed_signers')
-  expect(v[v.length - 1]).toBe(NEWER)
+  expect(v[v.length - 1]).toBe(OID)
 })
 
 test('update auto: a tag that does not verify says so and runs no checkout', async ($, on) => {
@@ -3990,6 +3997,7 @@ test('update auto: without updateSigner it says the no-signer line and runs no c
   await settleUpdate(w)
   expect(w.logs).toContain(`Souffleur ${NEWER} is out (you run ${PLUGIN_VERSION}). /souffleur update installs it. Set updateSigner to let auto install it.`)
   expect(w.logs.filter((l) => l.includes('is out')).length).toBe(1)
+  expect(w.stored.installKind).toBe('folder')
   expect(ran(w, 'checkout').length).toBe(0)
   expect(ran(w, 'fetch').length).toBe(0)
 })
@@ -4014,10 +4022,93 @@ for (const [name, over, reason] of [
     await start($)
     await settleUpdate(w)
     expect(w.logs).toContain(`Souffleur: not updated, ${reason}. Update by hand with git in ${rootOf(w)}.`)
+    expect(ran(w, 'status').length).toBe(1)
     expect(ran(w, 'checkout').length).toBe(0)
     expect(ran(w, 'fetch').length).toBe(0)
   })
 }
+
+test('update auto: verification and checkout use the resolved object id, never the bare tag name', async ($, on) => {
+  const w = world(on, AUTO_FILE, { stored: STORED_NEWER, run: gitRun() })
+  own(w)
+  await start($)
+  await settleUpdate(w)
+  const resolve = w.runs.find((r) => r.argv.includes('--verify'))!.argv
+  expect(resolve).toContain(`refs/tags/${NEWER}`)
+  expect(ran(w, 'cat-file')[0]!.argv).toContain(OID)
+  expect(ran(w, 'verify-tag')[0]!.argv.at(-1)).toBe(OID)
+  expect(ran(w, 'checkout')[0]!.argv.at(-1)).toBe(`${OID}^{commit}`)
+  expect(ran(w, 'checkout')[0]!.argv).not.toContain(NEWER)
+})
+
+test('update: fetch uses the repository URL of the look-up, not origin', async ($, on) => {
+  const w = world(on, AUTO_FILE, { stored: STORED_NEWER, run: gitRun() })
+  own(w)
+  await start($)
+  await settleUpdate(w)
+  const f = ran(w, 'fetch')[0]!.argv
+  expect(f).toContain('https://github.com/r4KK4n/skill-souffleur')
+  expect(f).not.toContain('origin')
+})
+
+for (const [name, over] of [
+  ['a PGP signature (no SSH armor)', { 'cat-file': { exitCode: 0, stdout: `object a\ntype commit\ntag ${NEWER}\n\nx\n-----BEGIN PGP SIGNATURE-----\nzz\n-----END PGP SIGNATURE-----\n` } }],
+  ['a tag object named for another release', { 'cat-file': { exitCode: 0, stdout: SSH_TAG('v9.9.9') } }],
+  ['a lightweight tag (no tag object)', { 'cat-file': { exitCode: 128 } }],
+  ['a verify that exits 0 without the Good line', { 'verify-tag': { exitCode: 0, stderr: 'something else' } }],
+] as const) {
+  test(`update auto: ${name} is not installed`, async ($, on) => {
+    const w = world(on, AUTO_FILE, { stored: STORED_NEWER, run: gitRun(over) })
+    own(w)
+    await start($)
+    await settleUpdate(w)
+    expect(ran(w, 'cat-file').length).toBe(1)
+    expect(ran(w, 'checkout').length).toBe(0)
+    expect(w.logs.some((l) => l.includes('updated to'))).toBe(false)
+    expect(w.logs.some((l) => l.includes('is not signed by your updateSigner key'))).toBe(true)
+  })
+  test(`/souffleur update: ${name} is not installed`, async ($, on) => {
+    const w = world(on, AUTO_FILE, { stored: QUIET, run: gitRun(over) })
+    own(w)
+    await start($)
+    expect(await runUser($, 'update')).toMatch(/not signed by your updateSigner key; not installed/)
+    expect(ran(w, 'checkout').length).toBe(0)
+  })
+}
+
+test('/souffleur update: checks out the resolved object id also when unsigned', async ($, on) => {
+  const w = world(on, SETUP, { stored: QUIET, run: gitRun() })
+  own(w)
+  await start($)
+  await runUser($, 'update')
+  expect(ran(w, 'checkout')[0]!.argv.at(-1)).toBe(`${OID}^{commit}`)
+})
+
+test('/souffleur update: a git failure answers with the reason, not the usage line', async ($, on) => {
+  const w = world(on, SETUP, { stored: QUIET, run: gitRun({ fetch: { exitCode: 1 } }) })
+  own(w)
+  await start($)
+  const text = await runUser($, 'update')
+  expect(text).toBe(`Souffleur: could not install ${NEWER}: git fetch exited with 1.`)
+})
+
+test('/souffleur update: a rejected git call answers with the reason too', async ($, on) => {
+  const w = world(on, SETUP, { stored: QUIET, run: gitRun({ fetch: new Error('timed out') }) })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toMatch(/^Souffleur: could not install v0\.2\.99: /)
+})
+
+test('update auto: a git failure logs to debug, says nothing and does not mark the tag shown', async ($, on) => {
+  const w = world(on, AUTO_FILE, { stored: STORED_NEWER, run: gitRun({ fetch: { exitCode: 1 } }) })
+  own(w)
+  await start($)
+  await settleUpdate(w)
+  expect(ran(w, 'fetch').length).toBe(1)
+  expect(w.debugLogs.some((l) => l.startsWith('update install failed: '))).toBe(true)
+  expect(w.logs.some((l) => l.includes('updated to') || l.includes('is out'))).toBe(false)
+  expect((w.stored[`session:upd-${nextId}`] as { updateShown?: string } | undefined)?.updateShown).toBeUndefined()
+})
 
 test('update auto: a failed fetch installs nothing and says no done line', async ($, on) => {
   const w = world(on, AUTO_FILE, { stored: STORED_NEWER, run: gitRun({ fetch: { exitCode: 1 } }) })
