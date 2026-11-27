@@ -1451,7 +1451,43 @@ test('release: a skill that loads after 2 denials is gated normally, and the cou
   assert.equal(released.turnDenials?.['ui-checklist'], 3)
   const next = run(base, [prompt('again', ['ui'])], released)
   assert.deepEqual(next.s.turnDenials, {})
+  assert.deepEqual(next.s.turnTries, [])
   assert.equal(denies(one(base, html(1), next.s)).length, 1)
+})
+
+// Without the duty, which denies the next gated call once and is not part of the release.
+const gateOnlyCfg = () => {
+  const { duty: _d, ...gateOnly } = base.skills['ui-checklist']!
+  return cfg({ skills: { ...base.skills, 'ui-checklist': gateOnly } })
+}
+
+test('release: a Skill load attempt made before the first denial does not count', () => {
+  const config = gateOnlyCfg()
+  const s0 = run(config, [prompt('screen', ['ui'])]).s
+  const r = run(config, [tryLoad(), ...html(4)], s0)
+  assert.deepEqual(r.out.slice(1).map((a) => denies(a).length), [1, 1, 1, 1], 'the 4th call is still denied')
+  const after = run(config, [...html(1), tryLoad(), ...html(4)], s0)
+  assert.deepEqual(after.out.slice(2).map((a) => denies(a).length), [1, 1, 0, 0], 'a try after a denial releases as before')
+})
+
+test('release: the restore denial after a compaction counts, so a try made in answer to it can release', () => {
+  const config = gateOnlyCfg()
+  // 1 restore denial (it names the skill), the try, then 2 more denials make 3; the next call passes.
+  const r = run(config, [prompt('screen', ['ui']), compact(), ...html(1), tryLoad(), ...html(3)])
+  assert.deepEqual(r.out.slice(2).map((a) => denies(a).length), [1, 0, 1, 1, 0])
+})
+
+test('release: a skill that loads starts its release state again, so a later stall needs a fresh try', () => {
+  const config = gateOnlyCfg()
+  const s0 = run(config, [prompt('screen', ['ui']), ...html(1), tryLoad(), loadSkill('ui-checklist'), compact()]).s
+  assert.equal(s0.turnDenials?.['ui-checklist'], undefined)
+  assert.deepEqual(s0.turnTries, [])
+  // The first call after the compaction is denied by the restore request and counts for its skill, the next 3 are gate denials:
+  // the count is past 3, but there is no load attempt since the load, so all 4 calls are denied.
+  const r = run(config, html(4), s0)
+  assert.deepEqual(r.out.map((a) => denies(a).length), [1, 1, 1, 1], 'the denial before the load does not add up')
+  const again = run(config, [tryLoad(), ...html(1)], r.s)
+  assert.equal(denies(again.out[1]!).length, 0, 'a fresh try after the denials releases')
 })
 
 test('release: two stuck skills are counted separately', () => {
