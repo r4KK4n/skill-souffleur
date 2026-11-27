@@ -752,6 +752,34 @@ test('an in-process resume goes through the resume step: a stored pause is not c
   expect(text).not.toMatch(/\(paused\)/)
 })
 
+test('a stored copy without the rule fields still restores on an id change', async ($, on) => {
+  const { config } = parseConfig(ALWAYS, undefined)
+  const other: Record<string, unknown> = { ...decide(config, initSession(config, 's2', 1, 'startup', '2.1.331'), { type: 'skill', now: 2, skill: 'writing-guide' }).session }
+  delete other.ruleSkills
+  delete other.openRules
+  delete other.duties
+  const w = world(on, { [USER_FILE]: ALWAYS }, { stored: { 'session:s2': other } })
+  await start($)
+  w.setId('s2')
+  expect(await table($)).toMatch(/writing-guide \| loaded/)
+  expect(await table($)).toMatch(/writing-guide \| loaded/)
+})
+
+test('an id change with an empty $.state is found through the process copy and resumed', async ($, on) => {
+  const { config } = parseConfig(ALWAYS, undefined)
+  const other = { ...decide(config, initSession(config, 's2', 1, 'startup', '2.1.331'), { type: 'skill', now: 2, skill: 'writing-guide' }).session, paused: true }
+  on('state.get', () => ({ value: { value: undefined, version: 0 } }) as never)
+  on('state.set', () => ({ value: { isSet: true, version: 1 } }) as never)
+  const w = world(on, { [USER_FILE]: ALWAYS }, { stored: { 'session:s2': other } })
+  await start($)
+  await skillLoaded($, 'writing-guide')
+  w.setId('s2')
+  const text = await table($)
+  expect(text).toMatch(/writing-guide \| loaded/)
+  expect(text).not.toMatch(/\(paused\)/)
+  expect(JSON.stringify(w.stored['session:s1'])).toMatch(/"loaded"/)
+})
+
 test('an id change to a session with no stored copy starts fresh', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS })
   await start($)

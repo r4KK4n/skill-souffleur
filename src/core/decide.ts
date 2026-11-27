@@ -149,7 +149,6 @@ export function initSession(config: Config, id: string, now: number, start: 'sta
   const s: Session = {
     ledger: initLedger(config, now, start, ruleSkillNames(config)),
     needs: {},
-    duties: [],
     paused: false,
     id,
     mainSkillCalls: [],
@@ -166,7 +165,7 @@ export function initSession(config: Config, id: string, now: number, start: 'sta
 }
 
 function emptyRules() {
-  return { ruleSkills: [], openRules: [], fieldDenied: [], proposals: [], declined: [], notesSent: [], freshNotes: [], revise: [], proposed: [] }
+  return { ruleSkills: [], openRules: [], duties: [], fieldDenied: [], proposals: [], declined: [], notesSent: [], freshNotes: [], revise: [], proposed: [] }
 }
 
 /** A session stored before a field existed gets that field empty. */
