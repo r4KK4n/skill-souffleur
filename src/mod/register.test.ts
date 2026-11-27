@@ -29,7 +29,7 @@ type World = {
   driftAfter: (path: string, n: number, forever?: boolean) => void
   /** A hand edit or another writer: sets the file and moves its mtime. */
   edit: (path: string, text: string) => void
-  /** The writes to `<path>.tmp`, which `writes` leaves out. */
+  /** The writes to `<path>.tmp-<time>-<random>`, which `writes` leaves out. */
   tmpWrites: { path: string; text: string }[]
   stored: Record<string, unknown>
   /** The keys written with `$.store.set`, in order. */
@@ -64,6 +64,8 @@ type Opts = {
   failWrite?: RegExp
   /** `mv -f` exits 1 and moves nothing. */
   failMv?: boolean
+  /** `$.fs.stat(path, { resolve: true })` says the path is a symlink to this target. */
+  linkTo?: Record<string, string>
   /** Runs after each successful write, with its path. */
   onWrite?: (path: string) => void
   /** The skill listing is empty and `$.command.list` names these. */
@@ -233,7 +235,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   })
   on('fs.write', (_, e) => {
     if (opts.failWrite?.test(e.path)) throw new Error('ENOSPC: no space left')
-    if (/\.tmp$/.test(e.path)) tmpWrites.push({ path: e.path, text: e.text })
+    if (/\.tmp-/.test(e.path)) tmpWrites.push({ path: e.path, text: e.text })
     else writes.push({ path: e.path, text: e.text })
     put(e.path, e.text)
     opts.onWrite?.(e.path)
@@ -242,7 +244,8 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   on('fs.stat', (_, e) => {
     const text = files[e.path]
     if (text === undefined || hidden.has(e.path)) throw new Error(`stat ${e.path} failed: ENOENT`)
-    return { value: { kind: 'file', size: text.length, mtimeMs: mtimes[e.path] ?? 0, isLink: false } } as never
+    const real = opts.linkTo?.[e.path]
+    return { value: { kind: 'file', size: text.length, mtimeMs: mtimes[e.path] ?? 0, isLink: real !== undefined, ...(real === undefined ? {} : { realPath: real }) } } as never
   })
   on('fs.list', (_, e) => {
     const dir = (e as { path?: string }).path ?? ''
@@ -2660,7 +2663,7 @@ test('a paused session ignores replies', async ($, on) => {
 })
 
 test('a failed write is shown and told to the model as not done; the proposal stays queued', async ($, on) => {
-  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', failWrite: /souffleur\.json\.tmp$/ })
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', failWrite: /souffleur\.json\.tmp-/ })
   await start($)
   const id = idOf(await propose($, note('Reply in German.')))
   await turnEnd($)
@@ -3332,7 +3335,7 @@ test('block writes the block, backs the file up once and applies at once', async
   await start($)
   expect(await sectionText($)).toMatch(/terse:terse-mode/)
   expect(await run($, 'block terse:terse-mode')).toBe('Souffleur: terse:terse-mode blocked in /work/proj; other projects keep it.')
-  const backups = w.writes.filter((x) => /souffleur\.json\.bak-\d+$/.test(x.path))
+  const backups = w.writes.filter((x) => /souffleur\.json\.bak-\d{13}$/.test(x.path))
   expect(backups.length).toBe(1)
   expect(backups[0]!.text).toBe(BLOCKABLE)
   const written = JSON.parse(userWrites(w).at(-1)!.text)
@@ -3883,7 +3886,7 @@ test('init saves one backup per session like the other writers', async ($, on) =
   const w = world(on, { [USER_FILE]: user }, { repoRoot: MAIN, projectSkills: ['a-skill', 'b-skill'], answers: ['From the start', 'Everywhere', 'From the start', 'Everywhere'] })
   await start($)
   await run($, 'init')
-  const backups = w.writes.filter((x) => /souffleur\.json\.bak-\d+$/.test(x.path))
+  const backups = w.writes.filter((x) => /souffleur\.json\.bak-\d{13}$/.test(x.path))
   expect(backups.length).toBe(1)
   expect(backups[0]!.text).toBe(user)
 })
@@ -4784,7 +4787,7 @@ test('session start keeps at most 50 stored sessions and drops copies older than
 const BAK = `${USER_FILE}.bak-`
 
 test('a failing write of the temp file leaves the user file as it was', async ($, on) => {
-  const w = world(on, { [USER_FILE]: BLOCKABLE }, { failWrite: /souffleur\.json\.tmp$/ })
+  const w = world(on, { [USER_FILE]: BLOCKABLE }, { failWrite: /souffleur\.json\.tmp-/ })
   await start($)
   expect(await run($, 'block writing-guide')).toMatch(/could not write/)
   expect(w.files[USER_FILE]).toBe(BLOCKABLE)
@@ -4796,16 +4799,18 @@ test('a failing move leaves the user file as it was and no temp file behind', as
   await start($)
   expect(await run($, 'block writing-guide')).toMatch(/could not write/)
   expect(w.files[USER_FILE]).toBe(BLOCKABLE)
-  expect(w.files[`${USER_FILE}.tmp`]).toBe(undefined)
+  expect(Object.keys(w.files).filter((f) => f.includes('.tmp-'))).toEqual([])
 })
 
 test('the file is replaced by moving a parsed temp copy over it', async ($, on) => {
   const w = world(on, { [USER_FILE]: BLOCKABLE })
   await start($)
   await run($, 'block writing-guide')
-  expect(w.tmpWrites.map((x) => x.path)).toEqual([`${USER_FILE}.tmp`])
-  expect(w.runs.filter((r) => r.argv[0] === 'mv').map((r) => r.argv)).toEqual([['mv', '-f', `${USER_FILE}.tmp`, USER_FILE]])
-  expect(w.files[`${USER_FILE}.tmp`]).toBe(undefined)
+  expect(w.tmpWrites.length).toBe(1)
+  const tmp = w.tmpWrites[0]!.path
+  expect(tmp).toMatch(/souffleur\.json\.tmp-\d+-[a-z0-9]+$/)
+  expect(w.runs.filter((r) => r.argv[0] === 'mv').map((r) => r.argv)).toEqual([['mv', '-f', tmp, USER_FILE]])
+  expect(w.files[tmp]).toBe(undefined)
   expect(JSON.parse(w.files[USER_FILE]!).projects['/work/proj'].block).toEqual(['writing-guide'])
 })
 
@@ -4814,7 +4819,7 @@ test('a second writer between read and write: both entries survive', async ($, o
   const w = world(on, { [USER_FILE]: ENFORCE }, {
     answers: 'reject',
     onWrite: (path) => {
-      if (other || !path.endsWith('.tmp')) return
+      if (other || !path.includes('.tmp-')) return
       other = true
       w.edit(USER_FILE, JSON.stringify({ mode: 'enforce', skills: {}, needs: {}, notes: [{ id: 'other-writer', text: 'Written by another session.' }] }))
     },
@@ -4828,12 +4833,12 @@ test('a second writer between read and write: both entries survive', async ($, o
 
 test('backups: one per process, newest three kept, other suffixes untouched', async ($, on) => {
   const old = Object.fromEntries([1, 2, 3, 4, 5].map((n) => [`${BAK}${1_700_000_000_000 + n}`, `old ${n}`]))
-  const keep = Object.fromEntries(['projects-20260101', 'notin-1', 'update-1', 'chisle-1', 'souffleur-1'].map((s) => [`${BAK}${s}`, s]))
+  const keep = Object.fromEntries(['projects-20260101', '20261128', 'notin-1', 'update-1', 'chisle-1', 'souffleur-1'].map((s) => [`${BAK}${s}`, s]))
   const w = world(on, { [USER_FILE]: BLOCKABLE, ...old, ...keep })
   await start($)
   await run($, 'block writing-guide')
   await run($, 'unblock writing-guide')
-  const digits = Object.keys(w.files).filter((f) => /souffleur\.json\.bak-\d+$/.test(f))
+  const digits = Object.keys(w.files).filter((f) => /souffleur\.json\.bak-\d{13}$/.test(f))
   expect(digits.length).toBe(3)
   expect(digits).toContain(`${BAK}${1_700_000_000_005}`)
   expect(digits).toContain(`${BAK}${1_700_000_000_004}`)
@@ -4852,4 +4857,32 @@ test('a hand edit of the user file takes effect at the next prompt', async ($, o
   w.edit(USER_FILE, UI.replace('enforce', 'observe'))
   await $.prompt.submit({ text: 'build me a login screen' })
   expect((await $.tool.call(write)).deny).toBe(undefined)
+})
+
+test('two writes use different temp files, and a failed one removes only its own', async ($, on) => {
+  const w = world(on, { [USER_FILE]: BLOCKABLE })
+  await start($)
+  await run($, 'block writing-guide')
+  await run($, 'unblock writing-guide')
+  expect(w.tmpWrites.length).toBe(2)
+  expect(w.tmpWrites[0]!.path).not.toBe(w.tmpWrites[1]!.path)
+})
+
+test('a failed move removes its own temp file and leaves a foreign one', async ($, on) => {
+  const other = `${USER_FILE}.tmp-1-foreign`
+  const v = world(on, { [USER_FILE]: BLOCKABLE, [other]: '{}' }, { failMv: true })
+  await start($)
+  await run($, 'block writing-guide')
+  expect(v.files[other]).toBe('{}')
+  expect(Object.keys(v.files).filter((f) => f.includes('.tmp-'))).toEqual([other])
+})
+
+test('a symlinked user file is written through, the link stays', async ($, on) => {
+  const real = '/dotfiles/souffleur.json'
+  const w = world(on, { [USER_FILE]: BLOCKABLE, [real]: BLOCKABLE }, { linkTo: { [USER_FILE]: real } })
+  await start($)
+  await run($, 'block writing-guide')
+  expect(w.runs.filter((r) => r.argv[0] === 'mv').map((r) => r.argv[3])).toEqual([real])
+  expect(JSON.parse(w.files[real]!).projects['/work/proj'].block).toEqual(['writing-guide'])
+  expect(w.files[USER_FILE]).toBe(BLOCKABLE)
 })

@@ -2,13 +2,13 @@
 
 Reads:
 
-- `~/.claude/souffleur.json` and the project's `.claude/souffleur.json`, at session start and on every `/souffleur` command.
+- `~/.claude/souffleur.json` and the project's `.claude/souffleur.json`, at session start, on every `/souffleur` command, and at the next prompt after either file changed on disk (its modification time or size).
 - The text of each skill the main session loads, for learning (see [Rules and notes](config.md#rules-and-notes)): the skill file at its path, up to 60,000 characters, sent to the small model. This needs your user file and stops under `/souffleur pause` or `"learn": { "skills": false }`.
 - Only during `/souffleur init` and `/souffleur migrate`: your `~/.claude/settings.json`, your user and project `CLAUDE.md` files, the files those import with `@path` (one level), and the current project's memory index. `init` also reads `~/.claude/plugins/installed_plugins.json` and the `hooks/hooks.json` and `.claude-plugin/plugin.json` of an installed plugin, to find out whether a plugin skill is loaded by a `SessionStart` hook.
 
 Writes:
 
-- `/souffleur init` writes `~/.claude/souffleur.json` after each of your answers, and so does a yes to a rule or note proposal. `/souffleur migrate` writes `settings.json` only after you answer `Turn off`, with a backup copy first.
+- `/souffleur init` writes `~/.claude/souffleur.json` after each of your answers, and so does a yes to a rule or note proposal. `/souffleur migrate` writes `settings.json` only after you answer `Turn off`, with a backup copy first. Every write of the user file goes through a temporary file `souffleur.json.tmp-<time>-<random>` next to it that replaces the file in one move; a symlinked `souffleur.json` is written through to what it points to. The mod API does not expose a file's mode, so the replacement file gets the default mode of a new file, not the old file's. Before the first write after a session start it saves `souffleur.json.bak-<ms>` and keeps the newest three of those (a copy with another suffix is never removed).
 
 Stores, in Claude Code's plugin store on your machine:
 

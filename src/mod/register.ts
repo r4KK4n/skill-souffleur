@@ -1206,7 +1206,7 @@ const EDIT_TRIES = 3
 const BACKUPS_KEPT = 3
 const same = (a: unknown, b: unknown) => Object.is(a, b) || JSON.stringify(a) === JSON.stringify(b)
 
-/** The one way the user file is written: `<file>.tmp`, parsed back, then moved over the file. */
+/** The one way the user file is written: `<file>.tmp-<time>-<random>` (its own name per write), parsed back, then moved over the file. */
 async function editUserFile(
   $: Dollar,
   change: (doc: unknown) => unknown,
@@ -1216,7 +1216,9 @@ async function editUserFile(
   const fail = (kind: EditFailure['kind'], detail: string, text: string): EditFailure => ({ ok: false, kind, detail, text })
   if (!home) return fail('home', '', 'the home folder is unknown, so nothing was written')
   const path = `${home}/.claude/souffleur.json`
-  const tmp = `${path}.tmp`
+  // A symlinked config is written through: the copy goes next to, and over, what the link leads to.
+  const target = (await $.fs.stat(path, { resolve: true }).catch(() => undefined))?.realPath ?? path
+  const tmp = `${target}.tmp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   const shown = shownPath(home, path)
   const dropTmp = () => $.process.run(['rm', '-f', tmp], { timeoutMs: 10_000 }).catch(() => undefined)
   for (let attempt = 0; attempt < EDIT_TRIES; attempt++) {
@@ -1261,7 +1263,7 @@ async function editUserFile(
         await $.fs.write(`${path}.bak-${Date.now()}`, st.text)
         backedUp = true
       }
-      const moved = await $.process.run(['mv', '-f', tmp, path], { timeoutMs: 10_000 })
+      const moved = await $.process.run(['mv', '-f', tmp, target], { timeoutMs: 10_000 })
       if (moved.exitCode !== 0) throw new Error(`mv exited ${moved.exitCode}${moved.stderr ? `: ${moved.stderr.trim()}` : ''}`)
     } catch (err) {
       await dropTmp()
@@ -1275,8 +1277,8 @@ async function editUserFile(
   return fail('changed', '', `${shown} kept changing while it was written, so nothing was written`)
 }
 
-const USER_BACKUP = /^souffleur\.json\.bak-(\d+)$/
-/** Keeps the newest `BACKUPS_KEPT` copies named `souffleur.json.bak-<digits>`; any other suffix is somebody's own copy and stays. */
+const USER_BACKUP = /^souffleur\.json\.bak-(\d{13})$/
+/** Keeps the newest `BACKUPS_KEPT` copies named `souffleur.json.bak-<13-digit ms>`; any other suffix is somebody's own copy and stays. */
 async function pruneBackups($: Dollar, dir: string): Promise<void> {
   try {
     const stamps = (await $.fs.list(dir)).flatMap((f: { name: string }) => {
