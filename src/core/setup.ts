@@ -169,7 +169,7 @@ export function hasProjectKey(userConfig: unknown, root: string): boolean {
 }
 
 /** The user file with the skill under `projects[root].ignored`. A full list leaves the file as it was and says so. */
-export function ignoreInProject(userConfig: unknown, root: string, skill: string): { config: unknown; note?: string } {
+export function ignoreInProject(userConfig: unknown, root: string, skill: string): { config: unknown; note?: string; pruned?: string[] } {
   const o = openBlock(userConfig, root)
   const list = Array.isArray(o.block.ignored) ? (o.block.ignored as unknown[]) : []
   if (list.includes(skill)) return { config: closeBlock(o) }
@@ -182,7 +182,7 @@ export function ignoreInProject(userConfig: unknown, root: string, skill: string
  * The user file with the skill added to `projects[root].skills`, kept as `choice` says. A need text the standard already
  * uses under another meaning is forked to a free key; the need is written into the block unless the standard has it unchanged.
  */
-export function addSkillToProject(userConfig: unknown, root: string, skill: string, choice: 'start' | 'injected' | 'need', need?: NeedText): { config: unknown; note?: string } {
+export function addSkillToProject(userConfig: unknown, root: string, skill: string, choice: 'start' | 'injected' | 'need', need?: NeedText): { config: unknown; note?: string; pruned?: string[] } {
   const o = openBlock(userConfig, root)
   const skills: Record<string, unknown> = isObject(o.block.skills) ? { ...o.block.skills } : {}
   if (!(skill in skills) && Object.keys(skills).length >= MAX_LIST) return { config: userConfig, note: `${skill}: this project's block already holds ${MAX_LIST} skills, so nothing was written for it.` }
