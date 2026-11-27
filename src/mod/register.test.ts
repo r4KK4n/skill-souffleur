@@ -5550,7 +5550,7 @@ test('update: a drive-letter CLAUDE_CONFIG_DIR counts as owned (no install)', as
   expect(ran(w, 'checkout').length).toBe(0)
 })
 
-for (const bad of ['~/cc', 'cc', '.', '', '   ', '/']) {
+for (const bad of ['~/cc', 'cc', '.', '', '   ', '/', '/.', '/x/..']) {
   test(`config dir: CLAUDE_CONFIG_DIR=${JSON.stringify(bad)} is not absolute, so ~/.claude is used`, async ($, on) => {
     const w = world(on, { [USER_FILE]: ALWAYS }, { skills: SKILLS, env: { CLAUDE_CONFIG_DIR: bad } })
     await start($)

@@ -107,7 +107,8 @@ async function configDirEnv($: Dollar): Promise<string | undefined> {
   const raw: string | undefined = await $.env.get('CLAUDE_CONFIG_DIR').catch(() => undefined)
   const cfg = raw?.trim()
   if (!cfg || !/^(\/|[A-Za-z]:[\\/]|\\\\)/.test(cfg)) return undefined
-  const dir = dropSlash(cfg)
+  // `/.` or `/x/..` is the root too: collapse a `/` path before the root check.
+  const dir = cfg.startsWith('/') ? collapsePath(cfg) : dropSlash(cfg)
   return /^([A-Za-z]:)?[\\/]*$/.test(dir) ? undefined : dir
 }
 
