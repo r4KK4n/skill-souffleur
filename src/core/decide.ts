@@ -76,6 +76,8 @@ export type Session = {
   turnTries?: SkillName[]
   /** When Souffleur last saw the session: a person's prompt or a main-loop turn end. Shown in the status line; kept over reload and resume. */
   lastSeen?: number
+  /** The release tag whose notify line this session already showed; kept over reload and resume. */
+  updateShown?: string
 }
 
 export type CoreEvent =
@@ -86,7 +88,7 @@ export type CoreEvent =
   | { type: 'prompt'; now: number; text: string; fromUser: boolean; matched: NeedName[]; root?: string; classifierFailed?: boolean; workFailed?: boolean; deliverable?: Deliverable }
   /** `present` names the arguments the call carries, for field rules. */
   | { type: 'tool'; now: number; tool: string; path?: string; command?: string; brief?: string; skill?: string; model?: string; present?: string[]; agentId?: string; root?: string; tree?: string }
-  | { type: 'command'; now: number; args: string; root?: string; /** The small-model count over all sessions, from the plugin store. */ total?: ModelUse }
+  | { type: 'command'; now: number; args: string; root?: string; /** The small-model count over all sessions, from the plugin store. */ total?: ModelUse; /** What the stored release check says. */ update?: UpdateInfo }
   | { type: 'typed'; now: number; name: string }
   | { type: 'agentDone'; now: number }
   /** A main-loop turn ended (any reason): the session is alive. */
@@ -660,7 +662,7 @@ function onCommand(config: Config, s: Session, e: Extract<CoreEvent, { type: 'co
   switch (verb) {
     case '':
     case 'status':
-      return reply(s, statusText(config, s, e.now, e.root, e.total))
+      return reply(s, statusText(config, s, e.now, e.root, e.total, e.update))
     case 'pause':
       return reply({ ...s, paused: true }, 'Souffleur: paused for this session: no restore requests, no need detection, no turn-end questions, no gate, duty or brief denial. /souffleur resume turns them on again.')
     case 'resume':

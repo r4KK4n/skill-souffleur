@@ -17,6 +17,9 @@ import type { ModelUse, UsageFields } from '../core/cost.ts'
 import type { Config, Note, Rule } from '../core/types.ts'
 import { notices, startNotice } from '../core/notices.ts'
 import { PLUGIN_VERSION } from './version.ts'
+import { isCheckDue, isUpdateCheck, newestRelease, updateLine } from '../core/update.ts'
+import type { UpdateInfo } from '../core/status.ts'
+import { compareVersions } from '../core/version.ts'
 import { isFromUser, isUserOrigin, presentArgs, toolFields } from './map.ts'
 
 // The hooks' `$` is the engine interface; the adapter calls only documented members.
@@ -175,6 +178,66 @@ async function persist($: Dollar, l: Loaded, s0: Session, quiet = false): Promis
   $.ui.status(!l.setUp && !s.errors.length ? NOT_SET_UP : statusLine(s, l.config.mode, sectionNotes(l.config, l.root).leftOut.length, l.config, l.root))
   await $.state.set(REF, s)
   await $.store.set(`session:${s.id}`, s)
+}
+
+/** Plugin store key of the last release check. */
+const UPDATE_KEY = 'updateCheck'
+const REPO_URL = 'https://github.com/r4KK4n/skill-souffleur'
+
+/** The detached update work of the last session start, so a test can wait for it. */
+let updateWork: Promise<void> = Promise.resolve()
+export const updateSettled = (): Promise<void> => updateWork
+
+async function readCheck($: Dollar): Promise<{ at: number; latest?: string } | undefined> {
+  try {
+    const stored: unknown = await $.store.get(UPDATE_KEY)
+    return isUpdateCheck(stored) ? stored : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** A folder install when the plugin root is the top level of a git work tree; anything else (or no git) is a marketplace install. */
+export async function installKind($: Dollar): Promise<'folder' | 'market'> {
+  try {
+    const root: string = $.plugin.root
+    const r = await $.process.run(['git', '-C', root, 'rev-parse', '--show-toplevel'], { timeoutMs: 5000 })
+    return r.exitCode === 0 && String(r.stdout).trim() === root ? 'folder' : 'market'
+  } catch {
+    return 'market'
+  }
+}
+
+/** Looks for a newer release tag and stores the result. Never throws; a failure stores the time so one try happens per day. */
+export async function checkForUpdate($: Dollar, l: Loaded, at: number): Promise<void> {
+  const before = await readCheck($)
+  try {
+    if (l.config.update === 'off' || !isCheckDue(before, at)) return
+    let check: { at: number; latest?: string }
+    try {
+      const r = await $.process.run(['git', 'ls-remote', '--tags', '--refs', REPO_URL], { timeoutMs: 15000 })
+      if (r.exitCode !== 0) throw new Error(`git exited with ${r.exitCode}`)
+      const out = String(r.stdout)
+      const newest = newestRelease(out, PLUGIN_VERSION)
+      if (newest !== undefined) check = { at, latest: newest }
+      else if (out.trim() !== '' && !/^[0-9a-f]+\trefs\/tags\//m.test(out)) {
+        $.ui.log('update check: unparsable ls-remote output', { to: 'debug' })
+        check = { at }
+      } else check = { at, latest: `v${PLUGIN_VERSION}` }
+    } catch (err) {
+      $.ui.log(`update check failed: ${message(err)}`, { to: 'debug' })
+      check = { at, ...(before?.latest === undefined ? {} : { latest: before.latest }) }
+    }
+    await $.store.set(UPDATE_KEY, check)
+  } catch {
+    // A courtesy check: the next start tries again.
+  }
+}
+
+/** The stored check as `/souffleur` shows it. */
+async function updateInfo($: Dollar): Promise<UpdateInfo> {
+  const c = await readCheck($)
+  return { current: PLUGIN_VERSION, ...(c?.latest === undefined ? {} : { latest: c.latest }), ...(c === undefined ? {} : { at: c.at }) }
 }
 
 /** Stored copies of sessions not touched for this long are removed at session start. */
@@ -1677,9 +1740,18 @@ export const register: Register = (on) => {
       // Problems that hold at the start are news once; a resumed session's stored `noticed` keeps them from repeating.
       const first = notices(l.config, s, s, l.root)
       s = first.session
+      // A newer release found earlier is shown once per session (the mark survives reload and resume).
+      const found = l.config.update === 'off' ? undefined : (await readCheck($))?.latest
+      const tell = found !== undefined && compareVersions(found.slice(1), PLUGIN_VERSION) === 1 && s.updateShown !== found ? found : undefined
+      if (tell !== undefined) s = { ...s, updateShown: tell }
       await persist($, l, s, true)
       say($, l, startNotice(l.config, s, l.setUp, PLUGIN_VERSION))
       for (const line of first.lines) say($, l, line)
+      // Neither the line nor the check may hold the session start: both run detached.
+      updateWork = (async () => {
+        if (tell !== undefined) say($, l, updateLine((await installKind($)) === 'folder' ? 'notify' : 'notify-market', tell, PLUGIN_VERSION))
+        await checkForUpdate($, l, now())
+      })().catch(() => {})
     })
     await pruneStore($, await $.session.id())
     await safe($, 'installed', undefined, () => refreshInstalled($))
@@ -1925,7 +1997,8 @@ export const register: Register = (on) => {
         loaded = undefined
         await apply($, (l0) => ({ type: 'config', now: now(), errors: l0.errors }))
         const total = await readTotal($)
-        const { actions, l } = await apply($, (l0) => ({ type: 'command', now: now(), args: e.args ?? '', root: l0.root, ...(total === undefined ? {} : { total }) }))
+        const update = await updateInfo($)
+        const { actions, l } = await apply($, (l0) => ({ type: 'command', now: now(), args: e.args ?? '', root: l0.root, update, ...(total === undefined ? {} : { total }) }))
         const text = actions.flatMap((a) => (a.kind === 'reply' ? [a.text] : []))[0]
         const verb = (e.args ?? '').trim().split(/\s+/)[0] ?? ''
         const note = '\n\nSouffleur is not set up: there is no ~/.claude/souffleur.json. Run /souffleur init to add one.'

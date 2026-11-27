@@ -5,6 +5,7 @@ import { decide, initSession } from '../core/decide.ts'
 import { parseConfig } from '../core/config.ts'
 import { makeProposal } from '../core/proposals.ts'
 import { hashKey, skillHash } from '../core/learn.ts'
+import { updateSettled } from './register.ts'
 
 const HOME = '/users/test'
 const USER_FILE = `${HOME}/.claude/souffleur.json`
@@ -32,6 +33,8 @@ type World = {
   classifyCalls: () => number
   /** The lines written with `$.ui.log` (transcript). */
   logs: string[]
+  /** Every `$.process.run` call: its argv and timeout. */
+  runs: { argv: readonly string[]; timeoutMs?: number }[]
   /** The lines written with `$.ui.log(..., { to: 'debug' })`. */
   debugLogs: string[]
   /** From now on `$.tool.list` does not show the propose tool, as after a disconnect. */
@@ -101,6 +104,8 @@ type Opts = {
   holdFirstAsk?: Promise<string>
   /** The first dialogs are held, one promise each, in order; later dialogs take `answers`. */
   holdQueue?: Promise<string>[]
+  /** What `$.process.run` answers; sees the argv. Absent: every run exits 0 with no output. */
+  run?: (argv: readonly string[], init?: { timeoutMs?: number }) => { exitCode: number; stdout: string; stderr: string } | Promise<{ exitCode: number; stdout: string; stderr: string }> | Error
 }
 
 /** Answers every call the mod makes on `$`; files maps an absolute path to its text, a missing path throws. */
@@ -161,6 +166,14 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
     }
     logs.push(e.text)
     return { value: undefined } as never
+  })
+  const runs: World['runs'] = []
+  on('process.run', (_, e) => {
+    const init = (e as { init?: { timeoutMs?: number } }).init
+    runs.push({ argv: e.argv, ...(init?.timeoutMs === undefined ? {} : { timeoutMs: init.timeoutMs }) })
+    const out = opts.run ? opts.run(e.argv, init) : { exitCode: 0, stdout: '', stderr: '' }
+    if (out instanceof Error) return { deny: out.message } as never
+    return (out instanceof Promise ? out.then((value) => ({ value })) : { value: out }) as never
   })
   on('ui.toast', (_, e) => {
     toasts.push(e.text)
@@ -253,7 +266,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   on('turn.complete', (_, e) => ({ text: e.answer }))
   on('session.compact', () => (opts.skipCompact ? { skip: 'vetoed' } : { messages: [{ role: 'user', text: 'summary', toolUses: [] }] }))
   on('command.run', () => ({}))
-  return { statuses, setId: (next) => { id = next }, seen, writes, asked, options, clock, hide: (path) => void hidden.add(path), files, tools, toasts, failRead, answers, driftAfter: (path, n) => { drift.path = path; drift.left = n }, stored: storeData, classifyCalls: () => classifyCalls, logs, debugLogs, dropTool: () => { toolGone = true } }
+  return { statuses, setId: (next) => { id = next }, seen, writes, asked, options, clock, hide: (path) => void hidden.add(path), files, tools, toasts, failRead, answers, driftAfter: (path, n) => { drift.path = path; drift.left = n }, stored: storeData, classifyCalls: () => classifyCalls, logs, runs, debugLogs, dropTool: () => { toolGone = true } }
 }
 
 const COMPOSE = { model: 'm', promptModel: 'm', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] } as never
@@ -3735,4 +3748,128 @@ test('a resume shows a time in the status line at once', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS }, { stored: { 'session:s1': old } })
   await start($)
   expect(w.statuses.at(-1)).toMatch(/^\d\d:\d\d · /)
+})
+
+// ---- update notice ----
+
+const LS = (...tags: string[]) => tags.map((t, i) => `${String(i + 1).padStart(40, 'a')}\trefs/tags/${t}`).join('\n')
+const NEWER = 'v0.2.99'
+const lsRemoteCalls = (w: World) => w.runs.filter((r) => r.argv.includes('ls-remote'))
+const FOLDER_ROOT = (argv: readonly string[]) => (argv.includes('rev-parse') ? { exitCode: 0, stdout: `${argv[2]}\n`, stderr: '' } : undefined)
+const MARKET_ROOT = (argv: readonly string[]) => (argv.includes('rev-parse') ? { exitCode: 128, stdout: '', stderr: 'fatal: not a git repository' } : undefined)
+const runWith = (ls: { exitCode: number; stdout: string }, root = FOLDER_ROOT): NonNullable<Opts['run']> => (argv) => {
+  const r = root(argv)
+  if (r) return r
+  return { ...ls, stderr: '' }
+}
+const SETUP = { [USER_FILE]: ALWAYS }
+
+test('update: a due check runs ls-remote once and stores updateCheck', async ($, on) => {
+  const w = world(on, SETUP, { run: runWith({ exitCode: 0, stdout: LS('v0.1.0', NEWER, 'v0.3.0-rc.1') }) })
+  await start($)
+  await updateSettled()
+  const calls = lsRemoteCalls(w)
+  expect(calls.length).toBe(1)
+  expect(calls[0]!.argv).toEqual(['git', 'ls-remote', '--tags', '--refs', 'https://github.com/r4KK4n/skill-souffleur'])
+  expect(calls[0]!.timeoutMs).toBe(15000)
+  expect(w.stored.updateCheck).toEqual({ at: expect.any(Number), latest: NEWER })
+})
+
+test('update: nothing newer stores the running version as latest', async ($, on) => {
+  const w = world(on, SETUP, { run: runWith({ exitCode: 0, stdout: LS('v0.1.0', `v${PLUGIN_VERSION}`) }) })
+  await start($)
+  await updateSettled()
+  expect(w.stored.updateCheck).toEqual({ at: expect.any(Number), latest: `v${PLUGIN_VERSION}` })
+  expect(w.logs.some((l) => l.includes('is out'))).toBe(false)
+})
+
+test('update: unparsable ls-remote output logs a debug line and stores at only', async ($, on) => {
+  const w = world(on, SETUP, { run: runWith({ exitCode: 0, stdout: '<html>nope</html>' }) })
+  await start($)
+  await updateSettled()
+  expect(w.debugLogs).toContain('update check: unparsable ls-remote output')
+  expect(w.stored.updateCheck).toEqual({ at: expect.any(Number) })
+})
+
+test('update: a fresh check does not run', async ($, on) => {
+  const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now() - 3_600_000 } }, run: runWith({ exitCode: 0, stdout: LS(NEWER) }) })
+  await start($)
+  await updateSettled()
+  expect(lsRemoteCalls(w).length).toBe(0)
+})
+
+test('update: an old check runs again', async ($, on) => {
+  const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now() - 90_000_000 } }, run: runWith({ exitCode: 0, stdout: LS(NEWER) }) })
+  await start($)
+  await updateSettled()
+  expect(lsRemoteCalls(w).length).toBe(1)
+})
+
+test('update: off runs nothing and says nothing', async ($, on) => {
+  const w = world(on, { [USER_FILE]: JSON.stringify({ update: 'off' }) }, { stored: { updateCheck: { at: 1, latest: NEWER } }, run: runWith({ exitCode: 0, stdout: LS(NEWER) }) })
+  await start($)
+  await updateSettled()
+  expect(w.runs.length).toBe(0)
+  expect(w.logs.some((l) => l.includes('is out'))).toBe(false)
+})
+
+test('update: a failed run stores at, logs to debug and shows no notice', async ($, on) => {
+  const w = world(on, SETUP, { run: runWith({ exitCode: 128, stdout: '' }) })
+  await start($)
+  await updateSettled()
+  expect(w.stored.updateCheck).toEqual({ at: expect.any(Number) })
+  expect(w.debugLogs.some((l) => l.startsWith('update check failed: '))).toBe(true)
+  expect(w.logs.some((l) => l.includes('is out'))).toBe(false)
+})
+
+test('update: a rejected run (timeout) is stored too and keeps the earlier latest', async ($, on) => {
+  const w = world(on, SETUP, { stored: { updateCheck: { at: 1, latest: 'v0.0.1' } }, run: (argv) => (argv.includes('rev-parse') ? FOLDER_ROOT(argv)! : new Error('timed out')) })
+  await start($)
+  await updateSettled()
+  expect(w.stored.updateCheck).toEqual({ at: expect.any(Number), latest: 'v0.0.1' })
+  expect(w.debugLogs.some((l) => l.startsWith('update check failed: ') && l.includes('timed out'))).toBe(true)
+})
+
+test('update: a stored newer latest says the notify line once; a reload does not repeat it', async ($, on) => {
+  const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: runWith({ exitCode: 0, stdout: '' }) })
+  await start($)
+  await updateSettled()
+  const line = `Souffleur ${NEWER} is out (you run ${PLUGIN_VERSION}). /souffleur update installs it.`
+  expect(w.logs.filter((l) => l === line).length).toBe(1)
+  await start($)
+  await updateSettled()
+  expect(w.logs.filter((l) => l === line).length).toBe(1)
+})
+
+test('update: the marketplace install is pointed to /plugin update', async ($, on) => {
+  const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: runWith({ exitCode: 0, stdout: '' }, MARKET_ROOT) })
+  await start($)
+  await updateSettled()
+  expect(w.logs).toContain(`Souffleur ${NEWER} is out (you run ${PLUGIN_VERSION}). /plugin update installs it.`)
+})
+
+test('update: auto behaves like notify for now', async ($, on) => {
+  const w = world(on, { [USER_FILE]: JSON.stringify({ update: 'auto' }) }, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: runWith({ exitCode: 0, stdout: '' }) })
+  await start($)
+  await updateSettled()
+  expect(w.logs.some((l) => l.includes(`${NEWER} is out`))).toBe(true)
+})
+
+test('update: a stored latest that is not newer says nothing', async ($, on) => {
+  const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now(), latest: `v${PLUGIN_VERSION}` } }, run: runWith({ exitCode: 0, stdout: '' }) })
+  await start($)
+  await updateSettled()
+  expect(w.logs.some((l) => l.includes('is out'))).toBe(false)
+})
+
+test('update: a never-resolving process.run does not hold session.start', async ($, on) => {
+  world(on, SETUP, { run: () => new Promise(() => {}) })
+  await start($)
+})
+
+test('update: /souffleur shows the version line from the stored check', async ($, on) => {
+  world(on, SETUP, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: runWith({ exitCode: 0, stdout: '' }) })
+  await start($)
+  await updateSettled()
+  expect(await table($)).toContain(`Version ${PLUGIN_VERSION} · latest`)
 })
