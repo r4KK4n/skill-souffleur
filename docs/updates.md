@@ -36,7 +36,7 @@ An installed plugin reaches a running session only after `/reload-plugins` or a 
 
 ```
 claude plugin uninstall skill-souffleur@skill-souffleur
-git clone --branch v0.2.8 https://github.com/r4KK4n/skill-souffleur ~/.claude/skills/skill-souffleur
+git clone --branch v0.2.9 https://github.com/r4KK4n/skill-souffleur ~/.claude/skills/skill-souffleur
 ```
 
 To move to a newer release:
@@ -98,7 +98,7 @@ souffleur namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICzde8cPJHhfSqO03
 ```
 
 ```
-git -c gpg.format=ssh -c gpg.ssh.allowedSignersFile=allowed_signers verify-tag v0.2.8
+git -c gpg.format=ssh -c gpg.ssh.allowedSignersFile=allowed_signers verify-tag v0.2.9
 ```
 
 The output names the same fingerprint. When Souffleur verifies a tag it writes that file into its own data folder each time, with your `updateSigner` as the key, and installs only the commit it verified. The key is also in [SECURITY.md](../SECURITY.md). The tag ruleset on GitHub blocks deletion and force pushes but does not require signatures, so the signature is what `auto` relies on.
