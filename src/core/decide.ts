@@ -530,12 +530,14 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
   // A call that starts or wakes a need asks for that need's skills only: in enforce the call is denied once (the retry finds the need active), in observe the request follows it.
   const evidenceAsked = new Set<SkillName>()
   const evidenceText: string[] = []
+  const evidenceSkills: SkillName[] = []
   if (started.length) {
     const own = new Set(Object.entries(config.skills).filter(([, rule]) => rule.need !== undefined && started.includes(rule.need)).map(([name]) => name))
     next.ledger = resetSkills(config, next.ledger, started)
     const r = restore(config, next, e.now, trustedRoot, e.root, { only: own })
     next.ledger = r.ledger
     r.asked.forEach((n) => evidenceAsked.add(n))
+    evidenceSkills.push(...r.asked)
     if (r.text !== undefined) {
       // Observe records the first evidence call as one enforce would have denied, and the request follows the call.
       evidenceText.push(r.text)
@@ -555,7 +557,7 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
   })
 
   // Violations: `trusted` ones may deny in enforce mode; the rest (untrusted project skills) only record.
-  const found: { text: string; trusted: boolean; skill?: SkillName }[] = []
+  const found: { text: string; trusted: boolean; skill?: SkillName; /** Skills this denial asks for without gating on them: each counts toward its release. */ asks?: SkillName[] }[] = []
   const recordOnly: string[] = []
 
   if (!next.paused) {
@@ -573,7 +575,7 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
       }
     }
 
-    for (const text of evidenceText) found.push({ text: `${text} ${PAUSE_HINT}`, trusted: true })
+    for (const text of evidenceText) found.push({ text: `${text} ${PAUSE_HINT}`, trusted: true, asks: evidenceSkills })
     const needed = neededSkills(config, next.needs, next.ruleSkills, e.root)
     for (const [name, rule] of Object.entries(config.skills)) {
       if (!rule.gate || next.ledger[name]?.state === 'not installed here' || excludedIn(rule, e.root) || evidenceAsked.has(name) || (e.tool === 'Skill' && e.skill === name) || !matches(rule.gate, e.tool, e.path, e.tree ?? e.root)) continue
@@ -627,7 +629,7 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
       denied = true
       actions.push({ kind: 'deny', reason: trustedText })
       const counts = { ...(s.turnDenials ?? {}) }
-      for (const skill of new Set(found.filter((f) => f.trusted && f.skill !== undefined).map((f) => f.skill!))) counts[skill] = (counts[skill] ?? 0) + 1
+      for (const skill of new Set(found.filter((f) => f.trusted).flatMap((f) => (f.skill !== undefined ? [f.skill] : (f.asks ?? []))))) counts[skill] = (counts[skill] ?? 0) + 1
       next.turnDenials = counts
     } else next.observed = lastN(next.observed, { at: e.now, reason: trustedText })
   }
