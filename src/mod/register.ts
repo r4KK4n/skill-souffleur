@@ -710,6 +710,33 @@ async function installedWithDescriptions($: Dollar): Promise<{ name: string; des
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 
+/** Collapses `.` and `..` segments of an absolute path, so a `../` escape is seen as the path it names. */
+function collapsePath(path: string): string {
+  const out: string[] = []
+  for (const part of path.split('/')) {
+    if (part === '' || part === '.') continue
+    if (part === '..') out.pop()
+    else out.push(part)
+  }
+  return `/${out.join('/')}`
+}
+
+const insideDir = (path: string, dir: string) => path === dir || path.startsWith(dir === '/' ? '/' : `${dir}/`)
+
+/** A project CLAUDE.md may import only files inside the project root or `~/.claude`, by their real path too: a symlink out does not count. */
+async function importAllowed($: Dollar, target: string, roots: string[]): Promise<boolean> {
+  const flat = collapsePath(target)
+  if (!roots.some((r) => insideDir(flat, collapsePath(r)))) return false
+  const real = (await $.fs.stat(flat, { resolve: true }).catch(() => undefined))?.realPath
+  if (real === undefined) return true
+  const realRoots = [...roots.map(collapsePath)]
+  for (const r of roots) {
+    const rr = (await $.fs.stat(r, { resolve: true }).catch(() => undefined))?.realPath
+    if (rr !== undefined) realRoots.push(collapsePath(rr))
+  }
+  return realRoots.some((r) => insideDir(collapsePath(real), r))
+}
+
 /**
  * The standing instructions to scan: user and project CLAUDE.md, the files a CLAUDE.md imports with `@path` (one level),
  * and the memory index of the project (named after the main repository root).
@@ -731,6 +758,7 @@ async function readStanding($: Dollar, l: Loaded, home: string, notes: string[])
       const target = ref.startsWith('/') ? ref : ref.startsWith('~/') ? `${home}/${ref.slice(2)}` : `${dir}/${ref.replace(/^\.\//, '')}`
       if (seen.has(target)) continue
       seen.add(target)
+      if (project && !(await importAllowed($, target, [l.root, `${home}/.claude`]))) continue
       const imported = await readOptional($, target, notes, home)
       if (imported !== undefined) files.push({ file: shownPath(home, target), text: imported, project })
     }

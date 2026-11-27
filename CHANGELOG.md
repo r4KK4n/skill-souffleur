@@ -8,6 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Security
 
+- `/souffleur init` and `migrate` follow an `@path` import in a project's CLAUDE.md only when the real path of the file lies inside the project root or `~/.claude`. An absolute path, a `../` path or a symlink that leads elsewhere is skipped (#101).
 - A command without an `origin` is no longer treated as the person's: `/souffleur update`, `accept`, `pause` and the other state-changing verbs now refuse it. Only `composer`, `bridge` and `sdk` count (#93).
 
 ### Changed

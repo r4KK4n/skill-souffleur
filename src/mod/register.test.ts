@@ -1271,6 +1271,28 @@ test('notes print paths in the ~ form and imports in CLAUDE.md are followed one 
   expect(text).not.toContain(HOME)
 })
 
+test('CLAUDE.md imports outside the project root and ~/.claude are not read', async ($, on) => {
+  const files = {
+    [USER_FILE]: ALWAYS, [SETTINGS_PATH]: '{}', [`${HOME}/.claude/CLAUDE.md`]: 'x',
+    '/work/proj/CLAUDE.md': '@/etc/outside.md\n@../secret.md\n@~/other/home.md\n@link.md\n@inside.md\n@~/.claude/extra.md',
+    '/etc/outside.md': 'Always load writing-guide (absolute).',
+    '/work/secret.md': 'Always load writing-guide (dotdot).',
+    [`${HOME}/other/home.md`]: 'Always load writing-guide (home).',
+    '/work/proj/link.md': 'Always load writing-guide (symlink).',
+    '/work/proj/inside.md': 'Always load writing-guide (inside).',
+    [`${HOME}/.claude/extra.md`]: 'Always load writing-guide (claude dir).',
+  }
+  world(on, files, { skills: SKILLS, failRead: [`${HOME}/.claude/CLAUDE.md`], linkTo: { '/work/proj/link.md': '/etc/outside.md' } })
+  await start($)
+  const text = await run($, 'migrate')
+  expect(text).toMatch(/inside\.md:1/)
+  expect(text).toMatch(/extra\.md:1/)
+  expect(text).not.toMatch(/outside\.md/)
+  expect(text).not.toMatch(/secret\.md/)
+  expect(text).not.toMatch(/home\.md/)
+  expect(text).not.toMatch(/link\.md/)
+})
+
 test('init applies at once: a new skill shows in the table and the status line', async ($, on) => {
   const w = world(on, {}, { skills: ['ui-checklist'], proposals: PICKS, answers: ['When the task needs it'] })
   await start($)
