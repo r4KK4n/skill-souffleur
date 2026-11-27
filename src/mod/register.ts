@@ -139,8 +139,16 @@ async function current($: Dollar): Promise<{ l: Loaded; session: Session }> {
   // What this process wrote last wins over a state read that has not caught up (hooks that run at the same moment).
   if (latest && latest.id === id && (held === undefined || (isSession(held, id) && (held.rev ?? 0) < (latest.rev ?? 0)))) held = latest
   if (held && held.id === id) return { l, session: heal(l, held) }
-  // A different id with no session.start in between is /clear (D6).
+  // A different id with no session.start in between: `/clear` and an in-process `/resume` both end the session and
+  // go on under another id without one. The old copy is flushed first; a stored copy under the new id is a resume,
+  // anything else is a clear.
   if (held) {
+    await flushCopy($, l, held)
+    const copy = await $.store.get(`session:${id}`)
+    if (isSession(copy, id)) {
+      askStopped = copy.askStopped === true
+      return { l, session: heal(l, copy) }
+    }
     askStopped = false // a cleared session starts without the stop, like proposalsStopped
     return { l, session: await freshSession($, l, id, 'clear') }
   }

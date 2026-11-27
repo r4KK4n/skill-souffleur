@@ -16,6 +16,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A session switch inside the running process (`/resume` of another session) is no longer read as `/clear`: the old session's copy is stored, and the stored copy of the new id is restored with its ledger, proposals, pause and stops. Only an id with no stored copy starts fresh (#94).
 - Every write of `~/.claude/souffleur.json` now goes through one path: a uniquely named temporary copy that is parsed back and moved over the file (a symlinked file is written through), a re-read right before the move with up to 3 retries when another session saved meanwhile (far fewer lost entries; a save in the instant between the re-read and the move can still win), one backup per session start with the newest 3 kept (only `.bak-<13-digit ms>` copies are pruned), and a reload of the config at the next prompt when either config file changed on disk (#91).
 
 ## [0.2.9] - 2026-11-28
