@@ -139,14 +139,30 @@ async function current($: Dollar): Promise<{ l: Loaded; session: Session }> {
   // What this process wrote last wins over a state read that has not caught up (hooks that run at the same moment).
   if (latest && latest.id === id && (held === undefined || (isSession(held, id) && (held.rev ?? 0) < (latest.rev ?? 0)))) held = latest
   if (held && held.id === id) return { l, session: heal(l, held) }
-  // A different id with no session.start in between is /clear (D6).
-  if (held) {
+  // A different id with no session.start in between: `/clear` and an in-process `/resume` both end the session and
+  // go on under another id without one. The old copy (the held state or this process's last write, the newer one)
+  // is flushed first; a stored copy under the new id is a resume, anything else is a clear.
+  const old = [held, latest].filter((x): x is Session => x !== undefined && x.id !== id).sort((x, y) => (y.rev ?? 0) - (x.rev ?? 0))[0]
+  if (old) {
+    await flushCopy($, l, old)
+    const copy = await $.store.get(`session:${id}`)
+    if (isSession(copy, id)) return { l, session: await resumedSession($, l, copy, 'resume') }
     askStopped = false // a cleared session starts without the stop, like proposalsStopped
     return { l, session: await freshSession($, l, id, 'clear') }
   }
   const stored = await $.store.get(`session:${id}`)
   if (isSession(stored, id)) return { l, session: heal(l, stored) }
   return { l, session: await freshSession($, l, id, 'startup') }
+}
+
+/** What a resume does to a stored copy, at `session.start` and at an in-process id switch: errors dropped, the start event, the config, the ask-stopped mark. */
+async function resumedSession($: Dollar, l: Loaded, before: Session, start: 'resume' | 'reload'): Promise<Session> {
+  const version = (await $.session.version()).version
+  let s = decide(l.config, { ...normalizeSession(before), errors: [] }, { type: 'start', now: now(), start, version }).session
+  s = decide(l.config, s, { type: 'config', now: now(), errors: l.errors }).session
+  restoredAskStopped = s.askStopped === true
+  askStopped = restoredAskStopped
+  return s
 }
 
 /** A session whose ledger lists other skills than the config (a session that missed a config change) follows the config. */
@@ -2066,13 +2082,11 @@ export const register: Register = (on) => {
       restoredAskStopped = false
       if (before) {
         // Resume or reload: the ledger stays, what the config said last time does not.
-        s = decide(l.config, { ...before, errors: [] }, { type: 'start', now: now(), start: held?.id === id ? 'reload' : 'resume', version }).session
-        s = decide(l.config, s, { type: 'config', now: now(), errors: l.errors }).session
+        s = await resumedSession($, l, before, held?.id === id ? 'reload' : 'resume')
       } else {
         s = await freshSession($, l, id, 'startup')
         toldKey = '' // a new session has told nothing yet
       }
-      restoredAskStopped = s.askStopped === true
       // Problems that hold at the start are news once; a resumed session's stored `noticed` keeps them from repeating.
       const first = notices(l.config, s, s, l.root)
       s = first.session
