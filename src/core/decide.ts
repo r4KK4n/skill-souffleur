@@ -564,12 +564,15 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
     if (e.tool === 'Agent') {
       // A need only the project file defines counts for a trusted root alone, like its skills.
       const active = Object.keys(next.needs).filter((n) => !next.needs[n]!.dormant).filter((n) => trustedRoot || !(config.projectNeeds ?? []).includes(n))
-      if (active.length === 0 || BRIEF_SKILLS.test(e.brief ?? '')) next.agentDenied = false
+      // Always-on skills that shape the work (not `for: chat`) count like an active need, under the same filters as the list below.
+      const listed = Object.keys(config.skills).filter((n) => next.ledger[n]?.state !== 'not installed here' && !excludedIn(config.skills[n]!, e.root) && (trustedRoot || config.skills[n]!.from !== 'project'))
+      const always = listed.filter((n) => config.skills[n]!.always === true && audienceOf(config, n) !== 'chat' && next.ledger[n]?.state !== 'unavailable')
+      if ((active.length === 0 && always.length === 0) || BRIEF_SKILLS.test(e.brief ?? '')) next.agentDenied = false
       else if (next.agentDenied) next.agentDenied = false
       else {
         next.agentDenied = true
         found.push({
-          text: `Souffleur: add a line "skills: <names>" (or "skills: none" for mechanical work) to the brief, then retry. Configured skills: ${Object.keys(config.skills).filter((n) => next.ledger[n]?.state !== 'not installed here' && !excludedIn(config.skills[n]!, e.root) && (trustedRoot || config.skills[n]!.from !== 'project')).join(', ') || 'none'}. Active needs: ${active.join(', ')}. ${PAUSE_HINT}`,
+          text: `Souffleur: add a line "skills: <names>" (or "skills: none" for mechanical work) to the brief, then retry. Configured skills: ${listed.join(', ') || 'none'}. Active needs: ${active.join(', ') || 'none'}.${always.length ? ` Always-on: ${always.join(', ')}.` : ''} ${PAUSE_HINT}`,
           trusted: true,
         })
       }

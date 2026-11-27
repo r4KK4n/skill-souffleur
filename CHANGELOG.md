@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- The brief check on `Agent` calls also applies to always-on skills that are not `for: chat` (#36). With such a skill, every `Agent` brief needs a `skills:` line in `enforce` mode, even when no need is active. A brief without one is denied once and then passes on the retry. The reason adds `Always-on: <names>.`. Skills that are excluded here, not installed here, unavailable or from an untrusted project file do not count.
+
 - Only the person can run `/souffleur` verbs that change state (#34). `init`, `migrate`, `pause`, `resume`, `need` and `drop` now refuse a plugin or the model like the other verbs already did; `/souffleur` and `status` still answer anyone.
 
 - The denial that asks for skills after a compaction now counts toward the release of a stuck skill, so a load attempt made in answer to it can release the gate (#70).
