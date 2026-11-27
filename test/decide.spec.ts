@@ -35,6 +35,7 @@ const loadSkill = (skill: string): CoreEvent => ({ type: 'skill', now: at(), ski
 const compact = (extra: Partial<Extract<CoreEvent, { type: 'compact' }>> = {}): CoreEvent => ({ type: 'compact', now: at(), phase: 'after', trigger: 'manual', ...extra })
 const agentStart = (agentId = 'a1'): CoreEvent => ({ type: 'agentStart', now: at(), agentId })
 const agentDone = (agentId = 'a1'): CoreEvent => ({ type: 'agentDone', now: at(), agentId })
+const agentsKnown = (ids: string[]): CoreEvent => ({ type: 'agentsKnown', now: at(), ids })
 const command = (args: string): CoreEvent => ({ type: 'command', now: at(), args })
 
 /** Feeds events in order; returns the final session and the actions of each event. */
@@ -192,6 +193,21 @@ test('an end without a start or a repeated end leaves other live runs alone', ()
   const s0 = run(base, [agentStart('a1'), agentStart('a2'), agentDone('zz'), agentDone('a1'), agentDone('a1')]).s
   assert.deepEqual(s0.liveAgents, ['a2'])
   assert.deepEqual(run(base, [agentStart('a1'), agentStart('a1')]).s.liveAgents, ['a1'])
+})
+
+test('a main Skill call by the bare name announces the plugin skill key of the load', () => {
+  const s0 = run(withAlways, [agentStart()]).s
+  const r = run(withAlways, [tool('Skill', { skill: 'terse-mode' }), loadSkill('terse:terse-mode')], s0)
+  assert.equal(r.s.ledger['terse:terse-mode']!.state, 'loaded')
+  const other = run(withAlways, [loadSkill('terse:terse-mode')], s0)
+  assert.notEqual(other.s.ledger['terse:terse-mode']!.state, 'loaded')
+})
+
+test('agentsKnown drops live ids the engine no longer lists and keeps spawn placeholders', () => {
+  const s = run(base, [agentStart('a1'), agentStart('a2'), agentStart('spawn:1'), agentsKnown(['a2'])]).s
+  assert.deepEqual(s.liveAgents, ['a2', 'spawn:1'])
+  const r = run(base, [prompt('screen', ['ui']), agentStart('a1'), agentsKnown([]), loadSkill('ui-checklist')]).s
+  assert.equal(r.ledger['ui-checklist']!.state, 'loaded')
 })
 
 test('the Agent call itself no longer counts a run', () => {

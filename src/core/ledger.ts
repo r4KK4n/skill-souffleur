@@ -93,3 +93,6 @@ export function markInstalled(l: Ledger, names: string[], now: number): Ledger {
   }
   return changed ? next : l
 }
+
+/** Two names stand for one skill: the same name, or a bare name against a plugin name with the same part after the colon. */
+export const sameSkill = (a: string, b: string): boolean => isListed(a, [b])

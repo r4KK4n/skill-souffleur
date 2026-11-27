@@ -556,6 +556,100 @@ test('a failed Agent tool call does not end a run that is live', async ($, on) =
   expect(await table($)).not.toMatch(/ui-checklist \| loaded/)
 })
 
+test('a skill preloaded while the agent spawns does not count for main', async ($, on) => {
+  world(on, { [USER_FILE]: UI }, { classify: 'match' })
+  let release = () => {}
+  const held = new Promise<void>((r) => { release = r })
+  on('agent.spawn', async () => {
+    await held
+    return { model: 'm', agentId: 'a1' } as never
+  })
+  await start($)
+  await $.prompt.submit({ text: 'build me a login screen' })
+  const spawn = $.agent.spawn({ prompt: 'x' } as never)
+  await new Promise((r) => setTimeout(r, 20))
+  await skillLoaded($, 'ui-checklist')
+  expect(await table($)).not.toMatch(/ui-checklist \| loaded/)
+  release()
+  await spawn
+  // the placeholder became the agent's id: still not main until the run ends
+  await skillLoaded($, 'ui-checklist')
+  expect(await table($)).not.toMatch(/ui-checklist \| loaded/)
+  await agentEnds($, 'a1')
+  await skillLoaded($, 'ui-checklist')
+  expect(await table($)).toMatch(/ui-checklist \| loaded/)
+})
+
+test('a spawn that fails leaves no placeholder behind', async ($, on) => {
+  world(on, { [USER_FILE]: UI }, { classify: 'match' })
+  on('agent.spawn', () => {
+    throw new Error('no')
+  })
+  await start($)
+  await $.prompt.submit({ text: 'build me a login screen' })
+  await $.agent.spawn({ prompt: 'x' } as never).catch(() => undefined)
+  await skillLoaded($, 'ui-checklist')
+  expect(await table($)).toMatch(/ui-checklist \| loaded/)
+})
+
+test('a stale live run the engine no longer lists is pruned at the next prompt', async ($, on) => {
+  world(on, { [USER_FILE]: UI }, { classify: 'match' })
+  on('agent.list', () => ({ value: [] }) as never)
+  await start($)
+  await agentRuns($, 'a1')
+  await $.prompt.submit({ text: 'build me a login screen' })
+  await skillLoaded($, 'ui-checklist')
+  expect(await table($)).toMatch(/ui-checklist \| loaded/)
+})
+
+test('a run the engine lists as completed is pruned, a running one is kept', async ($, on) => {
+  world(on, { [USER_FILE]: UI }, { classify: 'match' })
+  on('agent.list', () => ({ value: [{ id: 'a1', status: 'completed' }, { id: 'a2', status: 'running' }] }) as never)
+  await start($)
+  await agentRuns($, 'a1')
+  await agentRuns($, 'a2')
+  await $.prompt.submit({ text: 'build me a login screen' })
+  await skillLoaded($, 'ui-checklist')
+  expect(await table($)).not.toMatch(/ui-checklist \| loaded/)
+  await agentEnds($, 'a2')
+  await skillLoaded($, 'ui-checklist')
+  expect(await table($)).toMatch(/ui-checklist \| loaded/)
+})
+
+test('nothing is pruned when the agent list fails', async ($, on) => {
+  world(on, { [USER_FILE]: UI }, { classify: 'match' })
+  on('agent.list', () => {
+    throw new Error('no list')
+  })
+  await start($)
+  await agentRuns($, 'a1')
+  await $.prompt.submit({ text: 'build me a login screen' })
+  await skillLoaded($, 'ui-checklist')
+  expect(await table($)).not.toMatch(/ui-checklist \| loaded/)
+})
+
+test('an agent.report ends the run', async ($, on) => {
+  world(on, { [USER_FILE]: UI }, { classify: 'match' })
+  on('agent.report', (_, e) => ({ text: e.text }) as never)
+  await start($)
+  await $.prompt.submit({ text: 'build me a login screen' })
+  await agentRuns($, 'a1')
+  await $.agent.report({ agentId: 'a1', subagentType: 'general-purpose', status: 'completed', text: 'done' } as never)
+  await skillLoaded($, 'ui-checklist')
+  expect(await table($)).toMatch(/ui-checklist \| loaded/)
+})
+
+test('a main turn.start and turn.complete leave the live runs alone', async ($, on) => {
+  world(on, { [USER_FILE]: UI }, { classify: 'match' })
+  await start($)
+  await $.prompt.submit({ text: 'build me a login screen' })
+  await agentRuns($, 'a1')
+  await $.turn.start({ text: '', turnId: 'main1' } as never)
+  await turnEnd($, { turnId: 'main1' })
+  await skillLoaded($, 'ui-checklist')
+  expect(await table($)).not.toMatch(/ui-checklist \| loaded/)
+})
+
 test('new session id after clear starts a fresh ledger', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS })
   await start($)

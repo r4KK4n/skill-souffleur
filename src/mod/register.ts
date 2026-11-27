@@ -1,7 +1,7 @@
 import { atom, read, update as updateAtom } from 'claude-code'
 import type { Register, RenderElement } from 'claude-code'
 import { MAX_LIST, MAX_PROJECT_ROOTS, excludedIn, isTrustedRoot, normRoot, parseConfig } from '../core/config.ts'
-import { decide, initSession, normalizeSession } from '../core/decide.ts'
+import { decide, initSession, normalizeSession, SPAWN_PREFIX } from '../core/decide.ts'
 import { MIGRATE_INTRO, describeHook, findHookOverlaps, findPassages, hookQuestion, hookSteps, isGuess, migrateSteps, passageLines, removeHook } from '../core/migrate.ts'
 import type { HookOverlap, Passage } from '../core/migrate.ts'
 import { CHOICE_LABEL, INJECTED_HELP, addSkillToProject, hasProjectKey, ignoreInProject, NOT_SET_UP, SETUP_INTRO, applyChoice, candidates, choiceOf, cleanNeedText, configProblem, currentChoice, describePlan, explicitOnly, GROUP_ALL, GROUP_NONE, GROUP_ONE, groupByPlugin, injectedWarning, LATER, needKeyFor, options, parsePicks, parseSkips, picksPrompt, setupSteps } from '../core/setup.ts'
@@ -2144,6 +2144,19 @@ export const register: Register = (on) => {
     if (fromUser) lastPromptKind = e.origin?.kind
     personTurn = fromUser || (e.command !== undefined && isUserOrigin(e))
     lastPromptCommand = e.command !== undefined
+    // An end event can be lost (a failed update, a reload that kept the state): the engine's own list says which runs are not over.
+    let known: string[] | undefined
+    try {
+      known = (await $.agent.list()).filter((a: { status: string }) => !['completed', 'failed', 'killed'].includes(a.status)).map((a: { id: string }) => a.id)
+    } catch {
+      // no list, no pruning
+    }
+    if (known !== undefined) {
+      const ids = known
+      await safe($, 'agent.prune', undefined, async () => {
+        await apply($, () => ({ type: 'agentsKnown', now: now(), ids }))
+      })
+    }
     if (fromUser) await safe($, 'tool.reconnect', undefined, () => reconnectTool($))
     // Only a prompt of the person (composer or bridge, no command) answers; any prompt of the person ends the offer.
     if (e.command !== undefined && isUserOrigin(e)) endOffer()
@@ -2239,6 +2252,30 @@ export const register: Register = (on) => {
     const text = await safe($, 'souffleur_propose', 'Souffleur could not queue the proposal. Tell the user and carry on.', () => runPropose($, e as unknown as Record<string, unknown>))
     return { result: text }
   }).catch(() => ({ result: 'Souffleur could not queue the proposal. Tell the user and carry on.' }))
+
+  // The agent's `skills` are preloaded before its first turn and `turn.start` fires only before its first model call, so a
+  // placeholder holds the window of the spawn; the agent's id replaces it once the result names it.
+  let spawnSeq = 0
+  on('agent.spawn', async ($, e, next) => {
+    const token = `${SPAWN_PREFIX}${++spawnSeq}`
+    await safe($, 'agent.spawn', undefined, async () => {
+      await apply($, () => ({ type: 'agentStart', now: now(), agentId: token }))
+    })
+    try {
+      const r = await next(e)
+      const agentId = (r as { agentId?: string }).agentId
+      if (agentId !== undefined) {
+        await safe($, 'agent.spawn', undefined, async () => {
+          await apply($, () => ({ type: 'agentStart', now: now(), agentId }))
+        })
+      }
+      return r
+    } finally {
+      await safe($, 'agent.spawn', undefined, async () => {
+        await apply($, () => ({ type: 'agentDone', now: now(), agentId: token }))
+      })
+    }
+  })
 
   // A live agent run is what tells a skill load of the main session from an agent's: `skill.prompt` has no agentId, and a
   // background agent's Agent call returns at launch. A run starts with its `turn.start` and ends with its `turn.complete` or `agent.report`.
