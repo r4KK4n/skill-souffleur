@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- Only the person can run `/souffleur` verbs that change state (#34). `init`, `migrate`, `pause`, `resume`, `need` and `drop` now refuse a plugin or the model like the other verbs already did; `/souffleur` and `status` still answer anyone.
+
 - The denial that asks for skills after a compaction now counts toward the release of a stuck skill, so a load attempt made in answer to it can release the gate (#70).
 
 - A gate that released after three denials no longer carries that state into the rest of the turn once its skill loads (#70). The denials and the load attempt of a skill that loads are forgotten, so a later stall of the same skill in the same turn counts from zero and needs its own load attempt before it is released.
