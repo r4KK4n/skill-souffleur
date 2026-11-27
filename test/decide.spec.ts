@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { decide, initSession } from '../src/core/decide.ts'
 import { renderTable, statusLine } from '../src/core/status.ts'
+import { problemKeys } from '../src/core/notices.ts'
 import type { Action, CoreEvent, Session } from '../src/core/decide.ts'
 import type { Config } from '../src/core/types.ts'
 import { loadFixture, toCoreEvents } from './fixtures.ts'
@@ -1806,4 +1807,48 @@ test('always-on work skill: the brief check skips blocked, subagent, paused and 
   const proj = cfg({ skills: { 'proj-always': { always: true, from: 'project' } } })
   assert.deepEqual(denies(run(proj, [withRoot(tool('Agent', { brief: 'do it' }))]).out.at(-1)!), [])
   assert.equal(denies(run({ ...proj, trustProjects: ['/work/p'] }, [withRoot(tool('Agent', { brief: 'do it' }))]).out.at(-1)!).length, 1)
+})
+
+test('three failed call A runs open the classifier pause, skipped prompts count it down, a failed probe reopens it, a good probe clears it', () => {
+  const failed = (): CoreEvent => ({ type: 'prompt', now: at(), text: 'x', fromUser: true, matched: [], classifierFailed: true })
+  const skipped = (): CoreEvent => ({ type: 'prompt', now: at(), text: 'x', fromUser: true, matched: [], classifierSkipped: true })
+  let s = run(cfg(), [failed(), failed()]).s
+  assert.equal(s.classifyPause ?? 0, 0)
+  s = decide(cfg(), s, failed()).session
+  assert.equal(s.classifyPause, 10)
+  for (let i = 9; i >= 0; i--) {
+    s = decide(cfg(), s, skipped()).session
+    assert.equal(s.classifyPause, i)
+  }
+  // skipped prompts neither count as failures nor clear the error
+  assert.equal(s.classifyFails, 3)
+  assert.ok(s.errors.some((m) => m.startsWith('classifier: ')))
+  s = decide(cfg(), s, failed()).session
+  assert.equal(s.classifyPause, 10)
+  s = decide(cfg(), s, { type: 'prompt', now: at(), text: 'x', fromUser: true, matched: [], classifierFailed: false }).session
+  assert.equal(s.classifyPause, 0)
+  assert.equal(s.classifyFails, 0)
+  assert.deepEqual(s.errors, [])
+})
+
+test('the pause never counts below zero, and a prompt without a classifier run leaves it alone', () => {
+  const s0 = { ...run(cfg(), []).s, classifyPause: 2 }
+  const plain = decide(cfg(), s0, { type: 'prompt', now: at(), text: 'x', fromUser: true, matched: [] }).session
+  assert.equal(plain.classifyPause, 2)
+  const skip = (s: Session) => decide(cfg(), s, { type: 'prompt', now: at(), text: 'x', fromUser: true, matched: [], classifierSkipped: true }).session
+  assert.equal(skip(skip(skip(s0))).classifyPause, 0)
+})
+
+test('a resume clears the pause, a reload keeps it', () => {
+  const s0 = { ...run(cfg(), []).s, classifyPause: 7 }
+  assert.equal(decide(cfg(), s0, { type: 'start', now: at(), start: 'resume' }).session.classifyPause, 0)
+  assert.equal(decide(cfg(), s0, { type: 'start', now: at(), start: 'reload' }).session.classifyPause, 7)
+})
+
+test('while the pause is open the table and the degraded notice say so', () => {
+  const failed = (): CoreEvent => ({ type: 'prompt', now: at(), text: 'x', fromUser: true, matched: [], classifierFailed: true })
+  const s = run(cfg(), [failed(), failed(), failed()]).s
+  assert.match(renderTable(cfg(), s, at()), /Need detection is paused .* retries in 10 prompts/)
+  assert.match(problemKeys(cfg(), s).get('degraded:classifier') ?? '', /Need detection is paused and will retry in 10 prompts\. Details: \/souffleur\.$/)
+  assert.doesNotMatch(renderTable(cfg(), { ...s, classifyPause: 0 }, at()), /paused/)
 })

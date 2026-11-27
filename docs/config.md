@@ -4,7 +4,7 @@ The reference for `~/.claude/souffleur.json` (the user file) and a project's `.c
 
 ## Skills and needs
 
-A skill entry says when Souffleur needs it. A need is a kind of work, named by you, that a skill serves (for example `prose` for writing). A gate holds back a step, such as a file write, until the skill is loaded. A duty requires evidence after a step, such as a detector run. The classifier is the small model that Claude Code runs for Souffleur.
+A skill entry says when Souffleur needs it. A need is a kind of work, named by you, that a skill serves (for example `prose` for writing). A gate holds back a step, such as a file write, until the skill is loaded. A duty requires evidence after a step, such as a detector run. The classifier is the small model that Claude Code runs for Souffleur. Each prompt sends it at most 2,000 characters (the first 1,500 and the last 500), and it is not called, after three failures in a row, for the next 10 prompts.
 
 An example file (`/souffleur init` writes the entries for you):
 

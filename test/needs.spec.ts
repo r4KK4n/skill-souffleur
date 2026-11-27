@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { classifyDeliverable, neededSkills } from '../src/core/needs.ts'
+import { classifyDeliverable, clip, neededSkills } from '../src/core/needs.ts'
 import type { Config } from '../src/core/types.ts'
 
 const needs = {
@@ -167,4 +167,16 @@ test('an answer that holds a label inside a sentence does not match', async () =
     const r = await classifyDeliverable('x', needs, kind(answer), never)
     assert.deepEqual(r, { matched: [], failed: true, failure: 'unknown-label' }, answer)
   }
+})
+
+const wf = (x: string): boolean => (x as unknown as { isWellFormed(): boolean }).isWellFormed()
+
+test('clip keeps surrogate pairs whole at both cuts', () => {
+  const head = `${'a'.repeat(1499)}😀${'b'.repeat(3000)}`
+  assert.equal(head.charCodeAt(1499) >= 0xd800 && head.charCodeAt(1499) <= 0xdbff, true)
+  const out = clip(head)
+  assert.equal(wf(out), true)
+  const tailCut = `${'c'.repeat(3000)}😀${'d'.repeat(499)}`
+  assert.equal(wf(clip(tailCut)), true)
+  assert.equal(wf(clip(`${'e'.repeat(2400)}😀`.repeat(3))), true)
 })

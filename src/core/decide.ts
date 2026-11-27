@@ -60,6 +60,8 @@ export type Session = {
   classifyFails?: number
   /** Call B runs that failed in a row (a prompt where A said code work); prompts where B did not run neither count nor clear. */
   workFails?: number
+  /** Prompts left that skip the classifier after call A failed `FAIL_LIMIT` times in a row; the first prompt after it probes once (kept over reload, cleared by a resume). */
+  classifyPause?: number
   learnFails?: number
   /** When this copy was stored last, so old copies in the plugin store can be removed. */
   touched?: number
@@ -86,7 +88,7 @@ export type CoreEvent =
   | { type: 'skill'; now: number; skill: string; text?: string; source?: string; pluginName?: string; path?: string }
   | { type: 'compact'; now: number; phase: 'before' | 'after'; trigger: string; skipped?: boolean; agentId?: string }
   /** `classifierFailed`: call A failed (true) or answered (false); absent when the classifier did not run. `workFailed`: call B failed (true) or answered (false) after A said code work; absent when B did not run. `deliverable`: A's answer. */
-  | { type: 'prompt'; now: number; text: string; fromUser: boolean; matched: NeedName[]; root?: string; classifierFailed?: boolean; workFailed?: boolean; deliverable?: Deliverable }
+  | { type: 'prompt'; now: number; text: string; fromUser: boolean; matched: NeedName[]; root?: string; classifierFailed?: boolean; /** The breaker skipped the classifier on this prompt. */ classifierSkipped?: boolean; workFailed?: boolean; deliverable?: Deliverable }
   /** `present` names the arguments the call carries, for field rules. */
   | { type: 'tool'; now: number; tool: string; path?: string; command?: string; brief?: string; skill?: string; model?: string; present?: string[]; agentId?: string; root?: string; tree?: string }
   | { type: 'command'; now: number; args: string; root?: string; /** The small-model count over all sessions, from the plugin store. */ total?: ModelUse; /** What the stored release check says. */ update?: UpdateInfo }
@@ -135,6 +137,8 @@ const CONTEXT_LIMIT = 10_000
 /** The part of that block the restore request may take, so notes and reminders still fit. */
 const RESTORE_LIMIT = 5000
 const FAIL_LIMIT = 3
+/** Prompts that skip the classifier after `FAIL_LIMIT` failures of call A in a row. */
+const CLASSIFY_PAUSE = 10
 /** Denials of one skill's "not loaded" check per turn before its calls are released. */
 const RELEASE_AFTER = 3
 /** Tools that change a file: only these arm a duty by themselves. */
@@ -198,7 +202,7 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
       // a resume (a new process) restarts them.
       if (e.start === 'resume' || e.start === 'reload') {
         const counters = e.start === 'resume'
-          ? { liveAgents: [], mainSkillCalls: [], agentDenied: false, learnCalls: [], fieldDenied: [] }
+          ? { liveAgents: [], mainSkillCalls: [], agentDenied: false, learnCalls: [], fieldDenied: [], classifyPause: 0 }
           : {}
         return {
           session: { ...s, paused: false, lastSeen: e.now, ...counters, ...(e.version === undefined ? {} : { version: e.version }) },
@@ -428,7 +432,10 @@ function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'pro
     ledger = Object.fromEntries(Object.entries(ledger).map(([name, row]) => [name, row.state === 'restoring' && !still.includes(name) ? { ...row, state: 'absent' as const, requests: 0, reason: '' } : row]))
   }
   const tracked = track({ ...s, ledger, needs, compactedSincePrompt: false }, 'classifyFails', 'classifier: ', e.classifierFailed, 'the small model failed or timed out 3 prompts in a row, so needs are not detected')
-  const next: Session = track(tracked, 'workFails', 'classifier B: ', e.workFailed, 'the small model failed to pick a work need 3 prompts in a row, so work needs are not detected')
+  const tracked2: Session = track(tracked, 'workFails', 'classifier B: ', e.workFailed, 'the small model failed to pick a work need 3 prompts in a row, so work needs are not detected')
+  // The breaker: a skipped prompt uses one up; a failed call A at the limit (the third, or a failed probe) starts a new pause, a good one ends it.
+  const left = e.classifierSkipped ? Math.max(0, (s.classifyPause ?? 0) - 1) : e.classifierFailed === true && (tracked2.classifyFails ?? 0) >= FAIL_LIMIT ? CLASSIFY_PAUSE : e.classifierFailed === false ? 0 : (s.classifyPause ?? 0)
+  const next: Session = left === (tracked2.classifyPause ?? 0) ? tracked2 : { ...tracked2, classifyPause: left }
   // Needs that evidence started stay quiet on a prompt that is not their deliverable (a chat reply, a failed classification).
   const quiet = new Set(Object.entries(config.skills).filter(([, rule]) => rule.need !== undefined && needs[rule.need]?.evidence === true).map(([name]) => name))
   const r = s.paused ? undefined : restore(config, next, e.now, trusted, e.root, { skip: quiet })

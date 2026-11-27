@@ -41,7 +41,8 @@ export function problemKeys(config: Config, s: Session, root?: string): Map<stri
   // One key per step (the text before the first ": "); the line names that step's newest error.
   const newest = new Map<string, string>()
   for (const err of s.errors) newest.set(stepOf(err), err)
-  for (const [step, err] of newest) out.set(`degraded:${step}`, `${PREFIX}degraded: ${plainError(err).replace(/\.$/, '')}. Details: /souffleur.`)
+  const paused = (s.classifyPause ?? 0) > 0 ? ` Need detection is paused and will retry in ${s.classifyPause} prompts.` : ''
+  for (const [step, err] of newest) out.set(`degraded:${step}`, `${PREFIX}degraded: ${plainError(err).replace(/\.$/, '')}.${step === 'classifier' ? paused : ''} Details: /souffleur.`)
   const version = versionNotice(s.version)
   if (version) out.set('version', `${PREFIX}${version}`)
   if (!isTrustedRoot(config, root) && Object.values(config.skills).some((r) => r.from === 'project')) {
