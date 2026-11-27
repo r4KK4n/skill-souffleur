@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-11-27
+
 - A skill that is not installed in this project no longer counts as needing attention; the band in the apps stays hidden for it.
 
 ## [0.2.7] - 2026-11-27
