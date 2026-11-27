@@ -15,7 +15,7 @@ Version 0.2.8, tag `v0.2.8`, verified on Claude Code 2.1.332. Souffleur is a Cla
    ```
 
    From a shell, or in a Remote Control session, use the two `claude plugin` commands in [docs/updates.md](docs/updates.md#marketplace-install).
-2. Run `/souffleur init`. It asks how Souffleur should keep your skills, one question per plugin and writes `~/.claude/souffleur.json`.
+2. Run `/souffleur init`. It asks how Souffleur should keep your skills, one question per plugin, and writes `~/.claude/souffleur.json`.
 3. Run `/souffleur`. It shows what Souffleur knows about the session:
 
    ```
