@@ -82,7 +82,14 @@ export function renderTable(config: Config, s: Session, now: number, root?: stri
 export function statusLine(s: Session, mode: Mode, notesLeftOut = 0, config?: Config, root?: string): string | undefined {
   const base = baseLine(s, mode, notesLeftOut, config, root)
   const cost = costSuffix(s.modelUse)
-  return cost === '' ? base : base === undefined ? cost.slice(3) : `${base}${cost}`
+  const line = cost === '' ? base : base === undefined ? cost.slice(3) : `${base}${cost}`
+  return line === undefined || s.lastSeen === undefined ? line : `${hhmm(s.lastSeen)} · ${line}`
+}
+
+/** `HH:MM` in the host's local time, 24 hours. */
+function hhmm(ms: number): string {
+  const d = new Date(ms)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
 function baseLine(s: Session, mode: Mode, notesLeftOut: number, config?: Config, root?: string): string | undefined {

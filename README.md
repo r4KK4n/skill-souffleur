@@ -4,7 +4,7 @@ Keeps Claude Code skills loaded and in use for the whole session, including afte
 
 In a theatre, the souffleur sits out of sight at the edge of the stage and gives an actor the line they forgot, at the moment they need it. Souffleur does the same for skills: when compaction drops a skill the current task needs, it brings the skill back.
 
-> **Status:** version 0.2.2, released as tag `v0.2.2` (see [Install](#install) and the [roadmap](#roadmap)).
+> **Status:** version 0.2.3, released as tag `v0.2.3` (see [Install](#install) and the [roadmap](#roadmap)).
 >
 > **Early access.** Souffleur is a Claude Code mod: TypeScript that runs inside Claude Code through its mod API, shipped and installed as a plugin. Anthropic still changes that API between releases, so an update of Claude Code can break Souffleur until it is adapted. It is provided as is, with no guarantee of fixes or dates. [docs/compatibility.md](docs/compatibility.md) lists the versions each behaviour was checked on.
 
@@ -35,7 +35,7 @@ Souffleur is a Claude Code mod, an in-process plugin. For why, including test re
 You work as usual. Souffleur stays quiet while nothing is missing. You notice it in three places:
 
 - When the task needs a skill that is not loaded, or a compaction has cut one, Souffleur adds a short note to your prompt asking the model to invoke that skill first. The model loads it before it answers.
-- The status line shows a summary such as `observe · 3 loaded, 1 restoring · ~$0.03`. The last part is the estimated cost of the small-model calls Souffleur made in this session, at list price; it is left out while nothing was spent. `/souffleur` also shows the calls, tokens and cost for this session and in total. If your app does not show it, `/souffleur` gives the same summary as a table.
+- The status line shows a summary such as `14:02 · observe · 3 loaded, 1 restoring · ~$0.03`. It starts with the local time (24 hours) of the last activity Souffleur saw in the session: your prompt, a tool call or the end of a turn in the main session, or the session start. When Claude Code dies, the client keeps the last line, so a time that does not move shows a session that is gone. The last part is the estimated cost of the small-model calls Souffleur made in this session, at list price; it is left out while nothing was spent. `/souffleur` also shows the calls, tokens and cost for this session and in total. If your app does not show it, `/souffleur` gives the same summary as a table.
 - In `enforce` mode, a step that needs a missing skill is refused once with the reason, and the model loads the skill and tries again.
 - An open duty (a step that must be followed by evidence, such as a detector run) is mentioned once in the prompt context when it opens. `/souffleur` lists it for as long as it stays open.
 
@@ -81,7 +81,7 @@ An installed plugin reaches a running session only after `/reload-plugins` or a 
 
 ```
 claude plugin uninstall skill-souffleur@skill-souffleur
-git clone --branch v0.2.2 https://github.com/r4KK4n/skill-souffleur ~/.claude/skills/skill-souffleur
+git clone --branch v0.2.3 https://github.com/r4KK4n/skill-souffleur ~/.claude/skills/skill-souffleur
 ```
 
 Update to a newer release:
@@ -264,7 +264,7 @@ Costs:
 - [x] Needs by deliverable
 - [x] Reply check
 - [x] Short notices in the transcript for start, compaction and problems
-- [x] Release tags `v0.1.0` to `v0.2.2`
+- [x] Release tags `v0.1.0` to `v0.2.3`
 - [x] Updates that reach running sessions (install from a folder)
 
 ## Contributing

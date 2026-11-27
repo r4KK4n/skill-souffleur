@@ -40,6 +40,10 @@ export function ruleSkillNames(config: Config): SkillName[] {
 export type RuleResult = {
   /** One text per broken rule. */
   reasons: string[]
+  /** The skill a reason is about (a skill rule's), at the same index as `reasons`; undefined for other rules. */
+  reasonSkills: (SkillName | undefined)[]
+  /** Skill rules that matched while their skill is unavailable: never denied, recorded as would-deny. */
+  unavailable: string[]
   /** After rules this call opens (the caller opens them unless the call is denied). */
   opened: string[]
   /** Open after rules this call's evidence closes. */
@@ -56,7 +60,7 @@ const MISSING_STATE = new Set(['loaded', 'unavailable', 'not installed here'])
 
 /** Checks every rule against one main-session tool call. Pure: the caller applies the result. */
 export function checkRules(config: Config, s: Session, e: ToolEvent): RuleResult {
-  const out: RuleResult = { reasons: [], opened: [], closed: [], denied: [], released: [], fired: [] }
+  const out: RuleResult = { reasons: [], reasonSkills: [], unavailable: [], opened: [], closed: [], denied: [], released: [], fired: [] }
   const base = e.tree ?? e.root
   for (const rule of config.rules) {
     if (!appliesHere(rule, e.root)) continue
@@ -67,9 +71,11 @@ export function checkRules(config: Config, s: Session, e: ToolEvent): RuleResult
         if (!matches(rule.before!, e.tool, e.path, base)) break
         if (e.tool === 'Skill' && e.skill === rule.skill) break // the call that loads the skill is the way out
         const state = s.ledger[rule.skill!]?.state
+        if (state === 'unavailable') out.unavailable.push(`${label}: ${rule.skill} is not loaded (skill unavailable)`)
         if (state === undefined || MISSING_STATE.has(state)) break
         out.fired.push(rule.skill!)
         out.reasons.push(`${label}: load ${rule.skill} with the Skill tool first, then retry.`)
+        out.reasonSkills.push(rule.skill)
         break
       }
       case 'field': {
@@ -80,6 +86,7 @@ export function checkRules(config: Config, s: Session, e: ToolEvent): RuleResult
         } else {
           out.denied.push(rule.id)
           out.reasons.push(`${label}: add "${rule.field}" to the call, then retry.`)
+          out.reasonSkills.push(undefined)
         }
         break
       }
@@ -93,6 +100,7 @@ export function checkRules(config: Config, s: Session, e: ToolEvent): RuleResult
           else if (!open.denied) {
             out.denied.push(rule.id)
             out.reasons.push(`${label}: do this first: ${ev.tool}${ev.command === undefined ? '' : ` matching ${ev.command}`}. Then retry.`)
+            out.reasonSkills.push(undefined)
           }
         }
         break

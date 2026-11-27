@@ -22,7 +22,10 @@ const config: Config = {
   },
 }
 
-const fresh = (c: Config = config, version?: string): Session => initSession(c, 'session-1', T0, 'clear', version)
+const fresh = (c: Config = config, version?: string): Session => {
+  const { lastSeen: _l, ...s } = initSession(c, 'session-1', T0, 'clear', version)
+  return s
+}
 
 test('status line counts loaded and restoring', () => {
   const s0 = fresh()
@@ -244,7 +247,7 @@ test('table: excluded skill shows its state text, needs without an audience get 
 
 test('status line leaves excluded skills out of the counts', () => {
   const c: Config = { mode: 'enforce', trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true, needs: {}, skills: { a: { always: true, from: 'user', notIn: ['/work/p'] }, b: { always: true, from: 'user' } } }
-  let s = initSession(c, 's', T0, 'clear')
+  let s = fresh(c)
   s = { ...s, ledger: skillLoaded(skillLoaded(s.ledger, 'a', T0, 'x'), 'b', T0, 'x') }
   assert.equal(statusLine(s, 'enforce', 0, c, '/work/p/'), '1 loaded')
   assert.equal(statusLine(s, 'enforce', 0, c, '/work/q'), '2 loaded')
@@ -351,4 +354,35 @@ test('the status command reads the total from the event', () => {
   const r = decide(config, s, { type: 'command', now: T1, args: '', total: used({ calls: 310, usd: 0.21 }) })
   const text = r.actions.flatMap((a) => (a.kind === 'reply' ? [a.text] : []))[0]!
   assert.match(text, /\(total 310 calls, about \$0\.21\)/)
+})
+
+// #41: the status line starts with the local time Souffleur last saw the session.
+const at1402 = new Date(2026, 10, 27, 14, 2).getTime()
+const loaded = (s: Session): Session => ({ ...s, ledger: skillLoaded(s.ledger, 'writing-guide', T1, 'matched prompt') })
+
+test('status line starts with the local time of lastSeen', () => {
+  const s: Session = { ...loaded(fresh()), lastSeen: at1402 }
+  assert.equal(statusLine(s, 'observe'), '14:02 · observe · 1 loaded')
+  assert.equal(statusLine({ ...s, lastSeen: new Date(2026, 10, 27, 7, 5).getTime() }, 'enforce'), '07:05 · 1 loaded')
+})
+
+test('the time comes first and the cost suffix stays last', () => {
+  const s: Session = { ...loaded(fresh()), lastSeen: at1402, modelUse: { calls: 2, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, usd: 0.03 } }
+  assert.match(statusLine(s, 'observe')!, /^14:02 · observe · 1 loaded · ~\$0\.03$/)
+})
+
+test('degraded keeps the time prefix', () => {
+  assert.equal(statusLine({ ...fresh(), errors: ['x'], lastSeen: at1402 }, 'enforce'), '14:02 · degraded, see /souffleur')
+})
+
+test('no lastSeen: the line is as before', () => {
+  assert.equal(statusLine(loaded(fresh()), 'enforce'), '1 loaded')
+})
+
+test('a person prompt and a seen event set lastSeen; a prompt not from the person does not', () => {
+  const a = decide(config, fresh(), { type: 'prompt', now: T1, text: 'hi', fromUser: true, matched: [] }).session
+  assert.equal(a.lastSeen, T1)
+  assert.equal(decide(config, fresh(), { type: 'prompt', now: T1, text: 'hi', fromUser: false, matched: [] }).session.lastSeen, undefined)
+  assert.equal(initSession(config, 's', T0, 'clear').lastSeen, T0, 'a session start stamps it')
+  assert.equal(decide(config, a, { type: 'seen', now: T1 + 5 }).session.lastSeen, T1 + 5)
 })

@@ -25,6 +25,8 @@ function plainError(text: string): string {
 /** The step an error belongs to: its first line up to the first `: `, else the whole line. */
 function stepOf(error: string): string {
   const line = plainError(error)
+  const gate = /^gate: (\S+) did not load/.exec(line)
+  if (gate) return `gate:${gate[1]}`
   const i = line.indexOf(': ')
   return i > 0 ? line.slice(0, i) : line
 }
