@@ -3,14 +3,23 @@ const USER_ORIGINS = ['composer', 'bridge', 'sdk']
 /**
  * True for a prompt the user wrote: not a typed command, not a hand-back, not from a peer or a timer.
  * The engine always sets `origin`; the test kit sets none on a plugin's prompt, and that counts as typed.
+ * This differs from `isUserOrigin` on purpose: a prompt without an origin cannot change state (it only
+ * feeds the model), while a command can, so a command without an origin fails closed.
  */
 export function isFromUser(e: { isMeta?: unknown; command?: unknown; origin?: { kind: string } }): boolean {
   return e.command === undefined && !e.isMeta && (e.origin === undefined || USER_ORIGINS.includes(e.origin.kind))
 }
 
-/** True when a command was typed by the user (or sent by the bridge or SDK on their behalf); a plugin's `$.command.run` is not. */
+/**
+ * True when a command comes from the person: typed (`composer`), sent through the bridge, or run by the SDK host.
+ * `sdk` counts because the SDK host is the person's own program. A plugin's `$.command.run`, the model and
+ * every other kind do not.
+ * A missing `origin` is not the person's: the engine always stamps one, so a command without it is
+ * unattested and fails closed. This is the only guard in front of the verbs that change state
+ * (`update`, `accept`, `pause`, ...). The test world sets `origin: { kind: 'composer' }`.
+ */
 export function isUserOrigin(e: { origin?: { kind: string } }): boolean {
-  return e.origin === undefined || USER_ORIGINS.includes(e.origin.kind)
+  return e.origin !== undefined && USER_ORIGINS.includes(e.origin.kind)
 }
 
 export type ToolFields = { path?: string; command?: string; brief?: string; skill?: string; model?: string }
