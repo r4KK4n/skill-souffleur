@@ -22,10 +22,14 @@ export const CHOICE_LABEL: Record<LoadChoice, string> = {
   need: 'When the task needs it',
   none: "Don't watch",
 }
-export const STOP = 'Stop'
+export const LATER = 'Decide later'
+/** The answers of a plugin group question. Free text counts as `GROUP_ONE`. */
+export const GROUP_ALL = 'All when the task needs it'
+export const GROUP_NONE = "Don't watch any"
+export const GROUP_ONE = 'Ask one by one'
 
 export const SETUP_INTRO = [
-  'Souffleur init decides how each skill is kept in your sessions. It asks one question per skill: From the start, When the task needs it, Don\'t watch, or, for plugin skills only and rarely right, Loaded by its own plugin at start (rare). Stop ends the run.',
+  'Souffleur init decides how each skill is kept in your sessions. It asks one question per skill: From the start, When the task needs it, Don\'t watch, or, for plugin skills only and rarely right, Loaded by its own plugin at start (rare). Decide later skips a skill and leaves it for the next run. Skills of one plugin that have no setting yet are first asked together, once per plugin.',
   'Every answer is written to ~/.claude/souffleur.json right away, so closing a dialog keeps the answers you already gave. A skill with a gate or duty is never removed.',
   'init does not touch your hooks, CLAUDE.md or memory files. /souffleur migrate retires old hooks.',
 ].join('\n\n')
@@ -67,8 +71,8 @@ export function currentChoice(rule: Partial<SkillRule> | undefined): LoadChoice 
 }
 
 /** The label for a choice, or `choice` mapped back from an answer; undefined for free text. */
-export function choiceOf(label: string): LoadChoice | 'stop' | undefined {
-  if (label === STOP) return 'stop'
+export function choiceOf(label: string): LoadChoice | 'later' | undefined {
+  if (label === LATER) return 'later'
   return (Object.keys(CHOICE_LABEL) as LoadChoice[]).find((c) => CHOICE_LABEL[c] === label)
 }
 
@@ -90,17 +94,32 @@ export function candidates(config: Config, installed: string[], reloadHooked: st
 
 /**
  * Answer labels for one skill, at most four. The current choice comes first, else the recommended one.
- * `Loaded by its own plugin at start (rare)` is offered for plugin skills (`a:b`), last, and first only when it is the
- * current setting; the others get `Stop` as the fourth answer.
+ * `Loaded by its own plugin at start (rare)` is offered only when it is the current or the recommended choice
+ * (for a skill without a plugin name, only when it is the current one); otherwise the fourth answer is `Decide later`.
  */
 export function options(skill: string, current: LoadChoice | undefined, recommended: LoadChoice): string[] {
-  const plugin = skill.includes(':')
-  // A skill that is injected although it has no plugin name: keep the choice, and give up Stop (closing the dialog stops anyway).
-  const all: LoadChoice[] = plugin || current === 'injected' ? ['start', 'need', 'none', 'injected'] : ['start', 'need', 'none']
+  const injected = current === 'injected' || (skill.includes(':') && recommended === 'injected')
+  const all: LoadChoice[] = injected ? ['start', 'need', 'none', 'injected'] : ['start', 'need', 'none']
   const first = current ?? (recommended === 'injected' ? 'start' : recommended)
   const order = all.includes(first) ? [first, ...all.filter((c) => c !== first)] : all
   const labels = order.map((c) => CHOICE_LABEL[c])
-  return all.length === 4 ? labels : [...labels, STOP]
+  return injected ? labels : [...labels, LATER]
+}
+
+/**
+ * Skills of one plugin (two or more, without a setting yet) are asked together. Skills of other plugins, skills
+ * without a plugin name, single skills and skills that already have a setting stay in `rest`, in their order.
+ */
+export function groupByPlugin(plans: Plan[]): { groups: { plugin: string; plans: Plan[] }[]; rest: Plan[] } {
+  const byPlugin = new Map<string, Plan[]>()
+  for (const p of plans) {
+    if (!p.skill.includes(':') || p.current !== undefined) continue
+    const plugin = p.skill.split(':')[0]!
+    byPlugin.set(plugin, [...(byPlugin.get(plugin) ?? []), p])
+  }
+  const groups = [...byPlugin].filter(([, list]) => list.length >= 2).map(([plugin, list]) => ({ plugin, plans: list }))
+  const grouped = new Set(groups.flatMap((g) => g.plans))
+  return { groups, rest: plans.filter((p) => !grouped.has(p)) }
 }
 
 /** A description as config.ts accepts it: whitespace collapsed to single spaces, 1 to 200 characters; undefined otherwise. */

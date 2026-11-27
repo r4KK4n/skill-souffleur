@@ -1,23 +1,46 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { parseConfig } from '../src/core/config.ts'
-import { addSkillToProject, hasProjectKey, ignoreInProject, applyChoice, candidates, cleanNeedText, CHOICE_LABEL, explicitOnly, injectedWarning, options, parsePicks, parseSkips, picksPrompt, setupSteps, SETUP_INTRO, INJECTED_HELP } from '../src/core/setup.ts'
+import { groupByPlugin, addSkillToProject, hasProjectKey, ignoreInProject, applyChoice, candidates, cleanNeedText, CHOICE_LABEL, explicitOnly, injectedWarning, options, parsePicks, parseSkips, picksPrompt, setupSteps, SETUP_INTRO, INJECTED_HELP } from '../src/core/setup.ts'
 
 const config = (user: unknown, project?: unknown) => parseConfig(JSON.stringify(user), project === undefined ? undefined : JSON.stringify(project)).config
 const doc = (c: unknown) => c as { mode?: string; skills: Record<string, Record<string, unknown>>; needs: Record<string, unknown> }
 
-test('options for a plain skill end with Stop', () => {
+test('options for a plain skill end with Decide later', () => {
   const o = options('writing-guide', undefined, 'need')
   assert.equal(o.length, 4)
-  assert.equal(o.at(-1), 'Stop')
+  assert.equal(o.at(-1), 'Decide later')
+  assert.ok(!o.includes('Stop'))
   assert.ok(!o.includes(CHOICE_LABEL.injected))
 })
 
-test('options for a plugin skill offer Injected', () => {
-  const o = options('terse:terse-mode', undefined, 'start')
-  assert.ok(o.includes(CHOICE_LABEL.injected))
-  assert.ok(!o.includes('Stop'))
-  assert.ok(o.length <= 4)
+test('options for a plugin skill keep Injected only when it is current or recommended', () => {
+  for (const [current, rec] of [[undefined, 'need'], ['need', 'start'], [undefined, 'none']] as const) {
+    const o = options('terse:terse-mode', current, rec)
+    assert.ok(!o.includes(CHOICE_LABEL.injected))
+    assert.equal(o.at(-1), 'Decide later')
+    assert.ok(!o.includes('Stop'))
+  }
+  for (const [current, rec] of [['injected', 'start'], [undefined, 'injected']] as const) {
+    const o = options('terse:terse-mode', current, rec)
+    assert.ok(o.includes(CHOICE_LABEL.injected))
+    assert.ok(!o.includes('Decide later'))
+    assert.ok(o.length <= 4)
+  }
+})
+
+test('groupByPlugin groups plugin skills of two or more, in order, and leaves the rest', () => {
+  const plan = (skill: string, current?: 'start') => ({ skill, source: 'model' as const, recommended: 'need' as const, ...(current ? { current } : {}) })
+  const plans = [plan('a:x'), plan('plain'), plan('b:one'), plan('a:y'), plan('a:z', 'start'), plan('a:w')]
+  const { groups, rest } = groupByPlugin(plans)
+  assert.deepEqual(groups.map((g) => [g.plugin, g.plans.map((p) => p.skill)]), [['a', ['a:x', 'a:y', 'a:w']]])
+  assert.deepEqual(rest.map((p) => p.skill), ['plain', 'b:one', 'a:z'])
+})
+
+test('groupByPlugin never groups a single skill of a plugin', () => {
+  const { groups, rest } = groupByPlugin([{ skill: 'a:x', source: 'model', recommended: 'need' }])
+  assert.deepEqual(groups, [])
+  assert.equal(rest.length, 1)
 })
 
 test('current choice is listed first, else the recommended one', () => {
@@ -135,10 +158,10 @@ test('SETUP_INTRO names the four answers and points to migrate', () => {
   assert.doesNotMatch(SETUP_INTRO, /[–—]/)
 })
 
-test('a non-plugin skill whose current setting is injected is offered Injected in place of Stop', () => {
+test('a non-plugin skill whose current setting is injected is offered Injected in place of Decide later', () => {
   const o = options('writing-guide', 'injected', 'start')
   assert.equal(o[0], CHOICE_LABEL.injected)
-  assert.ok(!o.includes('Stop'))
+  assert.ok(!o.includes('Decide later'))
   assert.equal(o.length, 4)
 })
 

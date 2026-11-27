@@ -571,8 +571,114 @@ test('init asks per skill and writes the user file', async ($, on) => {
   expect(text).toMatch(/\/souffleur migrate/)
 })
 
+// Plugin groups (#43). A model pick gives each skill a proposal and no current choice, so these skills are groupable.
+const GROUP = ['pk:a', 'pk:b', 'pk:c']
+const GROUP_PICKS = JSON.stringify({ skills: GROUP.map((name) => ({ name, need: `k-${name.slice(3)}`, needText: `Need of ${name}.` })) })
+const EMPTY = '{"skills":{}}'
+const groupWrites = (w: any) => w.writes.filter((x: any) => x.path === USER_FILE)
+
+test('a plugin group answered All when the task needs it writes every need after one dialog', async ($, on) => {
+  const w = world(on, { [USER_FILE]: EMPTY }, { skills: GROUP, proposals: GROUP_PICKS, answers: ['All when the task needs it'] })
+  await start($)
+  await run($, 'init')
+  expect(w.asked.length).toBe(1)
+    expect(w.asked[0]).toMatch(/Need of pk:a\./)
+  const written = JSON.parse(groupWrites(w).at(-1).text)
+  for (const n of ['a', 'b', 'c']) {
+    expect(written.skills[`pk:${n}`]).toEqual({ need: `k-${n}` })
+    expect(written.needs[`k-${n}`]).toBe(`Need of pk:${n}.`)
+  }
+})
+
+test("a plugin group answered Don't watch any writes no entry", async ($, on) => {
+  const w = world(on, { [USER_FILE]: EMPTY }, { skills: GROUP, proposals: GROUP_PICKS, answers: ["Don't watch any"] })
+  await start($)
+  await run($, 'init')
+  expect(w.asked.length).toBe(1)
+  expect(groupWrites(w).length).toBe(0)
+})
+
+test('a plugin group answered Decide later writes nothing and says so for each skill', async ($, on) => {
+  const w = world(on, { [USER_FILE]: EMPTY }, { skills: GROUP, proposals: GROUP_PICKS, answers: ['Decide later'] })
+  await start($)
+  const text = await run($, 'init')
+  expect(w.asked.length).toBe(1)
+  expect(groupWrites(w).length).toBe(0)
+  for (const s of GROUP) expect(text).toContain(`${s}: decided later; /souffleur init asks again.`)
+})
+
+test('a plugin group answered Ask one by one leads to one dialog per skill', async ($, on) => {
+  const w = world(on, { [USER_FILE]: EMPTY }, { skills: GROUP, proposals: GROUP_PICKS, answers: ['Ask one by one', 'When the task needs it', 'Decide later', "Don't watch"] })
+  await start($)
+  const text = await run($, 'init')
+  expect(w.asked.length).toBe(4)
+  for (const [i, s] of GROUP.entries()) expect(w.asked[i + 1]).toContain(`${s}:`)
+  const written = JSON.parse(groupWrites(w).at(-1).text)
+  expect(written.skills['pk:a']).toEqual({ need: 'k-a' })
+  expect(written.skills['pk:b']).toBe(undefined)
+  expect(text).toContain('pk:b: decided later; /souffleur init asks again.')
+})
+
+test('free text on a group question counts as Ask one by one', async ($, on) => {
+  const w = world(on, { [USER_FILE]: EMPTY }, { skills: GROUP, proposals: GROUP_PICKS, answers: ['whatever I typed', 'Decide later', 'Decide later', 'Decide later'] })
+  await start($)
+  await run($, 'init')
+  expect(w.asked.length).toBe(4)
+})
+
+test('dismissing a group question stops init', async ($, on) => {
+  const w = world(on, { [USER_FILE]: EMPTY }, { skills: GROUP, proposals: GROUP_PICKS, answers: [''] })
+  await start($)
+  const text = await run($, 'init')
+  expect(w.asked.length).toBe(1)
+  expect(groupWrites(w).length).toBe(0)
+  expect(text).toMatch(/Stopped/)
+})
+
+test('a plugin with one skill is asked per skill, not as a group', async ($, on) => {
+  const w = world(on, { [USER_FILE]: EMPTY }, { skills: ['pk:a'], proposals: JSON.stringify({ skills: [{ name: 'pk:a', need: 'k-a', needText: 'Need of pk:a.' }] }), answers: ['When the task needs it'] })
+  await start($)
+  await run($, 'init')
+  expect(w.asked.length).toBe(1)
+  expect(w.asked[0]).not.toMatch(/All when the task needs it/)
+  expect(JSON.parse(groupWrites(w).at(-1).text).skills['pk:a']).toEqual({ need: 'k-a' })
+})
+
+test('skills that already have a choice are not part of a group', async ($, on) => {
+  const user = JSON.stringify({ skills: { 'pk:a': { always: true }, 'pk:b': { always: true } } })
+  const w = world(on, { [USER_FILE]: user }, { skills: GROUP, proposals: GROUP_PICKS, answers: ['Decide later', 'Decide later', 'Decide later'] })
+  await start($)
+  await run($, 'init')
+  // pk:a and pk:b are asked one by one; pk:c alone is no group.
+  expect(w.asked.length).toBe(3)
+  expect(w.asked.some((q) => /All when the task needs it/.test(q))).toBe(false)
+})
+
+const GROUP2 = ['qq:a', 'qq:b']
+const BOTH_PICKS = JSON.stringify({ skills: [...GROUP, ...GROUP2].map((name) => ({ name, need: `k-${name.replace(':', '-')}`, needText: `Need of ${name}.` })) })
+
+test('a group answer is written at once: a second group dismissed keeps the first', async ($, on) => {
+  const w = world(on, { [USER_FILE]: EMPTY }, { skills: [...GROUP, ...GROUP2], proposals: BOTH_PICKS, answers: ['All when the task needs it', ''] })
+  await start($)
+  const text = await run($, 'init')
+  const written = JSON.parse(groupWrites(w).at(-1).text)
+  for (const n of ['a', 'b', 'c']) expect(written.skills[`pk:${n}`]).toBeTruthy()
+  expect(written.skills['qq:a']).toBe(undefined)
+  expect(text).toMatch(/Stopped at the plugin qq; 2 skills not asked/)
+})
+
+test('a group answer is written at once: a later per-skill dismiss keeps it', async ($, on) => {
+  const w = world(on, { [USER_FILE]: EMPTY }, { skills: [...GROUP, 'solo'], proposals: JSON.stringify({ skills: [...GROUP.map((name) => ({ name, need: `k-${name.slice(3)}`, needText: `Need of ${name}.` })), { name: 'solo', need: 'k-solo', needText: 'Solo.' }] }), answers: ['All when the task needs it', ''] })
+  await start($)
+  const text = await run($, 'init')
+  const written = JSON.parse(groupWrites(w).at(-1).text)
+  for (const n of ['a', 'b', 'c']) expect(written.skills[`pk:${n}`]).toBeTruthy()
+  expect(written.skills.solo).toBe(undefined)
+  expect(text).toMatch(/Stopped at solo; 1 skill not asked/)
+})
+
 test('init starts its first dialog with the explanation', async ($, on) => {
-  const w = world(on, { [USER_FILE]: ALWAYS }, { skills: ['writing-guide'], answers: ['Stop'] })
+  const w = world(on, { [USER_FILE]: ALWAYS }, { skills: ['writing-guide'], answers: ['Decide later'] })
   await start($)
   await run($, 'init')
   expect(w.asked[0]).toMatch(/Souffleur init/)
@@ -686,7 +792,7 @@ const backups = (w: World) => w.writes.filter((x) => /settings\.json\.bak-souffl
 const TWO = JSON.stringify({ skills: { 'writing-guide': { always: true }, 'ui-checklist': { always: true } } })
 
 test('a read error on the user file stops init and writes nothing', async ($, on) => {
-  const w = world(on, { [USER_FILE]: ALWAYS }, { skills: ['writing-guide'], answers: ['Stop'], failRead: [USER_FILE] })
+  const w = world(on, { [USER_FILE]: ALWAYS }, { skills: ['writing-guide'], answers: ['Decide later'], failRead: [USER_FILE] })
   await start($)
   const text = await run($, 'init')
   expect(w.writes.length).toBe(0)
@@ -754,7 +860,7 @@ for (const [name, bad] of [['blank', '   '], ['too long', 'x'.repeat(201)]] as c
 }
 
 test('init twice in one session shows the new current setting', async ($, on) => {
-  const w = world(on, { [USER_FILE]: ALWAYS }, { skills: ['writing-guide'], answers: ['When the task needs it', 'Stop'] })
+  const w = world(on, { [USER_FILE]: ALWAYS }, { skills: ['writing-guide'], answers: ['When the task needs it', 'Decide later'] })
   await start($)
   await run($, 'init')
   await run($, 'init')
@@ -774,28 +880,28 @@ test('an unchanged choice writes nothing and is reported as kept', async ($, on)
 const hooksOn = (event: string) => JSON.stringify({ hooks: { [event]: [{ hooks: [{ type: 'command', command: 'bash ~/.claude/hooks/ui-checklist-reload.sh' }] }] } })
 
 test('a SessionStart hook makes From the start the recommendation', async ($, on) => {
-  const a = world(on, { [USER_FILE]: '{"skills":{}}', [SETTINGS_PATH]: hooksOn('SessionStart') }, { skills: ['ui-checklist'], answers: ['Stop'] })
+  const a = world(on, { [USER_FILE]: '{"skills":{}}', [SETTINGS_PATH]: hooksOn('SessionStart') }, { skills: ['ui-checklist'], answers: ['Decide later'] })
   await start($)
   await run($, 'init')
   expect(a.asked[0]).toMatch(/recommended: From the start/)
 })
 
 test('a hook on another event does not', async ($, on) => {
-  const b = world(on, { [USER_FILE]: '{"skills":{}}', [SETTINGS_PATH]: hooksOn('UserPromptSubmit') }, { skills: ['ui-checklist'], answers: ['Stop'] })
+  const b = world(on, { [USER_FILE]: '{"skills":{}}', [SETTINGS_PATH]: hooksOn('UserPromptSubmit') }, { skills: ['ui-checklist'], answers: ['Decide later'] })
   await start($)
   await run($, 'init')
   expect(b.asked[0]).toMatch(/recommended: When the task needs it/)
 })
 
 test('a configured skill without a need shows the proposed description before the user picks', async ($, on) => {
-  const w = world(on, { [USER_FILE]: ALWAYS }, { skills: ['writing-guide'], answers: ['Stop'], proposals: JSON.stringify({ skills: [{ name: 'writing-guide', need: 'prose', needText: 'Writing text people read.' }] }) })
+  const w = world(on, { [USER_FILE]: ALWAYS }, { skills: ['writing-guide'], answers: ['Decide later'], proposals: JSON.stringify({ skills: [{ name: 'writing-guide', need: 'prose', needText: 'Writing text people read.' }] }) })
   await start($)
   await run($, 'init')
   expect(w.asked[0]).toMatch(/Writing text people read\./)
 })
 
 test('without a proposal the dialog shows the fallback description', async ($, on) => {
-  const v = world(on, { [USER_FILE]: ALWAYS }, { skills: ['writing-guide'], answers: ['Stop'] })
+  const v = world(on, { [USER_FILE]: ALWAYS }, { skills: ['writing-guide'], answers: ['Decide later'] })
   await start($)
   await run($, 'init')
   expect(v.asked[0]).toMatch(/The task calls for writing-guide\./)
@@ -913,7 +1019,8 @@ test('init warns when Injected is chosen for a plugin without a SessionStart hoo
   const text = await run($, 'init')
   expect(text).toMatch(/flow:plan: Loaded by its own plugin at start \(rare\)\./)
   expect(text).toMatch(/Warning: the plugin flow has no SessionStart hook/)
-  expect(w.asked[0]).toMatch(/for example/i)
+  // The injected answer is not offered here, so its explanation is left out.
+  expect(w.asked[0]).not.toMatch(/for example/i)
 })
 
 test('init does not warn when the plugin has a SessionStart hook', async ($, on) => {
@@ -1067,9 +1174,10 @@ test('an unreadable plugin gives the unknown line, not the no-hook warning', asy
 
 test('an injected skill that init keeps still gets the warning', async ($, on) => {
   const files = { ...pluginFiles({ PostToolUse: [] }), [USER_FILE]: flowInjected }
-  world(on, files, { skills: ['flow:plan'], answers: ['Loaded by its own plugin at start (rare)'] })
+  const w = world(on, files, { skills: ['flow:plan'], answers: ['Loaded by its own plugin at start (rare)'] })
   await start($)
   const text = await run($, 'init')
+  expect(w.asked[0]).toMatch(/for example/i)
   expect(text).toMatch(/Kept flow:plan/)
   expect(text).toMatch(/Warning: the plugin flow has no SessionStart hook/)
 })

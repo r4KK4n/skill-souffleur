@@ -214,14 +214,15 @@ Souffleur also reads your skills. This needs your user file and a session with a
 
 ## Setting up your skills
 
-`/souffleur init` can run at any time: after install, when you add a skill, or when one behaves differently. It asks about the skills in your user file first, then the skills one of your hooks reloads, then up to ten more that a small model picks from the descriptions of all installed skills. A skill that only a project file configures is listed and not asked, because `init` writes the user file. You answer one dialog per skill:
+`/souffleur init` can run at any time: after install, when you add a skill, or when one behaves differently. It asks about the skills in your user file first, then the skills one of your hooks reloads, then up to ten more that a small model picks from the descriptions of all installed skills. A skill that only a project file configures is listed and not asked, because `init` writes the user file. Skills of one plugin that have no setting yet come first, as one question per plugin: `All when the task needs it`, `Don't watch any`, `Ask one by one` or `Decide later`. Every other skill gets its own dialog:
 
 - `From the start`: the skill is needed from the first turn, and Souffleur asks for it after every compaction.
-- `Loaded by its own plugin at start (rare)`: a plugin puts the text in at session start itself, for example with a `SessionStart` hook, so Souffleur counts it as loaded and asks for it only after a compaction or a clear. Offered last, for plugin skills (`plugin:skill`) only. Pick it for a plugin that merely lists its skills and the status will say loaded when it is not; `init` warns when the plugin has no such hook.
+- `Loaded by its own plugin at start (rare)`: a plugin puts the text in at session start itself, for example with a `SessionStart` hook, so Souffleur counts it as loaded and asks for it only after a compaction or a clear. Offered only for plugin skills (`plugin:skill`) whose setting it is or for which it is recommended. Pick it for a plugin that merely lists its skills and the status will say loaded when it is not; `init` warns when the plugin has no such hook.
 - `When the task needs it`: the skill is needed once a prompt matches a short description. The dialog shows the proposed description, and text you type under "Other" replaces it.
 - `Don't watch`: no entry. A skill with a hand-written gate or duty keeps its entry, and `init` says so.
+- `Decide later`: nothing is written for the skill, and the next `/souffleur init` asks again.
 
-Each answer is written as it comes, with every other key in the file left as it was, and the running session uses the new entries at once. A skill your config names but this session does not list shows as `not installed here` and is never requested. Closing a dialog stops `init` and keeps the answers you gave. The closing summary names the installed skills that are not watched and points to `/souffleur migrate` when your settings hold hooks that may do the same job.
+Each answer is written as it comes, with every other key in the file left as it was, and the running session uses the new entries at once. A skill your config names but this session does not list shows as `not installed here` and is never requested. Closing a dialog stops `init` (`Decide later` skips only that skill; a dialog for a skill kept as injected has no `Decide later`, so dismissing it stops `init`) and keeps the answers you gave. The closing summary names the installed skills that are not watched and points to `/souffleur migrate` when your settings hold hooks that may do the same job.
 
 ## Coming from your own hooks
 
