@@ -374,4 +374,4 @@ A release reaches a folder install only when someone checks out a tag, and nobod
 - The `$.state` half of the reload and resume split is not verified live: whether `$.state` still holds the session after a hot reload of the mod. See [compatibility.md](compatibility.md).
 - The `$.ui.ask` dialogs of `init`, `migrate` and the proposal question were tested with the test kit and in the desktop app's dialog. They have not run end to end in a live session. A `$.ui.ask` dialog was seen in the desktop app over Remote Control on 2026-11-25, and the turn-end proposal dialog in the mobile app on 2026-11-26.
 - The band above the prompt in the desktop and mobile apps was checked with the test kit only.
-- A proposal answered "this project only" still writes a top-level entry with `where`; it should go into the project's block.
+- A proposal answered "this project only" still writes a top-level entry with `where`; it should go into the project's block ([#120](https://github.com/r4KK4n/skill-souffleur/issues/120)).
