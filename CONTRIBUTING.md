@@ -24,7 +24,7 @@ When you check Souffleur on a newer Claude Code version, add the behaviour and t
 
 ## Checks in CI
 
-The `mod` job installs the Claude Code version named in `VERIFIED_UP_TO` and runs `claude plugin validate .` and `claude plugin test .`. A weekly workflow runs both against the latest Claude Code and opens an issue titled "Mod checks fail on Claude Code <version>" when one fails. Neither command needs a login. Run them locally before you push a change to `src/mod/`.
+The `mod` job installs the Claude Code version named in `VERIFIED_UP_TO` and runs `claude plugin validate .` and `claude plugin test .`. A weekly workflow runs both against the latest Claude Code and opens an issue titled "Mod checks fail on Claude Code <version>" when one fails. Neither command needs a login. Run them locally before you push a change to `src/mod/`. GitHub turns off scheduled workflows after 60 days without repository activity, so after a quiet period check the Actions tab and start the weekly workflow again by hand (its `workflow_dispatch` trigger).
 
 ## Reporting bugs
 

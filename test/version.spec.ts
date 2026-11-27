@@ -55,3 +55,16 @@ test('plugin.json and marketplace.json carry the same version', () => {
   assert.match(plugin.version ?? '', /^\d+\.\d+\.\d+$/)
   assert.equal(entry.version, plugin.version)
 })
+
+test('ci.yml installs the Claude Code version VERIFIED_UP_TO names', () => {
+  const ci = read('.github/workflows/ci.yml')
+  const installs = [...ci.matchAll(/@anthropic-ai\/claude-code@([^\s'"]+)/g)].map((m) => m[1])
+  const checks = [...ci.matchAll(/"([^"]+) \(Claude Code\)"/g)].map((m) => m[1])
+  const steps = [...ci.matchAll(/Install Claude Code (\S+)/g)].map((m) => m[1])
+  assert.ok(installs.length > 0, 'ci.yml installs no @anthropic-ai/claude-code version')
+  assert.ok(checks.length > 0, 'ci.yml checks no "X (Claude Code)" version')
+  assert.ok(steps.length > 0, 'ci.yml has no "Install Claude Code X" step name')
+  for (const v of installs) assert.equal(v, VERIFIED_UP_TO, 'npm install pin in ci.yml')
+  for (const v of checks) assert.equal(v, VERIFIED_UP_TO, 'version check in ci.yml')
+  for (const v of steps) assert.equal(v, VERIFIED_UP_TO, 'step name in ci.yml')
+})
