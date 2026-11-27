@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- `/souffleur init` asks once per plugin when two or more of its skills have no setting yet (#43): all when the task needs it, don't watch any, ask one by one, or decide later. Every per-skill question now offers `Decide later`, which skips the skill and writes nothing, in place of `Stop`; closing a dialog still stops `init`. `Loaded by its own plugin at start (rare)` is offered only when it is the current or the recommended answer.
+
 - In `observe` mode, "Would have denied" lists the same denials `enforce` would give, assuming the model retries after each denial, counted per rule and per skill (#31). When one call breaks several checks, a check can be listed on another call than `enforce` denies it on. An `after` rule is now listed once per open rule instead of at every repeat, and the subagent brief check is listed for every brief without a `skills:` line instead of every second one. `enforce` is unchanged.
 
 ## [0.2.5] - 2026-11-27

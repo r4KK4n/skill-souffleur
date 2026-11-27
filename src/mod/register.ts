@@ -3,7 +3,7 @@ import { MAX_LIST, MAX_PROJECT_ROOTS, excludedIn, isTrustedRoot, normRoot, parse
 import { decide, initSession, normalizeSession } from '../core/decide.ts'
 import { MIGRATE_INTRO, describeHook, findHookOverlaps, findPassages, hookQuestion, hookSteps, isGuess, migrateSteps, passageLines, removeHook } from '../core/migrate.ts'
 import type { HookOverlap, Passage } from '../core/migrate.ts'
-import { CHOICE_LABEL, INJECTED_HELP, addSkillToProject, hasProjectKey, ignoreInProject, NOT_SET_UP, SETUP_INTRO, applyChoice, candidates, choiceOf, cleanNeedText, configProblem, currentChoice, describePlan, explicitOnly, injectedWarning, needKeyFor, options, parsePicks, parseSkips, picksPrompt, setupSteps } from '../core/setup.ts'
+import { CHOICE_LABEL, INJECTED_HELP, addSkillToProject, hasProjectKey, ignoreInProject, NOT_SET_UP, SETUP_INTRO, applyChoice, candidates, choiceOf, cleanNeedText, configProblem, currentChoice, describePlan, explicitOnly, GROUP_ALL, GROUP_NONE, GROUP_ONE, groupByPlugin, injectedWarning, LATER, needKeyFor, options, parsePicks, parseSkips, picksPrompt, setupSteps } from '../core/setup.ts'
 import type { LoadChoice, NeedText, Plan, StartHooks, Suggestion } from '../core/setup.ts'
 import type { Action, CoreEvent, Session } from '../core/decide.ts'
 import { audienceOf, classifyDeliverable, needTexts } from '../core/needs.ts'
@@ -762,50 +762,111 @@ async function runInit($: Dollar, l0: Loaded, only?: string[]): Promise<string> 
     return { need: { key: needKeyFor(p.skill), text: `The task calls for ${p.skill}.` }, fallback: true }
   }
 
+  /** What a plugin group question already decided per skill, and the skills it left for later. */
+  const preset = new Map<string, { choice: LoadChoice; need?: NeedText; scope: 'project' | 'everywhere' }>()
+  const later = new Set<string>()
+  let stopped = false
+
   try {
-    for (const [i, p] of toAsk.entries()) {
-      const prop = proposal(p)
+    for (const g of groupByPlugin(toAsk).groups) {
+      const short = (skill: string) => skill.slice(g.plugin.length + 1)
+      const names = g.plans.map((p) => short(p.skill))
+      const shownNames = names.length > 8 ? `${names.slice(0, 8).join(', ')}, and ${names.length - 8} more` : names.join(', ')
+      let budget = 600
+      const props: string[] = []
+      for (const p of g.plans) {
+        const line = `${short(p.skill)}: ${proposal(p).need.text}`
+        if (line.length > budget) break
+        budget -= line.length + 3
+        props.push(line)
+      }
       const lines = [
-        `${describePlan(p)}.`,
-        prop.fallback
-          ? `No description was proposed, so "When the task needs it" would read: "${prop.need.text}" Text typed under Other replaces it.`
-          : `Description for "When the task needs it": ${prop.need.text} Text typed under Other replaces it.`,
-        ...(p.skill.includes(':') ? [INJECTED_HELP] : []),
-        'How should Souffleur keep it?',
+        `The plugin ${g.plugin} has ${g.plans.length} skills with no setting yet: ${shownNames}.`,
+        `Descriptions proposed for "When the task needs it": ${props.join(' | ')}${props.length < g.plans.length ? ` | and ${g.plans.length - props.length} more` : ''}.`,
+        'How should Souffleur keep them all? Ask one by one lets you choose per skill, and so does text typed under Other.',
       ]
-      const question = `${asked ? '' : `${SETUP_INTRO}\n\n`}${lines.join(' ')}`
-      const answer: unknown = await $.ui.ask(question, { options: options(p.skill, p.current, p.recommended), header: 'Souffleur' })
+      const answer: unknown = await $.ui.ask(`${asked ? '' : `${SETUP_INTRO}\n\n`}${lines.join(' ')}`, { options: [GROUP_ALL, GROUP_NONE, GROUP_ONE, LATER], header: 'Souffleur' })
       asked = true
-      const picked = typeof answer === 'string' && answer !== '' ? choiceOf(answer) : 'stop'
-      if (picked === 'stop') {
-        done.push(`Stopped at ${p.skill}; ${plural(toAsk.length - i, 'skill')} not asked.`)
+      if (typeof answer !== 'string' || answer === '') {
+        done.push(`Stopped at the plugin ${g.plugin}; ${plural(toAsk.filter((p) => !preset.has(p.skill) && !later.has(p.skill)).length, 'skill')} not asked.`)
+        stopped = true
         break
+      }
+      if (answer === LATER) {
+        for (const p of g.plans) later.add(p.skill)
+      } else if (answer === GROUP_NONE) {
+        for (const p of g.plans) preset.set(p.skill, { choice: 'none', scope: ownHere.has(p.skill) ? 'project' : 'everywhere' })
+      } else if (answer === GROUP_ALL) {
+        // One scope question for the group's skills that only this project has.
+        let scope: 'project' | 'everywhere' | undefined = 'everywhere'
+        if (g.plans.some((p) => ownHere.has(p.skill))) {
+          const where = await $.ui.ask(`Where should the skills of ${g.plugin} that only this project has apply? This project only keeps them out of your other projects; Everywhere adds them to your standard.`, { options: ['This project only', 'Everywhere'], header: 'Souffleur' })
+          scope = where === 'This project only' ? 'project' : where === 'Everywhere' ? 'everywhere' : undefined
+        }
+        for (const p of g.plans) {
+          if (scope === undefined && ownHere.has(p.skill)) done.push(`${p.skill}: skipped, no answer about where it applies. Nothing was written for it.`)
+          else preset.set(p.skill, { choice: 'need', need: proposal(p).need, scope: ownHere.has(p.skill) ? (scope ?? 'everywhere') : 'everywhere' })
+        }
+      }
+    }
+    for (const [i, p] of toAsk.entries()) {
+      if (stopped) break
+      if (later.has(p.skill)) {
+        done.push(`${p.skill}: decided later; /souffleur init asks again.`)
+        continue
       }
       let choice: LoadChoice
       let need: NeedText | undefined
-      if (picked === undefined) {
-        const text = cleanNeedText(answer as string)
-        if (text === undefined) {
-          done.push(`${p.skill}: skipped, a description must be one line of 1 to 200 characters. Nothing was written for it.`)
+      let scope: 'project' | 'everywhere' = 'everywhere'
+      const pre = preset.get(p.skill)
+      if (pre) {
+        ;({ choice, need, scope } = pre)
+      } else {
+        const prop = proposal(p)
+        const lines = [
+          `${describePlan(p)}.`,
+          prop.fallback
+            ? `No description was proposed, so "When the task needs it" would read: "${prop.need.text}" Text typed under Other replaces it.`
+            : `Description for "When the task needs it": ${prop.need.text} Text typed under Other replaces it.`,
+          ...(p.skill.includes(':') ? [INJECTED_HELP] : []),
+          'How should Souffleur keep it?',
+        ]
+        const question = `${asked ? '' : `${SETUP_INTRO}\n\n`}${lines.join(' ')}`
+        const answer: unknown = await $.ui.ask(question, { options: options(p.skill, p.current, p.recommended), header: 'Souffleur' })
+        asked = true
+        const picked = typeof answer === 'string' && answer !== '' ? choiceOf(answer) : 'stop'
+        if (picked === 'stop') {
+          done.push(`Stopped at ${p.skill}; ${plural(toAsk.length - i, 'skill')} not asked.`)
+          stopped = true
+          break
+        }
+        if (picked === 'later') {
+          done.push(`${p.skill}: decided later; /souffleur init asks again.`)
           continue
         }
-        choice = 'need'
-        need = { key: prop.need.key, text }
-      } else {
-        choice = picked
-        need = choice === 'need' ? prop.need : undefined
-      }
-
-      // A project's own skill: "Don't watch" ignores it here; any other answer asks where it applies.
-      let scope: 'project' | 'everywhere' = 'everywhere'
-      if (ownHere.has(p.skill)) {
-        if (choice === 'none') scope = 'project'
-        else {
-          const where = await $.ui.ask(`Where should ${p.skill} apply? This project only keeps it out of your other projects; Everywhere adds it to your standard.`, { options: ['This project only', 'Everywhere'], header: 'Souffleur' })
-          if (where === 'This project only') scope = 'project'
-          else if (where !== 'Everywhere') {
-            done.push(`${p.skill}: skipped, no answer about where it applies. Nothing was written for it.`)
+        if (picked === undefined) {
+          const text = cleanNeedText(answer as string)
+          if (text === undefined) {
+            done.push(`${p.skill}: skipped, a description must be one line of 1 to 200 characters. Nothing was written for it.`)
             continue
+          }
+          choice = 'need'
+          need = { key: prop.need.key, text }
+        } else {
+          choice = picked
+          need = choice === 'need' ? prop.need : undefined
+        }
+
+        // A project's own skill: "Don't watch" ignores it here; any other answer asks where it applies.
+        if (ownHere.has(p.skill)) {
+          if (choice === 'none') scope = 'project'
+          else {
+            const where = await $.ui.ask(`Where should ${p.skill} apply? This project only keeps it out of your other projects; Everywhere adds it to your standard.`, { options: ['This project only', 'Everywhere'], header: 'Souffleur' })
+            if (where === 'This project only') scope = 'project'
+            else if (where !== 'Everywhere') {
+              done.push(`${p.skill}: skipped, no answer about where it applies. Nothing was written for it.`)
+              continue
+            }
           }
         }
       }
