@@ -69,7 +69,18 @@ const noticed = new Set<string>()
 /** Set by `session.start` from the session it restored: a reload or resume keeps a dismissed dialog dismissed. */
 let restoredAskStopped = false
 
-const now = () => Date.now()
+/** The time of the host's clock as of the last `syncClock`; a test's fake clock moves it, nothing else reads the system time. */
+let clockMs = Date.now()
+const now = (): number => clockMs
+/** `$.clock.now()` is asynchronous, so the synchronous `now()` reads this copy: refresh it at every event and after every wait. */
+async function syncClock($: Dollar): Promise<void> {
+  try {
+    const t = await $.clock.now()
+    if (typeof t === 'number' && Number.isFinite(t)) clockMs = t
+  } catch {
+    // an old host without the clock call keeps the last value
+  }
+}
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err))
 
 const stripBom = (text: string) => text.replace(/^\uFEFF/, '')
@@ -751,6 +762,7 @@ function serial<T>(work: () => Promise<T>): Promise<T> {
 /** Feeds one event to the core and stores the result. */
 function apply($: Dollar, make: (l: Loaded) => CoreEvent): Promise<{ actions: Action[]; l: Loaded }> {
   return serial(async () => {
+    await syncClock($)
     const { l, session } = await current($)
     const event = make(l)
     const r = decide(l.config, session, event)
@@ -2356,6 +2368,7 @@ export const register: Register = (on) => {
   })
 
   on('session.start', async ($, e, next) => {
+    await syncClock($)
     await safe($, 'session.start', undefined, async () => {
       loaded = undefined
       ownHandled = false
@@ -2449,6 +2462,7 @@ export const register: Register = (on) => {
   })
 
   on('skill.prompt', async ($, e, next) => {
+    await syncClock($)
     await safe($, 'skill.prompt', undefined, async () => {
       const { actions } = await apply($, () => ({ type: 'skill', now: now(), skill: e.skill, text: e.text, ...(e.source === undefined ? {} : { source: e.source }), ...(e.pluginName === undefined ? {} : { pluginName: e.pluginName }), ...(e.path === undefined ? {} : { path: e.path }) }))
       for (const a of actions) if (a.kind === 'learn') void learnFrom($, a)
@@ -2458,6 +2472,7 @@ export const register: Register = (on) => {
 
   // The last chance to store the copy a resume reads: the turn may have ended without a turn.complete (exit, signal, -p).
   on('session.end', async ($, e, next) => {
+    await syncClock($)
     try {
       await serial(async () => {
         // After a reload `latest` is unset: the held state or the stored copy is the session to keep.
@@ -2474,6 +2489,7 @@ export const register: Register = (on) => {
   }).catch(($, e, next) => next(e))
 
   on('session.compact', async ($, e, next) => {
+    await syncClock($)
     const agentId = e.agentId === undefined ? {} : { agentId: e.agentId }
     await safe($, 'session.compact.before', undefined, async () => {
       await apply($, () => ({ type: 'compact', now: now(), phase: 'before', trigger: e.trigger, ...agentId }))
@@ -2488,6 +2504,7 @@ export const register: Register = (on) => {
   }).catch(($, e, next) => next(e))
 
   on('prompt.submit', async ($, e, next) => {
+    await syncClock($)
     const fromUser = isFromUser(e)
     if (fromUser) lastPromptKind = e.origin?.kind
     personTurn = fromUser || (e.command !== undefined && isUserOrigin(e))
@@ -2578,6 +2595,7 @@ export const register: Register = (on) => {
   }).catch(($, e, next) => next(e))
 
   on('prompt.compose', async ($, e, next) => {
+    await syncClock($)
     const r = await next(e)
     const text = await safe($, 'prompt.compose', undefined as string | undefined, async () => {
       const { l, session } = await current($)
@@ -2594,6 +2612,7 @@ export const register: Register = (on) => {
   })
 
   on('tool.call', async ($, e, next) => {
+    await syncClock($)
     const actions = await safe($, 'tool.call', [] as Action[], async () => {
       const fields = toolFields(e)
       const r = await apply($, (l) => ({
@@ -2617,6 +2636,7 @@ export const register: Register = (on) => {
   }).catch(($, e, next) => next(e))
 
   on('tool.run', { tool: PROPOSE_TOOL }, async ($, e) => {
+    await syncClock($)
     const text = await safe($, 'souffleur_propose', 'Souffleur could not queue the proposal. Tell the user and carry on.', () => runPropose($, e as unknown as Record<string, unknown>))
     return { result: text }
   }).catch(() => ({ result: 'Souffleur could not queue the proposal. Tell the user and carry on.' }))
@@ -2625,6 +2645,7 @@ export const register: Register = (on) => {
   // placeholder holds the window of the spawn; the agent's id replaces it once the result names it.
   let spawnSeq = 0
   on('agent.spawn', async ($, e, next) => {
+    await syncClock($)
     const token = `${SPAWN_PREFIX}${now()}:${++spawnSeq}`
     await safe($, 'agent.spawn', undefined, async () => {
       await apply($, () => ({ type: 'agentStart', now: now(), agentId: token }))
@@ -2648,6 +2669,7 @@ export const register: Register = (on) => {
   // A live agent run is what tells a skill load of the main session from an agent's: `skill.prompt` has no agentId, and a
   // background agent's Agent call returns at launch. A run starts with its `turn.start` and ends with its `turn.complete` or `agent.report`.
   on('turn.start', async ($, e, next) => {
+    await syncClock($)
     const r = await next(e)
     if (e.agentId !== undefined) {
       const agentId = e.agentId
@@ -2659,6 +2681,7 @@ export const register: Register = (on) => {
   })
 
   on('agent.report', async ($, e, next) => {
+    await syncClock($)
     const r = await next(e)
     await safe($, 'agent.report', undefined, async () => {
       await apply($, () => ({ type: 'agentDone', now: now(), agentId: e.agentId }))
@@ -2668,6 +2691,7 @@ export const register: Register = (on) => {
 
   // At the end of a turn: one question about the first waiting proposal; where no dialog opens, a notice with a reply hint.
   on('turn.complete', async ($, e, next) => {
+    await syncClock($)
     const r = await next(e)
     if (e.agentId !== undefined) {
       const agentId = e.agentId
@@ -2719,6 +2743,7 @@ export const register: Register = (on) => {
   })
 
   on('command.run', async ($, e, next) => {
+    await syncClock($)
     if (e.command === 'souffleur') {
       const verb0 = (e.args ?? '').trim().split(/\s+/)[0]
       // Only a read-only status is open to a plugin or the model; every other verb changes state or opens a dialog.
