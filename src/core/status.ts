@@ -4,6 +4,8 @@ import { contextNotes, sectionNotes } from './rules.ts'
 import { excludedIn, isTrustedRoot } from './config.ts'
 import type { Config, Mode } from './types.ts'
 import { versionNotice } from './version.ts'
+import { costSuffix, formatUse } from './cost.ts'
+import type { ModelUse } from './cost.ts'
 
 const cell = (text: string) => text.replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\r\n|\r|\n/g, ' ')
 
@@ -14,7 +16,7 @@ const clock = (ms: number) => new Date(ms).toISOString().slice(11, 16)
 const heads = (reason: string): string[] => reason.split('\n').map((l) => (l.split(/\.(?:\s|$)/)[0] ?? l).trim())
 
 /** The `/souffleur` reply: mode, the version notice when Claude Code is newer than the verified one, one row per ledger entry, then non-empty sections, then the Claude Code version. */
-export function renderTable(config: Config, s: Session, now: number, root?: string): string {
+export function renderTable(config: Config, s: Session, now: number, root?: string, total?: ModelUse): string {
   void now
   const lines = [`Mode: ${config.mode}${s.paused ? ' (paused)' : ''}. Times in UTC.`]
   const notice = versionNotice(s.version)
@@ -60,6 +62,8 @@ export function renderTable(config: Config, s: Session, now: number, root?: stri
   if (denied.length) lines.push('', 'Would have denied:', ...denied)
   const chat = replySkill(config, root)
   if (chat !== undefined && s.replyCheck !== undefined && s.replyCheck.total > 0) lines.push('', 'Reply check:', `- ${chat.name}: ${s.replyCheck.over} of ${s.replyCheck.total} replies over the limit`)
+  const spent = formatUse(s.modelUse, total)
+  if (spent !== undefined) lines.push('', spent)
   if (s.proposals.length) lines.push('', `Open proposals (${s.proposals.length}), /souffleur review asks about them:`, ...s.proposals.map((p) => `- ${p.entry.id}`))
   const leftOut = sectionNotes(config, root).leftOut
   if (leftOut.length) lines.push('', `Notes left out of the system prompt (2,000 character limit): ${leftOut.map((n) => n.id).join(', ')}`)
@@ -76,6 +80,12 @@ export function renderTable(config: Config, s: Session, now: number, root?: stri
 
 /** Short summary for the status line; undefined when no skill is configured. */
 export function statusLine(s: Session, mode: Mode, notesLeftOut = 0, config?: Config, root?: string): string | undefined {
+  const base = baseLine(s, mode, notesLeftOut, config, root)
+  const cost = costSuffix(s.modelUse)
+  return cost === '' ? base : base === undefined ? cost.slice(3) : `${base}${cost}`
+}
+
+function baseLine(s: Session, mode: Mode, notesLeftOut: number, config?: Config, root?: string): string | undefined {
   if (s.errors.length) return 'degraded, see /souffleur'
   const counts = { loaded: 0, restoring: 0, stale: 0, unavailable: 0, 'not installed here': 0 }
   for (const [name, e] of Object.entries(s.ledger)) {
