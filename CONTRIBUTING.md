@@ -6,6 +6,20 @@ Thanks for taking the time to help. Souffleur is maintained by one person, so sm
 
 For anything larger than a typo or a one-line fix, open an issue first and describe the problem. A short discussion up front saves you from writing a pull request that does not fit.
 
+## Run it locally
+
+You need Node 22.6 or later (the tests run with `--experimental-strip-types`).
+
+```
+npm ci
+npm test
+npm run typecheck
+claude plugin validate .
+claude plugin test .
+```
+
+`npm test` and `npm run typecheck` need no login. The two `claude plugin` commands need Claude Code (the version named in `VERIFIED_UP_TO` in `src/core/version.ts`) and no login either. Run them before you push a change to `src/mod/`.
+
 ## Pull requests
 
 - Branch from `main` and keep one change per pull request.
@@ -19,6 +33,26 @@ Pull requests are merged with squash, so the pull request title becomes the comm
 ## Versions and releases
 
 The version in `plugin.json` and `marketplace.json` follows [Semantic Versioning](https://semver.org/). Do not touch the `CHANGELOG.md` headings in a pull request: the maintainer moves the "Unreleased" entries under the new version when tagging. The maintainer also creates the tag `v<version>`, for example `v0.1.0`.
+
+### Cutting a release
+
+The maintainer does these steps after the version and changelog are on `main`:
+
+1. Check that CI is green and that `version` in `plugin.json` and `marketplace.json` matches the new number.
+2. Move the "Unreleased" entries in `CHANGELOG.md` under the new version heading with its date.
+3. Create a signed tag on the release commit and verify it. Set the signing config in the repository, not globally:
+
+   ```
+   git config gpg.format ssh
+   git config user.signingkey ~/.ssh/<key>.pub
+   git tag -s v0.2.9 -m "release 0.2.9"
+   git verify-tag v0.2.9
+   ```
+
+   `git verify-tag` needs an `allowed_signers` file that lists the public key from [docs/updates.md](docs/updates.md#signed-releases).
+4. Push the tag with `git push origin v0.2.9`.
+
+Tags from `v0.2.4` on are signed with the key in [docs/updates.md](docs/updates.md#signed-releases); earlier tags are not. Automatic updates install only tags that verify against the key a user lists as `updateSigner`.
 
 When you check Souffleur on a newer Claude Code version, add the behaviour and the version to [docs/compatibility.md](docs/compatibility.md) and set `VERIFIED_UP_TO` in `src/core/version.ts` to the same version. A test compares the two. `/souffleur` tells users when their Claude Code is newer than that version.
 

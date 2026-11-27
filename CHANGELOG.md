@@ -6,6 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- Docs: shorter README with a quick start; reference moved to docs/.
 - A skill that a background agent loads no longer counts as loaded in the main session, so a gated main call is no longer let through for it; live agent runs are tracked from their own start and end, not from the Agent tool call returning; skills an agent preloads at spawn are covered, a main Skill call by the bare name still counts, and a lost run end is pruned at the next prompt (#88).
 - A failing store write can no longer drop a decision: the session copy is written at turn end, after a compaction, on a proposal change and at session end instead of on every tool call, a failed copy or status update only shows as degraded, and stored copies are capped at 50 and expire after 14 days (#87).
 
