@@ -1635,6 +1635,7 @@ test('no declines it for good: the hash is stored and the proposal is not queued
 test('a headless run opens no dialog, even one that would never answer', async ($, on) => {
   const w = world(on, { [USER_FILE]: ENFORCE }, { answers: ['Yes, everywhere'], holdAsk: true })
   await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: false })
+  await $.prompt.submit({ text: 'hello', origin: { kind: 'sdk' } } as never)
   await propose($, AGENT_RULE)
   await propose($, { ...AGENT_RULE, before: { tools: ['Bash'] } })
   await turnEnd($)
@@ -1642,6 +1643,15 @@ test('a headless run opens no dialog, even one that would never answer', async (
   expect(w.asked.length).toBe(0)
   expect(w.writes.length).toBe(0)
   expect(await table($)).toMatch(/Open proposals \(2\)/)
+})
+
+test('a Remote Control session (not interactive, bridge prompt) still asks', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: ['Yes, everywhere'] })
+  await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: false })
+  await $.prompt.submit({ text: 'hello', origin: { kind: 'bridge' } } as never)
+  await propose($, AGENT_RULE)
+  await turnEnd($)
+  expect(w.asked.length).toBe(1)
 })
 
 test('a subagent turn end asks nothing', async ($, on) => {

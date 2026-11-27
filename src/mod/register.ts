@@ -1702,8 +1702,8 @@ async function askFirst($: Dollar, atTurnEnd = false): Promise<string | undefine
   const waiting = await withStoredDeclined($, session)
   const q = nextQuestion({ ...waiting, proposals: waiting.proposals.filter((p) => !timedOutAsk.has(p.hash)) })
   if (!q) return undefined
-  if (!interactive) {
-    // Nobody can answer a dialog in a headless run, and a client that never answers would hold the turn end for two minutes per proposal.
+  if (!interactive && lastPromptKind === 'sdk') {
+    // Nobody can answer a dialog in a headless run (Remote Control also reports not interactive, but its prompts are a person's), and a client that never answers would hold the turn end for two minutes per proposal.
     if (atTurnEnd) {
       noDialog = true
       askStopped = true
