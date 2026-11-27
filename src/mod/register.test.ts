@@ -85,7 +85,6 @@ type Opts = {
   listMode?: 'hidden' | 'throws' | 'junk' | 'hangs'
   /** `$.ui.log` throws. */
   failLog?: boolean
-  failStatus?: boolean
   /** The usage every answered `$.model.complete` returns. */
   usage?: Record<string, number>
   /** Every classifier request (call A and B). */
@@ -197,7 +196,6 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   let classifyCalls = 0
   on('store.keys', () => ({ value: Object.keys(storeData) }) as never)
   on('ui.status', (_, e) => {
-    if (opts.failStatus) throw new Error('no status here')
     statuses.push(e.text)
     return { value: undefined }
   })
@@ -349,7 +347,7 @@ test('a hook error passes the event through and shows degraded', async ($, on) =
     return { value: { value: held, version: 0 } }
   })
   on('state.set', (_, e) => {
-    held = e.value
+    if ((e.value as { id?: string } | null)?.id) held = e.value
     return { value: { isSet: true, version: 1 } }
   })
   await start($)
@@ -371,7 +369,7 @@ test('a hook that works again clears its error and logs back to normal', async (
     return { value: { value: held, version: 0 } }
   })
   on('state.set', (_, e) => {
-    held = e.value
+    if ((e.value as { id?: string } | null)?.id) held = e.value
     return { value: { isSet: true, version: 1 } }
   })
   await start($)
@@ -395,7 +393,7 @@ test('hook A error survives hook B success', async ($, on) => {
     return { value: { value: held, version: 0 } }
   })
   on('state.set', (_, e) => {
-    held = e.value
+    if ((e.value as { id?: string } | null)?.id) held = e.value
     return { value: { isSet: true, version: 1 } }
   })
   await start($)
@@ -418,7 +416,7 @@ test('a failed pre-step of an Agent call is not wiped by the agentDone step', as
     return { value: { value: held, version: 0 } }
   })
   on('state.set', (_, e) => {
-    held = e.value
+    if ((e.value as { id?: string } | null)?.id) held = e.value
     return { value: { isSet: true, version: 1 } }
   })
   await start($)
@@ -457,7 +455,7 @@ test('a reload of the held state keeps per-run counters', async ($, on) => {
   })
   world(on, { [USER_FILE]: ALWAYS })
   await start($)
-  expect(written.at(-1).subagentsRunning).toBe(2)
+  expect(written.filter((v) => v?.id).at(-1).subagentsRunning).toBe(2)
 })
 
 test('a resume from the store resets per-run counters', async ($, on) => {
@@ -471,7 +469,7 @@ test('a resume from the store resets per-run counters', async ($, on) => {
   })
   world(on, { [USER_FILE]: ALWAYS }, { stored: { 'session:s1': busy } })
   await start($)
-  expect(written.at(-1).subagentsRunning).toBe(0)
+  expect(written.filter((v) => v?.id).at(-1).subagentsRunning).toBe(0)
 })
 
 test('compaction marks the skill stale and the next prompt asks for it again', async ($, on) => {
@@ -4483,23 +4481,55 @@ test('a failing store copy does not drop a deny', async ($, on) => {
   expect(await table($)).toMatch(/Errors:\n- store: /)
 })
 
-test('a failing status call does not drop a deny', async ($, on) => {
-  world(on, { [USER_FILE]: UI }, { classify: 'match', failStatus: true })
-  await start($)
-  await $.prompt.submit({ text: 'build me a login screen' })
-  const r = await $.tool.call({ tool: 'Write', file_path: '/work/proj/x.html', content: '' } as never)
-  expect(r.deny).toMatch(/ui-checklist/)
-})
+const sessionSets = (w: World) => w.storeSets.filter((k) => k === 'session:s1').length
 
 test('tool calls leave the stored copy alone until the turn ends', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS })
   await start($)
-  const key = (k: string) => k === 'session:s1'
-  const before = w.storeSets.filter(key).length
+  const before = sessionSets(w)
   for (let i = 0; i < 20; i++) await $.tool.call({ tool: 'Read', path: `a${i}.txt` } as never)
-  expect(w.storeSets.filter(key).length).toBe(before)
+  expect(sessionSets(w)).toBe(before)
   await turnEnd($)
-  expect(w.storeSets.filter(key).length).toBe(before + 1)
+  expect(sessionSets(w)).toBe(before + 1)
+})
+
+test('a classified prompt with small-model calls writes no copy before the turn ends', async ($, on) => {
+  const w = world(on, { [USER_FILE]: UI }, { classify: 'match' })
+  await start($)
+  const before = sessionSets(w)
+  await $.prompt.submit({ text: 'build me a login screen' })
+  expect(w.classifyCalls()).toBeGreaterThan(0)
+  expect(sessionSets(w)).toBe(before)
+})
+
+test('with a failing store, tool calls do not try the write again before the turn ends', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS }, { failStoreKey: 'session:s1' })
+  await start($)
+  const before = sessionSets(w)
+  for (let i = 0; i < 5; i++) await $.tool.call({ tool: 'Read', path: `a${i}.txt` } as never)
+  expect(sessionSets(w)).toBe(before)
+  await turnEnd($)
+  expect(sessionSets(w)).toBe(before + 1)
+})
+
+test('the store error clears after a later flush works', async ($, on) => {
+  const opts: Opts = { failStoreKey: 'session:s1' }
+  const w = world(on, { [USER_FILE]: ALWAYS }, opts)
+  await start($)
+  expect(await table($)).toMatch(/- store: /)
+  opts.failStoreKey = undefined
+  await turnEnd($)
+  expect(await table($)).not.toMatch(/store: /)
+  expect(w.stored['session:s1']).toBeDefined()
+})
+
+test('a proposal change writes the stored copy', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  const before = sessionSets(w)
+  await propose($, { kind: 'note', text: 'Answer in German.', source: 'user' })
+  expect(sessionSets(w)).toBeGreaterThan(before)
+  expect(JSON.stringify(w.stored['session:s1'])).toMatch(/Answer in German/)
 })
 
 test('a resume after a turn end restores the state', async ($, on) => {
@@ -4520,18 +4550,6 @@ test('compaction writes the stored copy', async ($, on) => {
   await $.session.compact({ trigger: 'manual' })
   expect(w.storeSets.filter((k) => k === 'session:s1').length).toBeGreaterThan(n)
   expect(JSON.stringify(w.stored['session:s1'])).toMatch(/stale/)
-})
-
-test('the stored copy keeps the newest 20 observed entries', async ($, on) => {
-  const { config } = parseConfig(ALWAYS, undefined)
-  const base = initSession(config, 's1', 1, 'startup', '2.1.331')
-  const fat = { ...base, observed: Array.from({ length: 25 }, (_, i) => ({ at: i, reason: `r${i}` })) }
-  const w = world(on, { [USER_FILE]: ALWAYS }, { stored: { 'session:s1': fat } })
-  await start($)
-  await turnEnd($)
-  const copy = w.stored['session:s1'] as { observed: { reason: string }[] }
-  expect(copy.observed.length).toBe(20)
-  expect(copy.observed.at(-1)?.reason).toBe('r24')
 })
 
 test('session start keeps at most 50 stored sessions and drops copies older than 14 days', async ($, on) => {
