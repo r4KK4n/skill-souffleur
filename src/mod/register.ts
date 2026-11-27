@@ -1883,6 +1883,7 @@ async function learnFrom($: Dollar, a: LearnAction): Promise<void> {
     const l = await serial(async () => {
       const { l, session } = await current($)
       const stored = await $.store.get(key)
+      await refreshStamp($, key, stored)
       // A version whose proposals still wait in this session is not read again.
       if (!l.setUp || !interactive || session.proposals.some((p) => p.skillHash === hash) || !shouldRead(session, l.config, stored)) return undefined
       const count = (name: 'fails' | 'offers') => (typeof stored === 'object' && stored !== null && typeof (stored as Record<string, unknown>)[name] === 'number' ? (stored as Record<string, number>)[name]! : 0)
@@ -1945,6 +1946,18 @@ async function markVersionDone($: Dollar, before: Session, after: Session, hash:
     await $.store.set(hashKey(version), { done: true, touched: now() })
   } catch {
     // the version stays offered and is read again next time, within the cap
+  }
+}
+
+/** A hash record in use keeps its age rule from running out: its stamp moves up when it is read, at most once a day. */
+async function refreshStamp($: Dollar, key: string, stored: unknown): Promise<void> {
+  if (typeof stored !== 'object' || stored === null) return
+  const touched = (stored as { touched?: unknown }).touched
+  if (typeof touched === 'number' && now() - touched < 86_400_000) return
+  try {
+    await $.store.set(key, { ...stored, touched: now() })
+  } catch {
+    // the stamp stays; a failed refresh only means the age rule counts from the older one
   }
 }
 

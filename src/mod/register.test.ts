@@ -5034,6 +5034,29 @@ test('skill-hash keys older than 14 days are pruned, newer ones kept, unstamped 
   expect(w.stored['souffleur:declined']).toEqual(['h'])
 })
 
+test('reading a skill-hash record refreshes its stamp once it is a day old, so a record in use is not pruned', async ($, on) => {
+  const day = 86_400_000
+  const key = hashKey(hashOf('writing-guide'))
+  const stored: Record<string, unknown> = { [key]: { done: true, touched: Date.now() - 13 * day } }
+  world(on, { [USER_FILE]: ENFORCE }, { stored, skillAnswer: answerWith(TEST_RULE) })
+  await start($)
+  await mainLoad($, 'writing-guide')
+  const refreshed = (stored[key] as { touched: number; done: boolean })
+  expect(refreshed.done).toBe(true)
+  expect(Date.now() - refreshed.touched, 'stamp is fresh, so day 20 is 7 days after it, not 20').toBeLessThan(day)
+})
+
+test('a skill-hash record read within a day is not written again', async ($, on) => {
+  const key = hashKey(hashOf('writing-guide'))
+  const stamp = Date.now() - 3_600_000
+  const stored: Record<string, unknown> = { [key]: { done: true, touched: stamp } }
+  const w = world(on, { [USER_FILE]: ENFORCE }, { stored, skillAnswer: answerWith(TEST_RULE) })
+  await start($)
+  await mainLoad($, 'writing-guide')
+  expect((stored[key] as { touched: number }).touched).toBe(stamp)
+  expect(w.storeSets.includes(key)).toBe(false)
+})
+
 test('a stored skill-hash record carries a timestamp', async ($, on) => {
   const stored: Record<string, unknown> = {}
   world(on, { [USER_FILE]: ENFORCE }, { answers: ['No'], stored, skillAnswer: answerWith(TEST_RULE) })
