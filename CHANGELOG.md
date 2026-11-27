@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- In `observe` mode, "Would have denied" lists exactly the calls `enforce` would deny, assuming the model retries after each denial (#31). An `after` rule is now listed once per open rule instead of at every repeat, and the subagent brief check is listed for every brief without a `skills:` line instead of every second one. `enforce` is unchanged.
+
 ## [0.2.5] - 2026-11-27
 
 - The brief check on `Agent` calls also applies to always-on skills that are not `for: chat` (#36). With such a skill, every `Agent` brief needs a `skills:` line in `enforce` mode, even when no need is active. A brief without one is denied once and then passes on the retry. The reason adds `Always-on: <names>.`. Skills that are excluded here, not installed here, unavailable or from an untrusted project file do not count.
