@@ -1602,13 +1602,16 @@ test('no declines it for good: the hash is stored and the proposal is not queued
   expect(await run($, 'review')).toMatch(/no proposals/)
 })
 
-test('ask at turn end without isInteractive', async ($, on) => {
-  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: ['Yes, everywhere'] })
+test('a headless run opens no dialog, even one that would never answer', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: ['Yes, everywhere'], holdAsk: true })
   await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: false })
   await propose($, AGENT_RULE)
+  await propose($, { ...AGENT_RULE, before: { tools: ['Bash'] } })
   await turnEnd($)
-  expect(w.asked.length).toBe(1)
-  expect(userFile(w).rules.length).toBe(1)
+  await turnEnd($)
+  expect(w.asked.length).toBe(0)
+  expect(w.writes.length).toBe(0)
+  expect(await table($)).toMatch(/Open proposals \(2\)/)
 })
 
 test('a subagent turn end asks nothing', async ($, on) => {

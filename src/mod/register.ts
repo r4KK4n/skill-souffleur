@@ -1674,6 +1674,15 @@ async function askFirst($: Dollar, atTurnEnd = false): Promise<string | undefine
   const waiting = await withStoredDeclined($, session)
   const q = nextQuestion({ ...waiting, proposals: waiting.proposals.filter((p) => !timedOutAsk.has(p.hash)) })
   if (!q) return undefined
+  if (!interactive) {
+    // Nobody can answer a dialog in a headless run, and a client that never answers would hold the turn end for two minutes per proposal.
+    if (atTurnEnd) {
+      noDialog = true
+      askStopped = true
+      noticeFirst($, l, session)
+    }
+    return undefined
+  }
   let label: unknown
   const asking = Promise.resolve().then(() => $.ui.ask(q.question, { options: q.options, header: 'Souffleur' }))
   try {
@@ -1691,7 +1700,7 @@ async function askFirst($: Dollar, atTurnEnd = false): Promise<string | undefine
       // The person closed the dialog: a skip. Nothing more is asked at turn end, and the model proposes no more.
       await markStopped($, { proposals: true, ...(atTurnEnd ? { ask: true } : {}) })
     } else if (atTurnEnd) {
-      // Nobody can answer a dialog here: show the proposal once and let a one-word reply answer it.
+      // A rejection that is no dismissal is not kept: show the proposal once and let a one-word reply answer it.
       // Only this process knows it: a session resumed in a client that can open a dialog asks again, and no stop is set.
       noDialog = true
       askStopped = true
