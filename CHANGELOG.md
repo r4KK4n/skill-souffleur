@@ -10,6 +10,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - A command without an `origin` is no longer treated as the person's: `/souffleur update`, `accept`, `pause` and the other state-changing verbs now refuse it. Only `composer`, `bridge` and `sdk` count (#93).
 
+### Changed
+
+- The classifier is bounded. Each call gets at most the first 1,500 and the last 500 characters of a prompt, and its request has its own timeout (2.5 s for call A, 4 s for call B), so it stops instead of running on and being billed. After three failed runs of call A the classifier is skipped for the next 10 prompts, then tried once: a good answer ends the pause, a failure starts another one. The calls are also skipped when every configured need is already active (#90).
+
 ### Fixed
 
 - Every write of `~/.claude/souffleur.json` now goes through one path: a uniquely named temporary copy that is parsed back and moved over the file (a symlinked file is written through), a re-read right before the move with up to 3 retries when another session saved meanwhile (far fewer lost entries; a save in the instant between the re-read and the move can still win), one backup per session start with the newest 3 kept (only `.bak-<13-digit ms>` copies are pruned), and a reload of the config at the next prompt when either config file changed on disk (#91).

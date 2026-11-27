@@ -3,6 +3,7 @@ import { PLUGIN_VERSION } from './version.ts'
 import type { On } from 'claude-code'
 import { decide, initSession } from '../core/decide.ts'
 import { parseConfig } from '../core/config.ts'
+import { clip } from '../core/needs.ts'
 import { makeProposal } from '../core/proposals.ts'
 import { hashKey, skillHash } from '../core/learn.ts'
 
@@ -2154,6 +2155,9 @@ test('three classifier failures in a row make the status degraded, a good run cl
   await $.prompt.submit({ text: 'three' })
   expect(w.statuses.at(-1)).toMatch(/^\d\d:\d\d · degraded, see \/souffleur$/)
   expect(await table($)).toMatch(/classifier: /)
+  // the breaker skips the next 10 prompts; the probe after them succeeds and clears it
+  for (let i = 0; i < 10; i++) await $.prompt.submit({ text: `wait ${i}` })
+  expect(w.statuses.at(-1)).toMatch(/degraded/)
   answer = 'no-match'
   await $.prompt.submit({ text: 'four' })
   expect(w.statuses.at(-1)).not.toMatch(/degraded/)
@@ -3925,6 +3929,67 @@ test('the classifier asks through complete with a fixed instruction, the labels 
   const b = requests.find((r) => !String(r.prompt).includes('chat-reply'))!
   expect(String(b.prompt)).toMatch(/^Labels: n, none\n\nText:\n/)
   expect(a.system).toBe(b.system)
+})
+
+test('clip keeps the head and the tail of a long text and leaves a short one alone', () => {
+  expect(clip('short')).toBe('short')
+  expect(clip('a'.repeat(2000))).toBe('a'.repeat(2000))
+  const out = clip('h'.repeat(1500) + 'm'.repeat(5000) + 't'.repeat(500))
+  expect(out).toBe(`${'h'.repeat(1500)}\n…\n${'t'.repeat(500)}`)
+})
+
+test('a 200 KB prompt sends at most about 2,005 characters of prompt text in each call', async ($, on) => {
+  const requests: Record<string, unknown>[] = []
+  const w = world(on, { [USER_FILE]: COST_CFG }, { classify: 'match', classifyRequests: requests })
+  await start($)
+  await $.prompt.submit({ text: `fix ${'x'.repeat(200_000)} done` })
+  expect(w.classifyCalls()).toBe(2)
+  for (const r of requests) {
+    const text = String(r.prompt).split('Prompt:\n').at(-1)!.split('\n\n').at(-1)!
+    expect(text.length).toBeLessThanOrEqual(2010)
+    expect(String(r.prompt).length).toBeLessThan(3000)
+  }
+})
+
+test('both classifier calls pass their own timeout to the model', async ($, on) => {
+  const requests: Record<string, unknown>[] = []
+  world(on, { [USER_FILE]: COST_CFG }, { classify: 'match', classifyRequests: requests })
+  await start($)
+  await $.prompt.submit({ text: 'fix the build' })
+  expect(requests.find((r) => String(r.prompt).includes('chat-reply'))!.timeoutMs).toBe(2500)
+  expect(requests.find((r) => !String(r.prompt).includes('chat-reply'))!.timeoutMs).toBe(4000)
+})
+
+// Each classified prompt makes two calls (A and B).
+test('after three failed runs the classifier pauses for 10 prompts, then probes once', async ($, on) => {
+  let answer = 'unsure'
+  const w = world(on, { [USER_FILE]: COST_CFG }, { classify: () => answer })
+  await start($)
+  for (const t of ['one', 'two', 'three']) await $.prompt.submit({ text: t })
+  expect(w.classifyCalls()).toBe(6)
+  for (let i = 0; i < 10; i++) await $.prompt.submit({ text: `skipped ${i}` })
+  expect(w.classifyCalls()).toBe(6)
+  expect(w.statuses.at(-1)).toMatch(/degraded/)
+  // the probe fails: another 10 prompts without a call
+  await $.prompt.submit({ text: 'probe one' })
+  expect(w.classifyCalls()).toBe(8)
+  for (let i = 0; i < 10; i++) await $.prompt.submit({ text: `skipped again ${i}` })
+  expect(w.classifyCalls()).toBe(8)
+  // the next probe succeeds and resets the breaker
+  answer = 'no-match'
+  await $.prompt.submit({ text: 'probe two' })
+  expect(w.classifyCalls()).toBe(10)
+  expect(w.statuses.at(-1)).not.toMatch(/degraded/)
+  await $.prompt.submit({ text: 'normal' })
+  expect(w.classifyCalls()).toBe(12)
+})
+
+test('no classifier call when every configured need is already active', async ($, on) => {
+  const w = world(on, { [USER_FILE]: COST_CFG }, { classify: 'no-match' })
+  await start($)
+  await run($, 'need n')
+  await $.prompt.submit({ text: 'fix the build' })
+  expect(w.classifyCalls()).toBe(0)
 })
 
 test('a classifier answer with whitespace and a period still starts the need', async ($, on) => {

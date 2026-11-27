@@ -2224,22 +2224,26 @@ export const register: Register = (on) => {
       // A need only the project file defines counts for a trusted root alone; nothing is classified while paused.
       const trusted = isTrustedRoot(config, l.root)
       const needs = Object.fromEntries(Object.entries(config.needs).filter(([name]) => trusted || !(config.projectNeeds ?? []).includes(name)))
-      const classify = fromUser && answered === undefined && !session.paused && Object.keys(needs).length > 0
+      const wanted = fromUser && answered === undefined && !session.paused && Object.keys(needs).length > 0
+      // Nothing to learn when every configured need is already active and none is dormant; a pause after repeated failures skips the calls too.
+      const settled = Object.keys(needs).every((name) => session.needs[name] !== undefined && session.needs[name]!.dormant !== true)
+      const breaker = wanted && !settled && (session.classifyPause ?? 0) > 0
+      const classify = wanted && !settled && !breaker
       // The skill listing runs beside the classification and gives up after its own short budget.
       const listing = fromUser ? safe($, 'installed', undefined, () => refreshInstalled($)) : undefined
       const verdict = classify
         ? await classifyDeliverable(
             e.text,
             needs,
-            async (text, labels) => {
-              const r = await callModel($, { model: 'haiku', system: CLASSIFIER_SYSTEM, prompt: `Labels: ${labels.join(', ')}\n\nText:\n${text}`, maxTokens: 10 })
+            async (text, labels, timeoutMs) => {
+              const r = await callModel($, { model: 'haiku', system: CLASSIFIER_SYSTEM, prompt: `Labels: ${labels.join(', ')}\n\nText:\n${text}`, maxTokens: 10, timeoutMs })
               return r.isAnswered ? r.text : ''
             },
             (ms) => $.clock.sleep(ms),
           )
         : undefined
       await listing
-      const { actions } = await apply($, (l2) => ({ type: 'prompt', now: now(), text: e.text, fromUser, matched: verdict?.matched ?? [], root: l2.root, ...(verdict === undefined ? {} : { classifierFailed: verdict.failed }), ...(verdict?.kind === undefined ? {} : { deliverable: verdict.kind }), ...(verdict?.bFailure !== undefined ? { workFailed: true } : verdict?.kind === 'code-or-repo-work' ? { workFailed: false } : {}) }))
+      const { actions } = await apply($, (l2) => ({ type: 'prompt', now: now(), text: e.text, fromUser, matched: verdict?.matched ?? [], root: l2.root, ...(breaker ? { classifierSkipped: true } : {}), ...(verdict === undefined ? {} : { classifierFailed: verdict.failed }), ...(verdict?.kind === undefined ? {} : { deliverable: verdict.kind }), ...(verdict?.bFailure !== undefined ? { workFailed: true } : verdict?.kind === 'code-or-repo-work' ? { workFailed: false } : {}) }))
       const classifierLine = verdict?.failure !== undefined ? `classifier: ${verdict.failure}` : verdict?.bFailure !== undefined ? `classifier B: ${verdict.bFailure}` : undefined
       if (classifierLine !== undefined) {
         try {
