@@ -1,5 +1,5 @@
 import { excludedIn, isTrustedRoot, matches, matchesCommand } from './config.ts'
-import { compacted, initLedger, markInstalled, requested, skillLoaded, syncLedger } from './ledger.ts'
+import { compacted, initLedger, ledgerKey, markInstalled, requested, sameSkill, skillLoaded, syncLedger } from './ledger.ts'
 import type { Ledger } from './ledger.ts'
 import { audienceOf, neededSkills, type Deliverable } from './needs.ts'
 import type { Proposal } from './proposals.ts'
@@ -22,7 +22,8 @@ export type Session = {
   paused: boolean
   id: string
   mainSkillCalls: SkillName[]
-  subagentsRunning: number
+  /** Ids of the agent runs that are live: started (`turn.start` with an `agentId`) and not yet ended. Absent in a copy stored by an older version. */
+  liveAgents?: string[]
   compactedSincePrompt: boolean
   agentDenied: boolean
   observed: { at: number; reason: string }[]
@@ -90,7 +91,11 @@ export type CoreEvent =
   | { type: 'tool'; now: number; tool: string; path?: string; command?: string; brief?: string; skill?: string; model?: string; present?: string[]; agentId?: string; root?: string; tree?: string }
   | { type: 'command'; now: number; args: string; root?: string; /** The small-model count over all sessions, from the plugin store. */ total?: ModelUse; /** What the stored release check says. */ update?: UpdateInfo }
   | { type: 'typed'; now: number; name: string }
-  | { type: 'agentDone'; now: number }
+  /** An agent run began or ended (`turn.start`, `turn.complete`, `agent.report` with its `agentId`). Only these end a run, never the Agent tool call returning, because a background agent returns at launch. */
+  | { type: 'agentStart'; now: number; agentId: string }
+  | { type: 'agentDone'; now: number; agentId: string }
+  /** The engine's list reports these agents ended (completed, failed, killed): their end event was lost. An id the list never named stays live (a workflow's agents are not listed). A `spawn:<ms>:<n>` placeholder older than `SPAWN_STALE_MS` goes too. */
+  | { type: 'agentsEnded'; now: number; ids: string[] }
   /** A main-loop turn ended (any reason): the session is alive. */
   | { type: 'seen'; now: number }
   /** A main-session turn ended with this answer. `fromCommand`: the turn's prompt was a typed command. */
@@ -118,6 +123,10 @@ export type Action =
 type Result = { session: Session; actions: Action[] }
 
 const KEEP = 20
+/** Marks a live-run placeholder the adapter holds while an agent spawns, before its id is known. */
+export const SPAWN_PREFIX = 'spawn:'
+const SPAWN_STALE_MS = 120_000
+const staleSpawn = (id: string, now: number) => id.startsWith(SPAWN_PREFIX) && Number(id.split(':')[1]) < now - SPAWN_STALE_MS
 const MAX_REQUESTS = 2
 const COMPACT_TRIGGERS = ['manual', 'auto', 'plugin']
 const BRIEF_SKILLS = /^skills:\s*\S/im
@@ -140,7 +149,7 @@ export function initSession(config: Config, id: string, now: number, start: 'sta
     paused: false,
     id,
     mainSkillCalls: [],
-    subagentsRunning: 0,
+    liveAgents: [],
     compactedSincePrompt: false,
     agentDenied: false,
     observed: [],
@@ -189,7 +198,7 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
       // a resume (a new process) restarts them.
       if (e.start === 'resume' || e.start === 'reload') {
         const counters = e.start === 'resume'
-          ? { subagentsRunning: 0, mainSkillCalls: [], agentDenied: false, learnCalls: [], fieldDenied: [] }
+          ? { liveAgents: [], mainSkillCalls: [], agentDenied: false, learnCalls: [], fieldDenied: [] }
           : {}
         return {
           session: { ...s, paused: false, lastSeen: e.now, ...counters, ...(e.version === undefined ? {} : { version: e.version }) },
@@ -198,8 +207,8 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
       }
       return { session: initSession(config, s.id, e.now, e.start, e.version), actions: [] }
     case 'skill': {
-      const announced = (s.learnCalls ?? []).indexOf(e.skill)
-      const main = announced >= 0 || s.subagentsRunning === 0
+      const announced = (s.learnCalls ?? []).findIndex((n) => sameSkill(n, e.skill))
+      const main = announced >= 0 || (s.liveAgents ?? []).length === 0
       const learn = main && config.learn.skills && !s.paused && e.text !== undefined && e.text.trim() !== ''
       const session: Session = { ...onSkill(config, s, e), learnCalls: (s.learnCalls ?? []).filter((_, k) => k !== announced) }
       const from = { ...(e.source === undefined ? {} : { source: e.source }), ...(e.pluginName === undefined ? {} : { pluginName: e.pluginName }), ...(e.path === undefined ? {} : { path: e.path }) }
@@ -219,15 +228,24 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
     case 'command':
       return onCommand(config, s, e)
     case 'typed':
-      return { session: { ...(e.name in s.ledger ? { ...s, mainSkillCalls: [...s.mainSkillCalls, e.name], ruleSkills: withRuleSkill(config, s, e.name) } : s), learnCalls: [...(s.learnCalls ?? []), e.name].slice(-KEEP) }, actions: [] }
+      return { session: { ...(Object.keys(s.ledger).some((k) => sameSkill(k, e.name)) ? { ...s, mainSkillCalls: [...s.mainSkillCalls, e.name], ruleSkills: withRuleSkill(config, s, e.name) } : s), learnCalls: [...(s.learnCalls ?? []), e.name].slice(-KEEP) }, actions: [] }
     case 'config':
       return { session: { ...s, ledger: syncLedger(s.ledger, config, e.now, ruleSkillNames(config)), ruleSkills: s.ruleSkills.filter((n) => ruleSkillNames(config).includes(n)), openRules: s.openRules.filter((o) => config.rules.some((r) => r.id === o.id)), needs: Object.fromEntries(Object.entries(s.needs).filter(([name]) => name in config.needs)), duties: s.duties.filter((d) => d.skill in config.skills), errors: [...s.errors.filter((m) => !m.startsWith('config: ')), ...e.errors.map((m) => `config: ${m}`)].slice(-KEEP) }, actions: [] }
     case 'installed':
       return { session: { ...s, ledger: markInstalled(s.ledger, e.names, e.now) }, actions: [] }
     case 'reply':
       return { session: onReply(config, s, e), actions: [] }
+    case 'agentStart': {
+      const live = s.liveAgents ?? []
+      return { session: live.includes(e.agentId) ? s : { ...s, liveAgents: [...live, e.agentId].slice(-KEEP) }, actions: [] }
+    }
+    case 'agentsEnded': {
+      const live = s.liveAgents ?? []
+      const kept = live.filter((id) => !e.ids.includes(id) && !staleSpawn(id, e.now))
+      return { session: kept.length === live.length ? s : { ...s, liveAgents: kept }, actions: [] }
+    }
     case 'agentDone':
-      return { session: { ...s, subagentsRunning: Math.max(0, s.subagentsRunning - 1) }, actions: [] }
+      return { session: { ...s, liveAgents: (s.liveAgents ?? []).filter((id) => id !== e.agentId) }, actions: [] }
     case 'learned':
       return { session: track(s, 'learnFails', 'learn: ', !e.ok, 'the small model failed or gave no usable answer 3 times in a row, so skill texts are not read'), actions: [] }
     case 'error':
@@ -249,13 +267,15 @@ function withRuleSkill(config: Config, s: Session, skill: SkillName): SkillName[
 }
 
 function onSkill(config: Config, s: Session, e: Extract<CoreEvent, { type: 'skill' }>): Session {
-  const i = s.mainSkillCalls.indexOf(e.skill)
-  if (i < 0 && s.subagentsRunning > 0) return s // a subagent's load
+  const i = s.mainSkillCalls.findIndex((n) => sameSkill(n, e.skill))
+  if (i < 0 && (s.liveAgents ?? []).length > 0) return s // a subagent's load
   const calls = i < 0 ? s.mainSkillCalls : s.mainSkillCalls.filter((_, k) => k !== i)
-  const gone = `gate: ${e.skill} did not load`
+  // The ledger key the load belongs to carries the release state, the gate error and the rule skill; an unknown name stays as it came.
+  const key = ledgerKey(s.ledger, e.skill) ?? e.skill
+  const gone = `gate: ${key} did not load`
   // A load ends the stall: its denials and its load attempt must not carry into a later one in this turn.
-  const { [e.skill]: _d, ...denials } = s.turnDenials ?? {}
-  return { ...s, turnDenials: denials, turnTries: (s.turnTries ?? []).filter((n) => n !== e.skill), errors: s.errors.filter((m) => !m.startsWith(gone)), mainSkillCalls: calls, ledger: skillLoaded(s.ledger, e.skill, e.now, 'skill.prompt'), ruleSkills: withRuleSkill(config, s, e.skill) }
+  const { [key]: _d, ...denials } = s.turnDenials ?? {}
+  return { ...s, turnDenials: denials, turnTries: (s.turnTries ?? []).filter((n) => n !== key), errors: s.errors.filter((m) => !m.startsWith(gone)), mainSkillCalls: calls, ledger: skillLoaded(s.ledger, e.skill, e.now, 'skill.prompt'), ruleSkills: withRuleSkill(config, s, key) }
 }
 
 function onCompact(config: Config, s: Session, e: Extract<CoreEvent, { type: 'compact' }>): Session {
@@ -521,7 +541,7 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
   // A load attempt after the first denial of that skill lets its denials count toward the release.
   if (e.tool === 'Skill' && e.skill !== undefined && (s.turnDenials?.[e.skill] ?? 0) >= 1 && !(s.turnTries ?? []).includes(e.skill)) next.turnTries = [...(s.turnTries ?? []), e.skill]
 
-  if (e.tool === 'Skill' && e.skill !== undefined && e.skill in s.ledger) next.mainSkillCalls = [...s.mainSkillCalls, e.skill]
+  if (e.tool === 'Skill' && e.skill !== undefined && Object.keys(s.ledger).some((k) => sameSkill(k, e.skill!))) next.mainSkillCalls = [...s.mainSkillCalls, e.skill]
   // The learn decision keeps its own list: it also covers skills the config does not list.
   if (e.tool === 'Skill' && e.skill !== undefined) next.learnCalls = [...(s.learnCalls ?? []), e.skill].slice(-KEEP)
 
@@ -652,7 +672,6 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
   }
 
   if (!denied) {
-    if (e.tool === 'Agent') next.subagentsRunning += 1
     const by = e.path === undefined ? e.tool : `${e.tool} ${e.path}`
     next.openRules = [...next.openRules, ...rr.opened.map((id) => ({ id, by, denied: false, told: false }))]
     for (const [name, rule] of Object.entries(config.skills)) {

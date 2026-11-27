@@ -1,7 +1,7 @@
 import { atom, read, update as updateAtom } from 'claude-code'
 import type { Register, RenderElement } from 'claude-code'
 import { MAX_LIST, MAX_PROJECT_ROOTS, excludedIn, isTrustedRoot, normRoot, parseConfig } from '../core/config.ts'
-import { decide, initSession, normalizeSession } from '../core/decide.ts'
+import { decide, initSession, normalizeSession, SPAWN_PREFIX } from '../core/decide.ts'
 import { MIGRATE_INTRO, describeHook, findHookOverlaps, findPassages, hookQuestion, hookSteps, isGuess, migrateSteps, passageLines, removeHook } from '../core/migrate.ts'
 import type { HookOverlap, Passage } from '../core/migrate.ts'
 import { CHOICE_LABEL, INJECTED_HELP, addSkillToProject, hasProjectKey, ignoreInProject, NOT_SET_UP, SETUP_INTRO, applyChoice, candidates, choiceOf, cleanNeedText, configProblem, currentChoice, describePlan, explicitOnly, GROUP_ALL, GROUP_NONE, GROUP_ONE, groupByPlugin, injectedWarning, LATER, needKeyFor, options, parsePicks, parseSkips, picksPrompt, setupSteps } from '../core/setup.ts'
@@ -2144,6 +2144,30 @@ export const register: Register = (on) => {
     if (fromUser) lastPromptKind = e.origin?.kind
     personTurn = fromUser || (e.command !== undefined && isUserOrigin(e))
     lastPromptCommand = e.command !== undefined
+    // An end event can be lost (a failed update, a reload that kept the state): the engine's own list names the runs that are over.
+    // A run the list never names (a workflow's agent) stays live. No run to check, or a list that does not answer in time: nothing is pruned.
+    await safe($, 'agent.prune', undefined, async () => {
+      const { session } = await current($)
+      const checkable = (session.liveAgents ?? []).some((id) => !id.startsWith(SPAWN_PREFIX))
+      let ended: string[] = []
+      if (checkable) {
+        let timer: ReturnType<typeof setTimeout> | undefined
+        try {
+          const list = await Promise.race([
+            $.agent.list() as Promise<{ id: string; status: string }[]>,
+            new Promise<undefined>((resolve) => {
+              timer = setTimeout(() => resolve(undefined), 2000)
+            }),
+          ])
+          if (list !== undefined) ended = list.filter((a) => ['completed', 'failed', 'killed'].includes(a.status)).map((a) => a.id)
+        } catch {
+          // no list: no run is pruned, old placeholders still age out below
+        } finally {
+          clearTimeout(timer)
+        }
+      }
+      await apply($, () => ({ type: 'agentsEnded', now: now(), ids: ended }))
+    })
     if (fromUser) await safe($, 'tool.reconnect', undefined, () => reconnectTool($))
     // Only a prompt of the person (composer or bridge, no command) answers; any prompt of the person ends the offer.
     if (e.command !== undefined && isUserOrigin(e)) endOffer()
@@ -2229,16 +2253,7 @@ export const register: Register = (on) => {
     })
     const deny = actions.find((a) => a.kind === 'deny')
     if (deny) return { deny: deny.reason }
-    let r
-    try {
-      r = await next(e)
-    } finally {
-      if (e.tool === 'Agent' && e.agentId === undefined) {
-        await safe($, 'tool.done', undefined, async () => {
-          await apply($, () => ({ type: 'agentDone', now: now() }))
-        })
-      }
-    }
+    const r = await next(e)
     const extra = actions.flatMap((a) => (a.kind === 'toolContext' ? [a.text] : []))
     if (!extra.length || r.deny !== undefined) return r
     return { ...r, context: [...(r.context ?? []), ...extra] }
@@ -2249,9 +2264,60 @@ export const register: Register = (on) => {
     return { result: text }
   }).catch(() => ({ result: 'Souffleur could not queue the proposal. Tell the user and carry on.' }))
 
+  // The agent's `skills` are preloaded before its first turn and `turn.start` fires only before its first model call, so a
+  // placeholder holds the window of the spawn; the agent's id replaces it once the result names it.
+  let spawnSeq = 0
+  on('agent.spawn', async ($, e, next) => {
+    const token = `${SPAWN_PREFIX}${now()}:${++spawnSeq}`
+    await safe($, 'agent.spawn', undefined, async () => {
+      await apply($, () => ({ type: 'agentStart', now: now(), agentId: token }))
+    })
+    try {
+      const r = await next(e)
+      const agentId = (r as { agentId?: string }).agentId
+      if (agentId !== undefined) {
+        await safe($, 'agent.spawn', undefined, async () => {
+          await apply($, () => ({ type: 'agentStart', now: now(), agentId }))
+        })
+      }
+      return r
+    } finally {
+      await safe($, 'agent.spawn', undefined, async () => {
+        await apply($, () => ({ type: 'agentDone', now: now(), agentId: token }))
+      })
+    }
+  })
+
+  // A live agent run is what tells a skill load of the main session from an agent's: `skill.prompt` has no agentId, and a
+  // background agent's Agent call returns at launch. A run starts with its `turn.start` and ends with its `turn.complete` or `agent.report`.
+  on('turn.start', async ($, e, next) => {
+    const r = await next(e)
+    if (e.agentId !== undefined) {
+      const agentId = e.agentId
+      await safe($, 'turn.start', undefined, async () => {
+        await apply($, () => ({ type: 'agentStart', now: now(), agentId }))
+      })
+    }
+    return r
+  })
+
+  on('agent.report', async ($, e, next) => {
+    const r = await next(e)
+    await safe($, 'agent.report', undefined, async () => {
+      await apply($, () => ({ type: 'agentDone', now: now(), agentId: e.agentId }))
+    })
+    return r
+  })
+
   // At the end of a turn: one question about the first waiting proposal; where no dialog opens, a notice with a reply hint.
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
+    if (e.agentId !== undefined) {
+      const agentId = e.agentId
+      await safe($, 'turn.agentDone', undefined, async () => {
+        await apply($, () => ({ type: 'agentDone', now: now(), agentId }))
+      })
+    }
     // The main loop is alive: stamp the time the status line shows. A subagent's turn end says nothing about the session.
     if (e.agentId === undefined) {
       await safe($, 'turn.seen', undefined, async () => {

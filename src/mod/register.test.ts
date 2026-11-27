@@ -268,6 +268,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   })
   on('skill.prompt', (_, e) => ({ text: e.text }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('session.compact', () => (opts.skipCompact ? { skip: 'vetoed' } : { messages: [{ role: 'user', text: 'summary', toolUses: [] }] }))
   on('command.run', () => ({}))
   return { statuses, setId: (next) => { id = next }, seen, writes, asked, options, clock, hide: (path) => void hidden.add(path), files, tools, toasts, failRead, answers, driftAfter: (path, n) => { drift.path = path; drift.left = n }, stored: storeData, storeSets, classifyCalls: () => classifyCalls, logs, runs, debugLogs, dropTool: () => { toolGone = true } }
@@ -276,6 +277,8 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
 const COMPOSE = { model: 'm', promptModel: 'm', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] } as never
 const start = ($: any) => $.session.start({ cwd: '/work/proj', surface: 'terminal', isInteractive: true })
 const skillLoaded = ($: any, skill: string) => $.skill.prompt({ skill, text: 'x', len: 1, head: 'x', tail: 'x' })
+const agentRuns = ($: any, agentId: string) => $.turn.start({ text: '', turnId: `t-${agentId}`, agentId })
+const agentEnds = ($: any, agentId: string) => turnEnd($, { agentId, turnId: `t-${agentId}` })
 const table = async ($: any) => (await $.command.run({ command: 'souffleur', args: '' })).text as string
 
 const ALWAYS = JSON.stringify({ skills: { 'writing-guide': { always: true } } })
@@ -404,7 +407,7 @@ test('hook A error survives hook B success', async ($, on) => {
   expect(w.statuses.at(-1)).toMatch(/^\d\d:\d\d · degraded, see \/souffleur$/)
 })
 
-test('a failed pre-step of an Agent call is not wiped by the agentDone step', async ($, on) => {
+test('a failed pre-step of an Agent call shows degraded', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS })
   let fail = false
   let held: unknown
@@ -446,7 +449,7 @@ test('session restored from $.store when $.state is empty', async ($, on) => {
 
 test('a reload of the held state keeps per-run counters', async ($, on) => {
   const { config } = parseConfig(ALWAYS, undefined)
-  const busy = { ...initSession(config, 's1', 1, 'startup', '2.1.331'), subagentsRunning: 2 }
+  const busy = { ...initSession(config, 's1', 1, 'startup', '2.1.331'), liveAgents: ['a1', 'a2'] }
   const written: any[] = []
   on('state.get', () => ({ value: { value: busy, version: 0 } }) as never)
   on('state.set', (_, e) => {
@@ -455,12 +458,12 @@ test('a reload of the held state keeps per-run counters', async ($, on) => {
   })
   world(on, { [USER_FILE]: ALWAYS })
   await start($)
-  expect(written.filter((v) => v?.id).at(-1).subagentsRunning).toBe(2)
+  expect(written.filter((v) => v?.id).at(-1).liveAgents).toEqual(['a1', 'a2'])
 })
 
 test('a resume from the store resets per-run counters', async ($, on) => {
   const { config } = parseConfig(ALWAYS, undefined)
-  const busy = { ...initSession(config, 's1', 1, 'startup', '2.1.331'), subagentsRunning: 2 }
+  const busy = { ...initSession(config, 's1', 1, 'startup', '2.1.331'), liveAgents: ['a1', 'a2'] }
   const written: any[] = []
   on('state.get', () => ({ value: { value: undefined, version: 0 } }) as never)
   on('state.set', (_, e) => {
@@ -469,7 +472,7 @@ test('a resume from the store resets per-run counters', async ($, on) => {
   })
   world(on, { [USER_FILE]: ALWAYS }, { stored: { 'session:s1': busy } })
   await start($)
-  expect(written.filter((v) => v?.id).at(-1).subagentsRunning).toBe(0)
+  expect(written.filter((v) => v?.id).at(-1).liveAgents).toEqual([])
 })
 
 test('compaction marks the skill stale and the next prompt asks for it again', async ($, on) => {
@@ -493,6 +496,7 @@ test('a skipped compaction leaves the ledger alone', async ($, on) => {
 test('skill loaded by a subagent does not mark the main ledger', async ($, on) => {
   world(on, { [USER_FILE]: ALWAYS })
   on('tool.call', { tool: 'Agent' }, async () => {
+    await agentRuns($, 'a1')
     await $.tool.call({ tool: 'Skill', skill: 'writing-guide', agentId: 'a1' } as never)
     await skillLoaded($, 'writing-guide')
     return { result: {} }
@@ -500,6 +504,179 @@ test('skill loaded by a subagent does not mark the main ledger', async ($, on) =
   await start($)
   await $.tool.call({ tool: 'Agent', prompt: 'skills: writing-guide', description: 'd', subagent_type: 'general-purpose' } as never)
   expect(await table($)).toMatch(/writing-guide \| not needed yet/)
+})
+
+const writeHtml = ($: any) => $.tool.call({ tool: 'Write', file_path: '/work/proj/x.html', content: '' } as never)
+
+test('a background agent loads a skill after its Agent call returned: not main, a gated Write is denied', async ($, on) => {
+  world(on, { [USER_FILE]: UI }, { classify: 'match' })
+  on('tool.call', { tool: 'Agent' }, () => ({ result: {} }))
+  await start($)
+  await $.prompt.submit({ text: 'build me a login screen' })
+  await $.tool.call({ tool: 'Agent', prompt: 'x', description: 'd', subagent_type: 'general-purpose', run_in_background: true } as never)
+  await agentRuns($, 'a1')
+  await skillLoaded($, 'ui-checklist')
+  expect(await table($)).not.toMatch(/ui-checklist \| loaded/)
+  expect((await writeHtml($)).deny).toMatch(/ui-checklist/)
+})
+
+test('after the agent run ends a load counts for main again', async ($, on) => {
+  world(on, { [USER_FILE]: UI }, { classify: 'match' })
+  on('tool.call', { tool: 'Agent' }, () => ({ result: {} }))
+  await start($)
+  await $.prompt.submit({ text: 'build me a login screen' })
+  await $.tool.call({ tool: 'Agent', prompt: 'x', description: 'd', subagent_type: 'general-purpose' } as never)
+  await agentRuns($, 'a1')
+  await agentEnds($, 'a1')
+  await skillLoaded($, 'ui-checklist')
+  expect(await table($)).toMatch(/ui-checklist \| loaded/)
+  expect((await writeHtml($)).deny).toBe(undefined)
+})
+
+test('a main Skill call counts for main while an agent runs', async ($, on) => {
+  world(on, { [USER_FILE]: UI }, { classify: 'match' })
+  await start($)
+  await $.prompt.submit({ text: 'build me a login screen' })
+  await agentRuns($, 'a1')
+  await $.tool.call({ tool: 'Skill', skill: 'ui-checklist' } as never)
+  await skillLoaded($, 'ui-checklist')
+  expect(await table($)).toMatch(/ui-checklist \| loaded/)
+})
+
+test('a failed Agent tool call does not end a run that is live', async ($, on) => {
+  world(on, { [USER_FILE]: UI }, { classify: 'match' })
+  on('tool.call', { tool: 'Agent' }, () => {
+    throw new Error('launch failed')
+  })
+  await start($)
+  await $.prompt.submit({ text: 'build me a login screen' })
+  await agentRuns($, 'a1')
+  await $.tool.call({ tool: 'Agent', prompt: 'x', description: 'd', subagent_type: 'general-purpose' } as never).catch(() => undefined)
+  await skillLoaded($, 'ui-checklist')
+  expect(await table($)).not.toMatch(/ui-checklist \| loaded/)
+})
+
+test('a skill preloaded while the agent spawns does not count for main', async ($, on) => {
+  world(on, { [USER_FILE]: UI }, { classify: 'match' })
+  let release = () => {}
+  const held = new Promise<void>((r) => { release = r })
+  on('agent.spawn', async () => {
+    await held
+    return { model: 'm', agentId: 'a1' } as never
+  })
+  await start($)
+  await $.prompt.submit({ text: 'build me a login screen' })
+  const spawn = $.agent.spawn({ prompt: 'x' } as never)
+  await new Promise((r) => setTimeout(r, 20))
+  await skillLoaded($, 'ui-checklist')
+  expect(await table($)).not.toMatch(/ui-checklist \| loaded/)
+  release()
+  await spawn
+  // the placeholder became the agent's id: still not main until the run ends
+  await skillLoaded($, 'ui-checklist')
+  expect(await table($)).not.toMatch(/ui-checklist \| loaded/)
+  await agentEnds($, 'a1')
+  await skillLoaded($, 'ui-checklist')
+  expect(await table($)).toMatch(/ui-checklist \| loaded/)
+})
+
+test('a spawn that fails leaves no placeholder behind', async ($, on) => {
+  world(on, { [USER_FILE]: UI }, { classify: 'match' })
+  on('agent.spawn', () => {
+    throw new Error('no')
+  })
+  await start($)
+  await $.prompt.submit({ text: 'build me a login screen' })
+  await $.agent.spawn({ prompt: 'x' } as never).catch(() => undefined)
+  await skillLoaded($, 'ui-checklist')
+  expect(await table($)).toMatch(/ui-checklist \| loaded/)
+})
+
+test('a live run the engine lists as failed is pruned at the next prompt', async ($, on) => {
+  world(on, { [USER_FILE]: UI }, { classify: 'match' })
+  on('agent.list', () => ({ value: [{ id: 'a1', status: 'failed' }] }) as never)
+  await start($)
+  await agentRuns($, 'a1')
+  await $.prompt.submit({ text: 'build me a login screen' })
+  await skillLoaded($, 'ui-checklist')
+  expect(await table($)).toMatch(/ui-checklist \| loaded/)
+})
+
+test('a run the engine lists as completed is pruned, a running one is kept', async ($, on) => {
+  world(on, { [USER_FILE]: UI }, { classify: 'match' })
+  on('agent.list', () => ({ value: [{ id: 'a1', status: 'completed' }, { id: 'a2', status: 'running' }] }) as never)
+  await start($)
+  await agentRuns($, 'a1')
+  await agentRuns($, 'a2')
+  await $.prompt.submit({ text: 'build me a login screen' })
+  await skillLoaded($, 'ui-checklist')
+  expect(await table($)).not.toMatch(/ui-checklist \| loaded/)
+  await agentEnds($, 'a2')
+  await skillLoaded($, 'ui-checklist')
+  expect(await table($)).toMatch(/ui-checklist \| loaded/)
+})
+
+test('a live run the list does not name survives a prompt (a workflow agent)', async ($, on) => {
+  world(on, { [USER_FILE]: UI }, { classify: 'match' })
+  on('agent.list', () => ({ value: [] }) as never)
+  await start($)
+  await agentRuns($, 'wf1')
+  await $.prompt.submit({ text: 'build me a login screen' })
+  await skillLoaded($, 'ui-checklist')
+  expect(await table($)).not.toMatch(/ui-checklist \| loaded/)
+})
+
+test('the agent list is not asked while no run is live, and a slow list prunes nothing', async ($, on) => {
+  world(on, { [USER_FILE]: UI }, { classify: 'match' })
+  let asked = 0
+  let slow = false
+  on('agent.list', () => {
+    asked += 1
+    return slow ? (new Promise(() => {}) as never) : ({ value: [{ id: 'a1', status: 'completed' }] } as never)
+  })
+  await start($)
+  await $.prompt.submit({ text: 'hello' })
+  expect(asked).toBe(0)
+  await agentRuns($, 'a1')
+  slow = true
+  await $.prompt.submit({ text: 'build me a login screen' })
+  expect(asked).toBe(1)
+  await skillLoaded($, 'ui-checklist')
+  expect(await table($)).not.toMatch(/ui-checklist \| loaded/)
+})
+
+test('nothing is pruned when the agent list fails', async ($, on) => {
+  world(on, { [USER_FILE]: UI }, { classify: 'match' })
+  on('agent.list', () => {
+    throw new Error('no list')
+  })
+  await start($)
+  await agentRuns($, 'a1')
+  await $.prompt.submit({ text: 'build me a login screen' })
+  await skillLoaded($, 'ui-checklist')
+  expect(await table($)).not.toMatch(/ui-checklist \| loaded/)
+})
+
+test('an agent.report ends the run', async ($, on) => {
+  world(on, { [USER_FILE]: UI }, { classify: 'match' })
+  on('agent.report', (_, e) => ({ text: e.text }) as never)
+  await start($)
+  await $.prompt.submit({ text: 'build me a login screen' })
+  await agentRuns($, 'a1')
+  await $.agent.report({ agentId: 'a1', subagentType: 'general-purpose', status: 'completed', text: 'done' } as never)
+  await skillLoaded($, 'ui-checklist')
+  expect(await table($)).toMatch(/ui-checklist \| loaded/)
+})
+
+test('a main turn.start and turn.complete leave the live runs alone', async ($, on) => {
+  world(on, { [USER_FILE]: UI }, { classify: 'match' })
+  await start($)
+  await $.prompt.submit({ text: 'build me a login screen' })
+  await agentRuns($, 'a1')
+  await $.turn.start({ text: '', turnId: 'main1' } as never)
+  await turnEnd($, { turnId: 'main1' })
+  await skillLoaded($, 'ui-checklist')
+  expect(await table($)).not.toMatch(/ui-checklist \| loaded/)
 })
 
 test('new session id after clear starts a fresh ledger', async ($, on) => {
@@ -1659,6 +1836,7 @@ test('a subagent load is not read', async ($, on) => {
   await start($)
   const agent = $.tool.call({ tool: 'Agent', prompt: 'x' } as never)
   await settle()
+  await agentRuns($, 'a1')
   await loadSkill($, 'writing-guide')
   await settle()
   expect(calls.length).toBe(0)
