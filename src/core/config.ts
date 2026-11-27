@@ -351,7 +351,7 @@ function parseFile(text: string, source: Origin, errors: string[], extraNeeds: r
     else fail('update: must be "notify", "auto" or "off"; ignored')
   }
   if (source === 'user' && obj.updateSigner !== undefined) {
-    if (typeof obj.updateSigner === 'string' && /^(ssh-|ecdsa-|sk-)\S*( |$)/.test(obj.updateSigner) && !hasLineBreak(obj.updateSigner)) file.updateSigner = obj.updateSigner
+    if (typeof obj.updateSigner === 'string' && /^(ssh-|ecdsa-|sk-)\S+[ \t]+\S+(?:[ \t].*)?$/.test(obj.updateSigner) && !hasLineBreak(obj.updateSigner)) file.updateSigner = obj.updateSigner
     else fail('updateSigner: must be an SSH public key line; ignored')
   }
   if (source === 'user' && obj.learn !== undefined) {

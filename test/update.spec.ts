@@ -31,13 +31,14 @@ test('isCheckDue: missing is due, 24 h exactly is due, one ms less is not', () =
   assert.equal(isCheckDue(undefined, now), true)
   assert.equal(isCheckDue({ at: now - 86_400_000 }, now), true)
   assert.equal(isCheckDue({ at: now - 86_399_999 }, now), false)
-  assert.equal(isCheckDue({ at: now + 5 }, now), false)
+  assert.equal(isCheckDue({ at: now + 5 }, now), true)
+  assert.equal(isCheckDue({ at: 9e15 }, now), true)
 })
 
 test('isUpdateCheck accepts { at, latest? } only', () => {
   assert.equal(isUpdateCheck({ at: 1 }), true)
   assert.equal(isUpdateCheck({ at: 1, latest: 'v0.2.4' }), true)
-  for (const bad of [undefined, null, 5, 'x', [], {}, { at: '1' }, { at: NaN }, { at: 1, latest: 4 }]) assert.equal(isUpdateCheck(bad), false)
+  for (const bad of [undefined, null, 5, 'x', [], {}, { at: '1' }, { at: NaN }, { at: 1, latest: 4 }, { at: 1, latest: '--orphan' }, { at: 1, latest: 'v0.2.4\nx' }, { at: 1, latest: 'v1.0' }, { at: 1, latest: 'v0.3.0-rc.1' }]) assert.equal(isUpdateCheck(bad), false)
 })
 
 test('updateLine texts are exact', () => {

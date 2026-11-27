@@ -16,15 +16,15 @@ export function newestRelease(lsRemote: string, current: string): string | undef
   return best
 }
 
-/** True when no check is stored or the stored one is at least 24 hours old. */
+/** True when no check is stored, the stored one is at least 24 hours old, or it lies in the future (wrong clock). */
 export function isCheckDue(check: { at: number } | undefined, now: number): boolean {
-  return check === undefined || now - check.at >= DAY_MS
+  return check === undefined || check.at > now || now - check.at >= DAY_MS
 }
 
 export function isUpdateCheck(v: unknown): v is { at: number; latest?: string } {
   if (typeof v !== 'object' || v === null || Array.isArray(v)) return false
   const o = v as Record<string, unknown>
-  return typeof o.at === 'number' && Number.isFinite(o.at) && (o.latest === undefined || typeof o.latest === 'string')
+  return typeof o.at === 'number' && Number.isFinite(o.at) && (o.latest === undefined || (typeof o.latest === 'string' && TAG.test(o.latest)))
 }
 
 export type UpdateKind = 'notify' | 'notify-market' | 'auto-done' | 'auto-unverified' | 'auto-no-signer'

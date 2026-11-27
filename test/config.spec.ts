@@ -742,7 +742,7 @@ test('update in project file → only allowed in the user config', () => {
 })
 
 test('updateSigner accepts ssh-, ecdsa- and sk- key lines', () => {
-  for (const key of ['ssh-ed25519 AAAAC3Nz user@host', 'ecdsa-sha2-nistp256 AAAA', 'sk-ssh-ed25519@openssh.com AAAA']) {
+  for (const key of ['ssh-ed25519 AAAAC3Nz user@host', 'ssh-ed25519\tAAAAC3Nz', 'ssh-ed25519 AAAAC3Nz', 'ecdsa-sha2-nistp256 AAAA', 'sk-ssh-ed25519@openssh.com AAAA']) {
     const r = parseConfig(JSON.stringify({ updateSigner: key }), undefined)
     assert.deepEqual(r.errors, [])
     assert.equal(r.config.updateSigner, key)
@@ -750,7 +750,7 @@ test('updateSigner accepts ssh-, ecdsa- and sk- key lines', () => {
 })
 
 test('updateSigner with another value → error text above', () => {
-  for (const bad of ['gpg-key', 'ssh-ed25519 AAAA\nssh-rsa BBB', '', 5, 'xssh-ed25519 A']) {
+  for (const bad of ['gpg-key', 'ssh-ed25519 AAAA\nssh-rsa BBB', '', 5, 'xssh-ed25519 A', 'ssh-', 'sk-', 'ssh- ', 'ssh-ed25519', 'ssh-ed25519 ']) {
     const r = parseConfig(JSON.stringify({ updateSigner: bad }), undefined)
     assert.equal(r.config.updateSigner, undefined)
     assert.equal(r.errors.filter((e) => /updateSigner: must be an SSH public key line; ignored/.test(e)).length, 1)
