@@ -694,8 +694,9 @@ async function runInit($: Dollar, l0: Loaded, only?: string[]): Promise<string> 
   const here = parseConfig(userSrc, projectSrc, l0.root)
   notes.push(...here.errors)
   // Raw keys, so an entry that failed validation is skipped as well.
-  const rawKey = isRecord(userDoc) && isRecord(userDoc.projects) ? Object.keys(userDoc.projects).find((k) => normRoot(k) === normRoot(l0.root)) : undefined
-  const rawBlock = rawKey === undefined ? undefined : ((userDoc as Record<string, Record<string, unknown>>).projects[rawKey])
+  const rawProjects = isRecord(userDoc) && isRecord(userDoc.projects) ? userDoc.projects : undefined
+  const rawKey = rawProjects === undefined ? undefined : Object.keys(rawProjects).find((k) => normRoot(k) === normRoot(l0.root))
+  const rawBlock = rawProjects === undefined || rawKey === undefined ? undefined : rawProjects[rawKey]
   const rawNames = (v: unknown): string[] => (isRecord(v) ? Object.keys(v) : [])
   const rawIds = (v: unknown): string[] => (Array.isArray(v) ? v.flatMap((x) => (isRecord(x) && typeof x.id === 'string' ? [x.id] : [])) : [])
   const skip = isRecord(rawBlock)
@@ -2160,7 +2161,7 @@ export const register: Register = (on) => {
   on('tool.run', { tool: PROPOSE_TOOL }, async ($, e) => {
     const text = await safe($, 'souffleur_propose', 'Souffleur could not queue the proposal. Tell the user and carry on.', () => runPropose($, e as unknown as Record<string, unknown>))
     return { result: text }
-  })
+  }).catch(() => ({ result: 'Souffleur could not queue the proposal. Tell the user and carry on.' }))
 
   // At the end of a turn: one question about the first waiting proposal; where no dialog opens, a notice with a reply hint.
   on('turn.complete', async ($, e, next) => {
