@@ -1,5 +1,5 @@
 import { excludedIn, isTrustedRoot, matches, matchesCommand } from './config.ts'
-import { compacted, initLedger, markInstalled, requested, sameSkill, skillLoaded, syncLedger } from './ledger.ts'
+import { compacted, initLedger, ledgerKey, markInstalled, requested, sameSkill, skillLoaded, syncLedger } from './ledger.ts'
 import type { Ledger } from './ledger.ts'
 import { audienceOf, neededSkills, type Deliverable } from './needs.ts'
 import type { Proposal } from './proposals.ts'
@@ -270,10 +270,12 @@ function onSkill(config: Config, s: Session, e: Extract<CoreEvent, { type: 'skil
   const i = s.mainSkillCalls.findIndex((n) => sameSkill(n, e.skill))
   if (i < 0 && (s.liveAgents ?? []).length > 0) return s // a subagent's load
   const calls = i < 0 ? s.mainSkillCalls : s.mainSkillCalls.filter((_, k) => k !== i)
-  const gone = `gate: ${e.skill} did not load`
+  // The ledger key the load belongs to carries the release state, the gate error and the rule skill; an unknown name stays as it came.
+  const key = ledgerKey(s.ledger, e.skill) ?? e.skill
+  const gone = `gate: ${key} did not load`
   // A load ends the stall: its denials and its load attempt must not carry into a later one in this turn.
-  const { [e.skill]: _d, ...denials } = s.turnDenials ?? {}
-  return { ...s, turnDenials: denials, turnTries: (s.turnTries ?? []).filter((n) => n !== e.skill), errors: s.errors.filter((m) => !m.startsWith(gone)), mainSkillCalls: calls, ledger: skillLoaded(s.ledger, e.skill, e.now, 'skill.prompt'), ruleSkills: withRuleSkill(config, s, e.skill) }
+  const { [key]: _d, ...denials } = s.turnDenials ?? {}
+  return { ...s, turnDenials: denials, turnTries: (s.turnTries ?? []).filter((n) => n !== key), errors: s.errors.filter((m) => !m.startsWith(gone)), mainSkillCalls: calls, ledger: skillLoaded(s.ledger, e.skill, e.now, 'skill.prompt'), ruleSkills: withRuleSkill(config, s, key) }
 }
 
 function onCompact(config: Config, s: Session, e: Extract<CoreEvent, { type: 'compact' }>): Session {

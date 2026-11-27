@@ -210,6 +210,17 @@ test('agentsEnded drops the ids the list reports ended and keeps the ones it nev
   assert.equal(r.ledger['ui-checklist']!.state, 'loaded')
 })
 
+test('a load by the plugin key clears the release state and the gate error of a bare ledger key', () => {
+  const c = cfg({ skills: { 'terse-mode': { always: true, from: 'user' } }, rules: [{ id: 'r1', source: 'user', before: { tools: ['Write'] }, skill: 'terse-mode' }] as never })
+  const s0: Session = { ...initSession(c, 'session-1', 0, 'clear'), turnDenials: { 'terse-mode': 2, other: 1 }, turnTries: ['terse-mode'], errors: ['gate: terse-mode did not load after 3 denials in a turn; calls released'], ruleSkills: [] }
+  const s = run(c, [loadSkill('terse:terse-mode')], s0).s
+  assert.deepEqual(s.turnDenials, { other: 1 })
+  assert.deepEqual(s.turnTries, [])
+  assert.deepEqual(s.errors, [])
+  assert.deepEqual(s.ruleSkills, ['terse-mode'])
+  assert.equal(s.ledger['terse-mode']!.state, 'loaded')
+})
+
 test('agentsEnded drops a spawn placeholder only when it is old', () => {
   const s = run(base, [agentStart('spawn:1000:1'), agentStart('spawn:200000:2'), agentsEnded([], 201000)]).s
   assert.deepEqual(s.liveAgents, ['spawn:200000:2'])

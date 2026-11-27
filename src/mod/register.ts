@@ -2159,10 +2159,9 @@ export const register: Register = (on) => {
               timer = setTimeout(() => resolve(undefined), 2000)
             }),
           ])
-          if (list === undefined) return
-          ended = list.filter((a) => ['completed', 'failed', 'killed'].includes(a.status)).map((a) => a.id)
+          if (list !== undefined) ended = list.filter((a) => ['completed', 'failed', 'killed'].includes(a.status)).map((a) => a.id)
         } catch {
-          return
+          // no list: no run is pruned, old placeholders still age out below
         } finally {
           clearTimeout(timer)
         }
