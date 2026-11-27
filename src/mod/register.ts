@@ -486,6 +486,8 @@ async function withInstallLock<T>($: Dollar, fn: () => Promise<T>): Promise<{ va
       return undefined
     }
     try {
+      // Another session may have finished a takeover since the verdict above: judge again under the guard.
+      if (!(await stale())) return undefined
       await ok($, ['rm', '-rf', lock])
       made = await ok($, ['mkdir', lock])
     } finally {
