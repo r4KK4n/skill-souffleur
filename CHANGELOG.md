@@ -6,7 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
-- In `observe` mode, "Would have denied" lists exactly the calls `enforce` would deny, assuming the model retries after each denial (#31). An `after` rule is now listed once per open rule instead of at every repeat, and the subagent brief check is listed for every brief without a `skills:` line instead of every second one. `enforce` is unchanged.
+- In `observe` mode, "Would have denied" lists the same denials `enforce` would give, assuming the model retries after each denial, counted per rule and per skill (#31). When one call breaks several checks, a check can be listed on another call than `enforce` denies it on. An `after` rule is now listed once per open rule instead of at every repeat, and the subagent brief check is listed for every brief without a `skills:` line instead of every second one. `enforce` is unchanged.
 
 ## [0.2.5] - 2026-11-27
 

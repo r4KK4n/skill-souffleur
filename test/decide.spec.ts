@@ -334,8 +334,9 @@ test('observe mode: gate, duty and Agent-brief checks deny nothing and record wo
  * Runs the same prelude and calls in `enforce` (a denied call is repeated once, as the model retries) and in `observe` (each call once).
  * Returns the reasons enforce denied per call, and the reasons observe recorded per call.
  */
-function parity(patch: Partial<Config>, prelude: CoreEvent[], calls: CoreEvent[]): { denied: string[][]; recorded: string[][] } {
+function parity(patch: Partial<Config>, prelude: CoreEvent[], calls: CoreEvent[]): { denied: string[][]; recorded: string[][]; retried: string[][] } {
   const denied: string[][] = []
+  const retried: string[][] = []
   const enforce = cfg({ ...patch, mode: 'enforce' })
   let s = run(enforce, prelude).s
   for (const e of calls) {
@@ -343,7 +344,11 @@ function parity(patch: Partial<Config>, prelude: CoreEvent[], calls: CoreEvent[]
     s = r.session
     const d = denies(r.actions) as { reason: string }[]
     denied.push(d.map((x) => x.reason))
-    if (d.length) s = decide(enforce, s, { ...e, now: at() }).session // the retry
+    if (d.length) {
+      const again = decide(enforce, s, { ...e, now: at() }) // the retry
+      s = again.session
+      retried.push((denies(again.actions) as { reason: string }[]).map((x) => x.reason))
+    } else retried.push([])
   }
   const observe = cfg({ ...patch, mode: 'observe' })
   const recorded: string[][] = []
@@ -355,12 +360,18 @@ function parity(patch: Partial<Config>, prelude: CoreEvent[], calls: CoreEvent[]
     assert.deepEqual(denies(r.actions), [])
     recorded.push(s.observed.slice(before).map((o) => o.reason))
   }
-  return { denied, recorded }
+  return { denied, recorded, retried }
 }
 const assertParity = (patch: Partial<Config>, prelude: CoreEvent[], calls: CoreEvent[], expectDenied: number) => {
   const { denied, recorded } = parity(patch, prelude, calls)
   assert.deepEqual(recorded, denied)
   assert.equal(denied.filter((d) => d.length).length, expectDenied)
+}
+/** Each line of a reason is one check; counts how often each check spoke over all calls. */
+const perCheck = (reasons: string[][]) => {
+  const n: Record<string, number> = {}
+  for (const line of reasons.flat().flatMap((r) => r.split('\n'))) n[line] = (n[line] ?? 0) + 1
+  return n
 }
 
 test('observe records what enforce denies: after rule repeats', () => {
@@ -406,6 +417,18 @@ test('observe records what enforce denies: gate until the skill loads', () => {
   const skills = { ...base.skills, 'ui-checklist': { need: 'ui', from: 'user' as const, gate: { tools: ['Write', 'Edit'], paths: ['**/*.html'] } } }
   const calls = [tool('Write', { path: 'a.html' }), tool('Write', { path: 'b.html' }), tool('Skill', { skill: 'ui-checklist' }), loadSkill('ui-checklist'), tool('Write', { path: 'c.html' })]
   assertParity({ skills }, [prompt('screen', ['ui'])], calls, 2)
+  // enforce denies the retry of a gated call too, because the skill is still not loaded
+  assert.ok(parity({ skills }, [prompt('screen', ['ui'])], calls).retried[0]!.length > 0)
+})
+
+test('observe counts the same denials as enforce when one call breaks a gate and an after rule', () => {
+  const skills = { ...base.skills, 'ui-checklist': { need: 'ui', from: 'user' as const, gate: { tools: ['Write'], paths: ['**/*.html'] } } }
+  const rules = [{ id: 'r1', source: 'user', after: { tools: ['Write'], paths: ['**/*.html'] }, evidence: { tool: 'Bash', command: '*check*' } }]
+  const calls = [tool('Write', { path: 'a.html' }), tool('Write', { path: 'b.html' }), tool('Skill', { skill: 'ui-checklist' }), loadSkill('ui-checklist'), tool('Write', { path: 'c.html' }), tool('Write', { path: 'd.html' })]
+  const { denied, recorded } = parity({ skills, rules }, [prompt('screen', ['ui'])], calls)
+  // the rule may land on another call in observe, but each check is counted as often
+  assert.deepEqual(perCheck(recorded), perCheck(denied))
+  assert.ok(Object.keys(perCheck(denied)).some((l) => l.includes('rule r1')))
 })
 
 test('observe records what enforce denies: evidence starts a need', () => {
