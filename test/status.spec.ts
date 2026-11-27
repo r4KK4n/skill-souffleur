@@ -22,7 +22,10 @@ const config: Config = {
   },
 }
 
-const fresh = (c: Config = config, version?: string): Session => initSession(c, 'session-1', T0, 'clear', version)
+const fresh = (c: Config = config, version?: string): Session => {
+  const { lastSeen: _l, ...s } = initSession(c, 'session-1', T0, 'clear', version)
+  return s
+}
 
 test('status line counts loaded and restoring', () => {
   const s0 = fresh()
@@ -244,7 +247,7 @@ test('table: excluded skill shows its state text, needs without an audience get 
 
 test('status line leaves excluded skills out of the counts', () => {
   const c: Config = { mode: 'enforce', trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true, needs: {}, skills: { a: { always: true, from: 'user', notIn: ['/work/p'] }, b: { always: true, from: 'user' } } }
-  let s = initSession(c, 's', T0, 'clear')
+  let s = fresh(c)
   s = { ...s, ledger: skillLoaded(skillLoaded(s.ledger, 'a', T0, 'x'), 'b', T0, 'x') }
   assert.equal(statusLine(s, 'enforce', 0, c, '/work/p/'), '1 loaded')
   assert.equal(statusLine(s, 'enforce', 0, c, '/work/q'), '2 loaded')
@@ -380,5 +383,6 @@ test('a person prompt and a seen event set lastSeen; a prompt not from the perso
   const a = decide(config, fresh(), { type: 'prompt', now: T1, text: 'hi', fromUser: true, matched: [] }).session
   assert.equal(a.lastSeen, T1)
   assert.equal(decide(config, fresh(), { type: 'prompt', now: T1, text: 'hi', fromUser: false, matched: [] }).session.lastSeen, undefined)
+  assert.equal(initSession(config, 's', T0, 'clear').lastSeen, T0, 'a session start stamps it')
   assert.equal(decide(config, a, { type: 'seen', now: T1 + 5 }).session.lastSeen, T1 + 5)
 })

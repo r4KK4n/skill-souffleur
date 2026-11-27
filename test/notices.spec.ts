@@ -278,3 +278,8 @@ test('a session stored by 0.1.7 (no tells) loads: carried-over keys are not told
   assert.equal(r.session.noticed?.tells?.['missing:writing-guide'], 1)
   assert.deepEqual(notices(config, r.session, r.session).lines, [])
 })
+
+test('gate errors get one problem key per skill, so two stuck skills each get their notice', () => {
+  const s: Session = { ...fresh(), errors: ['gate: a did not load after 3 denials in a turn; calls released', 'gate: b did not load after 3 denials in a turn; calls released'] }
+  assert.deepEqual([...problemKeys(config, s).keys()], ['degraded:gate:a', 'degraded:gate:b'])
+})

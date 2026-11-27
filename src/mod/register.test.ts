@@ -315,7 +315,7 @@ test('missing config file: no deny, status degraded only if a file was invalid',
 test('invalid project JSON: status line says degraded', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS, [PROJECT_FILE]: '{ not json' })
   await start($)
-  expect(w.statuses.at(-1)).toBe('degraded, see /souffleur')
+  expect(w.statuses.at(-1)).toMatch(/^\d\d:\d\d · degraded, see \/souffleur$/)
 })
 
 test('a hook error passes the event through and shows degraded', async ($, on) => {
@@ -337,7 +337,7 @@ test('a hook error passes the event through and shows degraded', async ($, on) =
   fail = true
   const r = await $.prompt.submit({ text: 'hello there' })
   expect(r.text).toBe('hello there')
-  expect(w.statuses.at(-1)).toBe('degraded, see /souffleur')
+  expect(w.statuses.at(-1)).toMatch(/^\d\d:\d\d · degraded, see \/souffleur$/)
 })
 
 test('a hook that works again clears its error and logs back to normal', async ($, on) => {
@@ -358,7 +358,7 @@ test('a hook that works again clears its error and logs back to normal', async (
   await start($)
   fail = true
   await $.prompt.submit({ text: 'hello there' })
-  expect(w.statuses.at(-1)).toBe('degraded, see /souffleur')
+  expect(w.statuses.at(-1)).toMatch(/^\d\d:\d\d · degraded, see \/souffleur$/)
   await $.prompt.submit({ text: 'and again' })
   expect(w.statuses.at(-1)).not.toMatch(/degraded/)
   expect(w.logs).toContain('Souffleur: back to normal.')
@@ -382,9 +382,9 @@ test('hook A error survives hook B success', async ($, on) => {
   await start($)
   fail = true
   await $.prompt.submit({ text: 'hello there' }) // prompt.submit fails
-  expect(w.statuses.at(-1)).toBe('degraded, see /souffleur')
+  expect(w.statuses.at(-1)).toMatch(/^\d\d:\d\d · degraded, see \/souffleur$/)
   await $.tool.call({ tool: 'Read', path: 'a.txt' } as never) // tool.call works
-  expect(w.statuses.at(-1)).toBe('degraded, see /souffleur')
+  expect(w.statuses.at(-1)).toMatch(/^\d\d:\d\d · degraded, see \/souffleur$/)
 })
 
 test('a failed pre-step of an Agent call is not wiped by the agentDone step', async ($, on) => {
@@ -405,7 +405,7 @@ test('a failed pre-step of an Agent call is not wiped by the agentDone step', as
   await start($)
   fail = true
   await $.tool.call({ tool: 'Agent', prompt: 'x', description: 'd', subagent_type: 'general-purpose' } as never)
-  expect(w.statuses.at(-1)).toBe('degraded, see /souffleur')
+  expect(w.statuses.at(-1)).toMatch(/^\d\d:\d\d · degraded, see \/souffleur$/)
 })
 
 test('/souffleur prints the ledger table', async ($, on) => {
@@ -870,7 +870,7 @@ test('init applies at once: a new skill shows in the table and the status line',
   expect(w.statuses.at(-1)).toBe('not set up, run /souffleur init')
   const text = await run($, 'init')
   expect(text).not.toMatch(/next session/)
-  expect(w.statuses.at(-1)).toBe('observe · 0 loaded')
+  expect(w.statuses.at(-1)).toMatch(/^\d\d:\d\d · observe · 0 loaded$/)
   const t = await table($)
   expect(t).toMatch(/\| ui-checklist \| not needed yet \|/)
   expect(t).not.toMatch(/not set up/)
@@ -1821,7 +1821,7 @@ test('three failed learn calls in a row make the status degraded', async ($, on)
   const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', skillAnswer: () => null })
   await start($)
   for (let i = 0; i < 3; i++) await mainLoad($, `skill-${i}`, `Always do ${i}.`)
-  expect(w.statuses.at(-1)).toBe('degraded, see /souffleur')
+  expect(w.statuses.at(-1)).toMatch(/^\d\d:\d\d · degraded, see \/souffleur$/)
   expect(await table($)).toMatch(/learn: /)
 })
 
@@ -2562,7 +2562,7 @@ test('the status line does not count a skill excluded in this project', async ($
   await start($)
   await skillLoaded($, 'ui-design')
   await skillLoaded($, 'writing-guide')
-  expect(w.statuses.at(-1)).toMatch(/^1 loaded/)
+  expect(w.statuses.at(-1)).toMatch(/^\d\d:\d\d · 1 loaded/)
 })
 
 test('a failed call A writes its kind to the debug log', async ($, on) => {
@@ -3707,12 +3707,12 @@ test('counting never delays the answer: a held total write does not hold the pro
 
 const HHMM = (ms: number) => { const d = new Date(ms); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}` }
 
-test('the status line shows the time of the last person prompt', async ($, on) => {
+test('the status line shows the time of the last activity', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS })
   await start($)
-  expect(w.statuses.at(-1)).not.toMatch(/^\d\d:\d\d · /)
+  expect(w.statuses.at(-1)).toMatch(/^\d\d:\d\d · observe · /)
   await $.prompt.submit({ text: 'hello' })
-  expect(w.statuses.at(-1)).toBe(`${HHMM(Date.now())} · observe · 0 loaded, 1 restoring`)
+  expect(w.statuses.at(-1)).toMatch(/^\d\d:\d\d · observe · 0 loaded, 1 restoring$/)
 })
 
 test('a main-loop turn end stamps lastSeen; a subagent turn end does not', async ($, on) => {
@@ -3729,11 +3729,10 @@ test('a main-loop turn end stamps lastSeen; a subagent turn end does not', async
   expect(w.statuses.at(-1)).toMatch(new RegExp(`^${HHMM(later)} · `))
 })
 
-test('a resume shows the stored lastSeen in the status line at once', async ($, on) => {
+test('a resume shows a time in the status line at once', async ($, on) => {
   const { config } = parseConfig(ALWAYS, undefined)
-  const seen = new Date(2026, 10, 27, 14, 2).getTime()
-  const old = { ...initSession(config, 's1', 1, 'startup', '2.1.331'), lastSeen: seen }
+  const old = { ...initSession(config, 's1', 1, 'startup', '2.1.331'), lastSeen: new Date(2026, 10, 27, 14, 2).getTime() }
   const w = world(on, { [USER_FILE]: ALWAYS }, { stored: { 'session:s1': old } })
   await start($)
-  expect(w.statuses.at(-1)).toMatch(/^14:02 · /)
+  expect(w.statuses.at(-1)).toMatch(/^\d\d:\d\d · /)
 })

@@ -71,6 +71,8 @@ export type Session = {
   modelUse?: ModelUse
   /** Denials per skill ("skill X not loaded") in the current turn; reset by a person's prompt. After `RELEASE_AFTER` the skill's gate and rules let calls pass. */
   turnDenials?: Record<string, number>
+  /** Skills the main loop tried to load by a `Skill` call after their first denial this turn: only these can be released. Reset with `turnDenials`. */
+  turnTries?: SkillName[]
   /** When Souffleur last saw the session: a person's prompt or a main-loop turn end. Shown in the status line; kept over reload and resume. */
   lastSeen?: number
 }
@@ -140,6 +142,7 @@ export function initSession(config: Config, id: string, now: number, start: 'sta
     agentDenied: false,
     observed: [],
     errors: [],
+    lastSeen: now,
     ...emptyRules(),
   }
   if (version !== undefined) s.version = version
@@ -186,7 +189,7 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
           ? { subagentsRunning: 0, mainSkillCalls: [], agentDenied: false, learnCalls: [], fieldDenied: [] }
           : {}
         return {
-          session: { ...s, paused: false, ...counters, ...(e.version === undefined ? {} : { version: e.version }) },
+          session: { ...s, paused: false, lastSeen: e.now, ...counters, ...(e.version === undefined ? {} : { version: e.version }) },
           actions: [],
         }
       }
@@ -204,7 +207,7 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
     case 'prompt': {
       const r = onPrompt(config, s, e)
       // A person's prompt starts a turn: the denial counters start over, and the session was seen.
-      return e.fromUser ? { ...r, session: { ...r.session, turnDenials: {}, lastSeen: e.now } } : r
+      return e.fromUser ? { ...r, session: { ...r.session, turnDenials: {}, turnTries: [], lastSeen: e.now } } : r
     }
     case 'seen':
       return { session: { ...s, lastSeen: e.now }, actions: [] }
@@ -246,7 +249,8 @@ function onSkill(config: Config, s: Session, e: Extract<CoreEvent, { type: 'skil
   const i = s.mainSkillCalls.indexOf(e.skill)
   if (i < 0 && s.subagentsRunning > 0) return s // a subagent's load
   const calls = i < 0 ? s.mainSkillCalls : s.mainSkillCalls.filter((_, k) => k !== i)
-  return { ...s, mainSkillCalls: calls, ledger: skillLoaded(s.ledger, e.skill, e.now, 'skill.prompt'), ruleSkills: withRuleSkill(config, s, e.skill) }
+  const gone = `gate: ${e.skill} did not load`
+  return { ...s, errors: s.errors.filter((m) => !m.startsWith(gone)), mainSkillCalls: calls, ledger: skillLoaded(s.ledger, e.skill, e.now, 'skill.prompt'), ruleSkills: withRuleSkill(config, s, e.skill) }
 }
 
 function onCompact(config: Config, s: Session, e: Extract<CoreEvent, { type: 'compact' }>): Session {
@@ -507,8 +511,10 @@ function evidenceMatches(ev: { tool: string; command?: string }, e: Extract<Core
 
 function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool' }>): Result {
   if (e.agentId !== undefined) return { session: s, actions: [] }
-  const next: Session = { ...s, needs: { ...s.needs } }
+  const next: Session = { ...s, needs: { ...s.needs }, lastSeen: e.now }
   const actions: Action[] = []
+  // A load attempt after the first denial of that skill lets its denials count toward the release.
+  if (e.tool === 'Skill' && e.skill !== undefined && (s.turnDenials?.[e.skill] ?? 0) >= 1 && !(s.turnTries ?? []).includes(e.skill)) next.turnTries = [...(s.turnTries ?? []), e.skill]
 
   if (e.tool === 'Skill' && e.skill !== undefined && e.skill in s.ledger) next.mainSkillCalls = [...s.mainSkillCalls, e.skill]
   // The learn decision keeps its own list: it also covers skills the config does not list.
@@ -588,14 +594,14 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
   const rr = next.paused ? { ...checked, reasons: [], denied: [], fired: [] } : checked
   rr.reasons.forEach((reason, i) => found.push({ text: `${reason} ${PAUSE_HINT}`, trusted: true, ...(rr.reasonSkills[i] === undefined ? {} : { skill: rr.reasonSkills[i]! }) }))
   if (!next.paused) recordOnly.push(...rr.unavailable)
-  for (const text of recordOnly) if (next.observed.at(-1)?.reason !== text) next.observed = lastN(next.observed, { at: e.now, reason: text })
+  for (const text of recordOnly) next.observed = lastN(next.observed, { at: e.now, reason: text })
   // Enforce only: a skill that did not load after RELEASE_AFTER denials this turn no longer denies; the call passes and is recorded.
   if (config.mode === 'enforce') {
     const counts = s.turnDenials ?? {}
     const released = new Set<SkillName>()
     for (let i = found.length - 1; i >= 0; i--) {
       const f = found[i]!
-      if (f.trusted && f.skill !== undefined && (counts[f.skill] ?? 0) >= RELEASE_AFTER) {
+      if (f.trusted && f.skill !== undefined && (counts[f.skill] ?? 0) >= RELEASE_AFTER && (next.turnTries ?? []).includes(f.skill)) {
         released.add(f.skill)
         found.splice(i, 1)
       }
