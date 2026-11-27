@@ -43,15 +43,15 @@ test('a main-session load asks for a read and carries its source; a subagent loa
   const text = 'Always run `npm test` after editing files under src/.'
   const typed = decide(config, fresh(), { type: 'skill', now: 1, skill: 'writing-guide', text, source: 'plugin', pluginName: 'terse', path: '/p/SKILL.md' })
   assert.deepEqual(typed.actions, [{ kind: 'learn', skill: 'writing-guide', text, source: 'plugin', pluginName: 'terse', path: '/p/SKILL.md' }])
-  let s = decide(config, fresh(), { type: 'tool', now: 1, tool: 'Agent' }).session
+  let s = decide(config, fresh(), { type: 'agentStart', now: 1, agentId: 'a1' }).session
   assert.deepEqual(decide(config, s, { type: 'skill', now: 2, skill: 'writing-guide', text }).actions, [], 'a subagent runs: its load is not read')
 })
 
 test('a main Skill call for a skill the config does not list still counts as main while a subagent runs', () => {
-  let s = decide(config, fresh(), { type: 'tool', now: 1, tool: 'Agent' }).session
+  let s = decide(config, fresh(), { type: 'agentStart', now: 1, agentId: 'a1' }).session
   s = decide(config, s, { type: 'tool', now: 2, tool: 'Skill', skill: 'unlisted' }).session
   assert.equal(decide(config, s, { type: 'skill', now: 3, skill: 'unlisted', text: 'Always x.' }).actions.length, 1)
-  s = decide(config, fresh(), { type: 'tool', now: 1, tool: 'Agent' }).session
+  s = decide(config, fresh(), { type: 'agentStart', now: 1, agentId: 'a1' }).session
   s = decide(config, s, { type: 'typed', now: 2, name: 'unlisted' }).session
   assert.equal(decide(config, s, { type: 'skill', now: 3, skill: 'unlisted', text: 'Always x.' }).actions.length, 1, 'typed name')
 })

@@ -2229,16 +2229,7 @@ export const register: Register = (on) => {
     })
     const deny = actions.find((a) => a.kind === 'deny')
     if (deny) return { deny: deny.reason }
-    let r
-    try {
-      r = await next(e)
-    } finally {
-      if (e.tool === 'Agent' && e.agentId === undefined) {
-        await safe($, 'tool.done', undefined, async () => {
-          await apply($, () => ({ type: 'agentDone', now: now() }))
-        })
-      }
-    }
+    const r = await next(e)
     const extra = actions.flatMap((a) => (a.kind === 'toolContext' ? [a.text] : []))
     if (!extra.length || r.deny !== undefined) return r
     return { ...r, context: [...(r.context ?? []), ...extra] }
@@ -2249,9 +2240,36 @@ export const register: Register = (on) => {
     return { result: text }
   }).catch(() => ({ result: 'Souffleur could not queue the proposal. Tell the user and carry on.' }))
 
+  // A live agent run is what tells a skill load of the main session from an agent's: `skill.prompt` has no agentId, and a
+  // background agent's Agent call returns at launch. A run starts with its `turn.start` and ends with its `turn.complete` or `agent.report`.
+  on('turn.start', async ($, e, next) => {
+    const r = await next(e)
+    if (e.agentId !== undefined) {
+      const agentId = e.agentId
+      await safe($, 'turn.start', undefined, async () => {
+        await apply($, () => ({ type: 'agentStart', now: now(), agentId }))
+      })
+    }
+    return r
+  })
+
+  on('agent.report', async ($, e, next) => {
+    const r = await next(e)
+    await safe($, 'agent.report', undefined, async () => {
+      await apply($, () => ({ type: 'agentDone', now: now(), agentId: e.agentId }))
+    })
+    return r
+  })
+
   // At the end of a turn: one question about the first waiting proposal; where no dialog opens, a notice with a reply hint.
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
+    if (e.agentId !== undefined) {
+      const agentId = e.agentId
+      await safe($, 'turn.agentDone', undefined, async () => {
+        await apply($, () => ({ type: 'agentDone', now: now(), agentId }))
+      })
+    }
     // The main loop is alive: stamp the time the status line shows. A subagent's turn end says nothing about the session.
     if (e.agentId === undefined) {
       await safe($, 'turn.seen', undefined, async () => {

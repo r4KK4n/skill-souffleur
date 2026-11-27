@@ -22,7 +22,8 @@ export type Session = {
   paused: boolean
   id: string
   mainSkillCalls: SkillName[]
-  subagentsRunning: number
+  /** Ids of the agent runs that are live: started (`turn.start` with an `agentId`) and not yet ended. Absent in a copy stored by an older version. */
+  liveAgents?: string[]
   compactedSincePrompt: boolean
   agentDenied: boolean
   observed: { at: number; reason: string }[]
@@ -90,7 +91,9 @@ export type CoreEvent =
   | { type: 'tool'; now: number; tool: string; path?: string; command?: string; brief?: string; skill?: string; model?: string; present?: string[]; agentId?: string; root?: string; tree?: string }
   | { type: 'command'; now: number; args: string; root?: string; /** The small-model count over all sessions, from the plugin store. */ total?: ModelUse; /** What the stored release check says. */ update?: UpdateInfo }
   | { type: 'typed'; now: number; name: string }
-  | { type: 'agentDone'; now: number }
+  /** An agent run began or ended (`turn.start`, `turn.complete`, `agent.report` with its `agentId`). Only these end a run, never the Agent tool call returning, because a background agent returns at launch. */
+  | { type: 'agentStart'; now: number; agentId: string }
+  | { type: 'agentDone'; now: number; agentId: string }
   /** A main-loop turn ended (any reason): the session is alive. */
   | { type: 'seen'; now: number }
   /** A main-session turn ended with this answer. `fromCommand`: the turn's prompt was a typed command. */
@@ -140,7 +143,7 @@ export function initSession(config: Config, id: string, now: number, start: 'sta
     paused: false,
     id,
     mainSkillCalls: [],
-    subagentsRunning: 0,
+    liveAgents: [],
     compactedSincePrompt: false,
     agentDenied: false,
     observed: [],
@@ -189,7 +192,7 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
       // a resume (a new process) restarts them.
       if (e.start === 'resume' || e.start === 'reload') {
         const counters = e.start === 'resume'
-          ? { subagentsRunning: 0, mainSkillCalls: [], agentDenied: false, learnCalls: [], fieldDenied: [] }
+          ? { liveAgents: [], mainSkillCalls: [], agentDenied: false, learnCalls: [], fieldDenied: [] }
           : {}
         return {
           session: { ...s, paused: false, lastSeen: e.now, ...counters, ...(e.version === undefined ? {} : { version: e.version }) },
@@ -199,7 +202,7 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
       return { session: initSession(config, s.id, e.now, e.start, e.version), actions: [] }
     case 'skill': {
       const announced = (s.learnCalls ?? []).indexOf(e.skill)
-      const main = announced >= 0 || s.subagentsRunning === 0
+      const main = announced >= 0 || (s.liveAgents ?? []).length === 0
       const learn = main && config.learn.skills && !s.paused && e.text !== undefined && e.text.trim() !== ''
       const session: Session = { ...onSkill(config, s, e), learnCalls: (s.learnCalls ?? []).filter((_, k) => k !== announced) }
       const from = { ...(e.source === undefined ? {} : { source: e.source }), ...(e.pluginName === undefined ? {} : { pluginName: e.pluginName }), ...(e.path === undefined ? {} : { path: e.path }) }
@@ -226,8 +229,12 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
       return { session: { ...s, ledger: markInstalled(s.ledger, e.names, e.now) }, actions: [] }
     case 'reply':
       return { session: onReply(config, s, e), actions: [] }
+    case 'agentStart': {
+      const live = s.liveAgents ?? []
+      return { session: live.includes(e.agentId) ? s : { ...s, liveAgents: [...live, e.agentId].slice(-KEEP) }, actions: [] }
+    }
     case 'agentDone':
-      return { session: { ...s, subagentsRunning: Math.max(0, s.subagentsRunning - 1) }, actions: [] }
+      return { session: { ...s, liveAgents: (s.liveAgents ?? []).filter((id) => id !== e.agentId) }, actions: [] }
     case 'learned':
       return { session: track(s, 'learnFails', 'learn: ', !e.ok, 'the small model failed or gave no usable answer 3 times in a row, so skill texts are not read'), actions: [] }
     case 'error':
@@ -250,7 +257,7 @@ function withRuleSkill(config: Config, s: Session, skill: SkillName): SkillName[
 
 function onSkill(config: Config, s: Session, e: Extract<CoreEvent, { type: 'skill' }>): Session {
   const i = s.mainSkillCalls.indexOf(e.skill)
-  if (i < 0 && s.subagentsRunning > 0) return s // a subagent's load
+  if (i < 0 && (s.liveAgents ?? []).length > 0) return s // a subagent's load
   const calls = i < 0 ? s.mainSkillCalls : s.mainSkillCalls.filter((_, k) => k !== i)
   const gone = `gate: ${e.skill} did not load`
   // A load ends the stall: its denials and its load attempt must not carry into a later one in this turn.
@@ -652,7 +659,6 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
   }
 
   if (!denied) {
-    if (e.tool === 'Agent') next.subagentsRunning += 1
     const by = e.path === undefined ? e.tool : `${e.tool} ${e.path}`
     next.openRules = [...next.openRules, ...rr.opened.map((id) => ({ id, by, denied: false, told: false }))]
     for (const [name, rule] of Object.entries(config.skills)) {

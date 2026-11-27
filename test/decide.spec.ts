@@ -33,6 +33,8 @@ const prompt = (text = 'do it', matched: string[] = [], fromUser = true): CoreEv
 const tool = (name: string, extra: Partial<Extract<CoreEvent, { type: 'tool' }>> = {}): CoreEvent => ({ type: 'tool', now: at(), tool: name, ...extra })
 const loadSkill = (skill: string): CoreEvent => ({ type: 'skill', now: at(), skill })
 const compact = (extra: Partial<Extract<CoreEvent, { type: 'compact' }>> = {}): CoreEvent => ({ type: 'compact', now: at(), phase: 'after', trigger: 'manual', ...extra })
+const agentStart = (agentId = 'a1'): CoreEvent => ({ type: 'agentStart', now: at(), agentId })
+const agentDone = (agentId = 'a1'): CoreEvent => ({ type: 'agentDone', now: at(), agentId })
 const command = (args: string): CoreEvent => ({ type: 'command', now: at(), args })
 
 /** Feeds events in order; returns the final session and the actions of each event. */
@@ -95,16 +97,17 @@ test('missing skill is asked twice, then not again and status says not seen afte
 test('subagent skill load does not mark the main ledger loaded', () => {
   const config = cfg({ skills: { bigtest: { always: true, from: 'user' } } })
   const events = toCoreEvents(loadFixture('subagent'))
-  const { s, out } = run(config, events)
+  const at1 = events.findIndex((e) => e.type === 'tool' && e.tool === 'Agent') + 1
+  const { s, out } = run(config, [...events.slice(0, at1), agentStart(), ...events.slice(at1)])
   assert.equal(s.ledger.bigtest!.state, 'restoring')
   assert.match(ctx(out[1]!), /bigtest/)
-  assert.equal(s.subagentsRunning, 1)
-  const done = run(config, [{ type: 'agentDone', now: at() }], s)
-  assert.equal(done.s.subagentsRunning, 0)
+  assert.deepEqual(s.liveAgents, ['a1'])
+  const done = run(config, [agentDone()], s)
+  assert.deepEqual(done.s.liveAgents, [])
 })
 
 test('skill load while a subagent runs and without a main Skill call is ignored', () => {
-  const { s } = run(base, [prompt('x', ['prose']), tool('Agent', { brief: 'skills: none' }), loadSkill('writing-guide')])
+  const { s } = run(base, [prompt('x', ['prose']), tool('Agent', { brief: 'skills: none' }), agentStart(), loadSkill('writing-guide')])
   assert.equal(s.ledger['writing-guide']!.state, 'restoring')
 })
 
@@ -163,6 +166,37 @@ test('gate denies Write to x.html while ui-checklist is needed and stale, allows
   const ok = run(base, [loadSkill('ui-checklist'), tool('Write', { path: 'x.html' })], s0)
   assert.deepEqual(ok.out[1], [])
   assert.deepEqual(denies(one(base, [tool('Write', { path: 'x.ts' })], s0)), [])
+})
+
+test('a background agent returns from the Agent call, then loads a skill: not main, a gated Write is denied', () => {
+  const s0 = run(base, [prompt('screen', ['ui']), tool('Agent', { brief: 'x' }), agentStart()]).s
+  const r = run(base, [loadSkill('ui-checklist'), tool('Write', { path: 'x.html' })], s0)
+  assert.notEqual(r.s.ledger['ui-checklist']!.state, 'loaded')
+  assert.equal(denies(r.out[1]!).length, 1)
+})
+
+test('after the agent run ends a load counts for main again', () => {
+  const s0 = run(base, [prompt('screen', ['ui']), tool('Agent', { brief: 'x' }), agentStart(), agentDone()]).s
+  const r = run(base, [loadSkill('ui-checklist'), tool('Write', { path: 'x.html' })], s0)
+  assert.equal(r.s.ledger['ui-checklist']!.state, 'loaded')
+  assert.deepEqual(r.out[1], [])
+})
+
+test('a main Skill call counts for main while an agent runs', () => {
+  const s0 = run(base, [prompt('screen', ['ui']), agentStart()]).s
+  const r = run(base, [tool('Skill', { skill: 'ui-checklist' }), loadSkill('ui-checklist')], s0)
+  assert.equal(r.s.ledger['ui-checklist']!.state, 'loaded')
+})
+
+test('an end without a start or a repeated end leaves other live runs alone', () => {
+  const s0 = run(base, [agentStart('a1'), agentStart('a2'), agentDone('zz'), agentDone('a1'), agentDone('a1')]).s
+  assert.deepEqual(s0.liveAgents, ['a2'])
+  assert.deepEqual(run(base, [agentStart('a1'), agentStart('a1')]).s.liveAgents, ['a1'])
+})
+
+test('the Agent call itself no longer counts a run', () => {
+  const s = run(base, [prompt('x', ['prose']), tool('Agent', { brief: 'x' }), loadSkill('writing-guide')]).s
+  assert.equal(s.ledger['writing-guide']!.state, 'loaded')
 })
 
 test('gate does nothing while the need is not active and the call is no evidence', () => {
@@ -441,7 +475,7 @@ test('observe and the retry together open the rules and count the subagent once'
   const config = cfg({ mode: 'observe', rules })
   const pre = run(config, [prompt('screen', ['ui'])]).s
   const r = run(config, [tool('Agent', { brief: 'no line' }), tool('Write', { path: 'a.md' })], pre)
-  assert.equal(r.s.subagentsRunning, 1)
+  assert.deepEqual(r.s.liveAgents ?? [], [])
   assert.deepEqual(r.s.openRules.map((o) => o.id), ['r1'])
   assert.equal(r.s.agentDenied, false)
 })
@@ -476,7 +510,7 @@ test('resume resets per-process counters', () => {
   const s0 = run(withAlways, [prompt(), loadSkill('terse:terse-mode')]).s
   const s: Session = {
     ...s0,
-    subagentsRunning: 2,
+    liveAgents: ['a1', 'a2'],
     mainSkillCalls: ['x'],
     agentDenied: true,
     learnCalls: ['y'],
@@ -489,7 +523,7 @@ test('resume resets per-process counters', () => {
     ruleSkills: ['terse:terse-mode'],
   }
   const resumed = decide(withAlways, s, { type: 'start', now: at(), start: 'resume' }).session
-  assert.equal(resumed.subagentsRunning, 0)
+  assert.deepEqual(resumed.liveAgents, [])
   assert.deepEqual(resumed.mainSkillCalls, [])
   assert.equal(resumed.agentDenied, false)
   assert.deepEqual(resumed.learnCalls, [])
@@ -505,9 +539,9 @@ test('resume resets per-process counters', () => {
 
 test('reload keeps per-run counters', () => {
   const s0 = run(withAlways, [prompt(), loadSkill('terse:terse-mode')]).s
-  const s: Session = { ...s0, subagentsRunning: 2, mainSkillCalls: ['x'], agentDenied: true, learnCalls: ['y'], fieldDenied: ['f'] }
+  const s: Session = { ...s0, liveAgents: ['a1', 'a2'], mainSkillCalls: ['x'], agentDenied: true, learnCalls: ['y'], fieldDenied: ['f'] }
   const reloaded = decide(withAlways, s, { type: 'start', now: at(), start: 'reload' }).session
-  assert.equal(reloaded.subagentsRunning, 2)
+  assert.deepEqual(reloaded.liveAgents, ['a1', 'a2'])
   assert.deepEqual(reloaded.mainSkillCalls, ['x'])
   assert.equal(reloaded.agentDenied, true)
   assert.deepEqual(reloaded.learnCalls, ['y'])
@@ -517,9 +551,9 @@ test('reload keeps per-run counters', () => {
 
 test('startup still gives a fresh session', () => {
   const s0 = run(withAlways, [prompt(), loadSkill('terse:terse-mode')]).s
-  const s: Session = { ...s0, subagentsRunning: 2, mainSkillCalls: ['x'], agentDenied: true, learnCalls: ['y'] }
+  const s: Session = { ...s0, liveAgents: ['a1', 'a2'], mainSkillCalls: ['x'], agentDenied: true, learnCalls: ['y'] }
   const fresh = decide(withAlways, s, { type: 'start', now: at(), start: 'startup' }).session
-  assert.equal(fresh.subagentsRunning, 0)
+  assert.deepEqual(fresh.liveAgents ?? [], [])
   assert.deepEqual(fresh.mainSkillCalls, [])
   assert.equal(fresh.agentDenied, false)
   assert.equal(fresh.learnCalls, undefined)
