@@ -17,4 +17,4 @@ A Claude Code mod written in TypeScript. `src/core/` holds the rules, the ledger
 
 - English everywhere: code, comments, docs, commits.
 - Conventional Commits. One change per pull request, merged with squash.
-- Add an "Unreleased" entry to `CHANGELOG.md` for changes users notice, and update the roadmap in `README.md` when an item lands.
+- Add an "Unreleased" entry to `CHANGELOG.md` for changes users notice, and update the Status section in `README.md` when it changes. [CONTRIBUTING.md](CONTRIBUTING.md) has the commands to run the tests, the version bump rule and the release steps.

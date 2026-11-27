@@ -1,6 +1,6 @@
 # Design
 
-Status: approved 2026-11-25, extended the same day with rules and notes. Verified against Claude Code 2.1.322 and 2.1.332.
+Describes version 0.2.8. Verified against Claude Code 2.1.322 and 2.1.332; see [compatibility.md](compatibility.md) for what was checked on which version.
 
 ## Intent
 
@@ -18,7 +18,7 @@ Success: the user stops asking whether a skill still runs, and Claude can answer
 6. Show the ledger on request and in the status line.
 7. When the main session hands work to a subagent, make it state which skills the subagent needs.
 8. Work the same after startup, compaction, resume, clear, a lost connection and a reload of the mod.
-9. Learn the rules that matter from the skills a user actually has, from slips and from the user's own words, and keep them in one place: Souffleur's config, not memory files or scattered notes. Nothing becomes a rule without the user's yes.
+9. Learn rules from the user's skills, from slips and from the user's own words, and keep them in Souffleur's config. Nothing becomes a rule without the user's yes.
 
 ## Non-goals
 
@@ -29,7 +29,7 @@ Success: the user stops asking whether a skill still runs, and Claude can answer
 
 ## Anti-goals
 
-These would make Souffleur a failure even if it technically works:
+Souffleur fails if it does any of these:
 
 - Pasting full skill texts into every prompt.
 - A rule or note the user never confirmed.
@@ -86,7 +86,7 @@ The project file comes from whatever repository the user opens, so it is untrust
 ```json
 {
   "skills": {
-    "terse:terse-mode": { "always": true, "startup": "injected" },
+    "terse:terse-mode": { "always": true, "for": "chat", "startup": "injected" },
     "writing-guide": { "need": "prose" },
     "writing-check": { "need": "prose" },
     "ui-design": {
@@ -96,8 +96,8 @@ The project file comes from whatever repository the user opens, so it is untrust
     }
   },
   "needs": {
-    "prose": "Writing text people read: docs, specs, plans, issues, UI copy.",
-    "ui": "Designing or building something a user sees: screens, prototypes, mockups, components."
+    "prose": { "for": "readers", "what": "Writing text people read: docs, specs, plans, issues, UI copy." },
+    "ui": { "for": "users", "what": "Designing or building something a user sees: screens, prototypes, mockups, components." }
   }
 }
 ```
@@ -181,6 +181,8 @@ It holds the rule and the `chat` skill that is always on (if any), never the cha
 
 ### Gates and duties
 
+A gate sees only the tool calls it names. A `Bash` redirect, an MCP file tool and a subagent's writes pass a `Write` gate; [config.md](config.md#what-enforce-does-not-cover) says so for users.
+
 - Gate: on `tool.call` for a configured tool and path, if a skill whose gate matches is needed and not `loaded`, deny with a reason that names the skill and says how to proceed. The model then loads it and retries. `/souffleur pause` turns every denial off for the session: gates, duties, rules and the subagent brief check. It also stops restore requests, need detection (no classifier calls), the turn-end questions and the reading of skill texts. `/souffleur resume` undoes it, and a pause is not carried over when a session is resumed. A gate cannot name the `Skill` tool (the entry is dropped with an error), and the `Skill` call that loads a gated skill is never denied.
 - Release (#30): in `enforce`, Souffleur counts per skill, within the current turn, the denials whose reason is "skill X not loaded" (a gate, or a `before … skill` rule). A denial that asks for skills after a compaction or a need's start ("invoke these skills…") counts once for each skill it names. A person's prompt starts the turn and resets all counters; a successful load of a skill resets that skill's counters; nothing else does (a tool call, a turn end or a subagent does not). A denial counts toward the release only once the main loop has tried to load that skill with a `Skill` call after its first denial; without a load attempt the gate keeps denying, so the release cannot let a model skip a skill it never asked for. After the third counted denial for the same skill (with a load attempt after the first), further matching calls in that turn pass and are listed under "Would have denied" as `released after 3 denials: <skill> did not load`. One error, `gate: <skill> did not load after 3 denials in a turn; calls released`, shows through the normal degraded notice, once per skill (key `gate:<skill>`); it is removed when that skill loads. A skill that loads in time is gated normally again, and two stuck skills are counted separately. A skill in state `unavailable` is never denied; a call it would have gated is listed with `(skill unavailable)`. `observe` never denies, so it never releases. Field denials, the brief check and duties are not counted.
 - Duty: when a call matches `after`, Souffleur records an open duty. A later tool call matching `evidence` closes it. While a duty is open, the next call that matches the skill's gate (writing or publishing the next prototype file, for example) is denied once with the duty named; the retry passes, so a wrong evidence pattern cannot trap the session. This enforces it in the same turn without a paid turn of its own. An open duty is also mentioned once, with the next user prompt's context, and not again until it closes and opens anew.
@@ -256,7 +258,7 @@ Instead Souffleur makes the main session decide, at the moment it hands work off
 
 ### Setup and moving over
 
-Install is one line at the prompt, `/plugin install skill-souffleur --marketplace r4KK4n/skill-souffleur`, which needs `.claude-plugin/marketplace.json` in the repository. The README describes install, a minimal config, the commands, `observe` and `enforce`, and how to switch Souffleur off again.
+Install is one line at the prompt, `/plugin install skill-souffleur --marketplace r4KK4n/skill-souffleur`, which needs `.claude-plugin/marketplace.json` in the repository. The README gives a quick start, and the pages under `docs/` hold the reference.
 
 Setting up has two separate jobs, so there are two commands. `/souffleur init` decides how each skill should be kept. `/souffleur migrate` retires the user's own hooks that did that job before. Each command starts with a short paragraph saying what it is about, what it will ask, and what each answer does, so the user knows before the first question that `migrate` can remove hook entries.
 
@@ -302,10 +304,8 @@ Every skill shapes output for someone. Souffleur records who, and says it whenev
 
 The load request groups skills by audience with a fixed sentence per value, for example: `writing-guide, writing-check: for texts other people read (docs, issues, PRs, app copy). Not for your replies in this chat.` Groups come in the order readers, users, work, chat, then the compaction sentence when it applies. When a `chat` skill is always on and the request holds a `readers` or `users` group, the last line is `Your replies in this chat follow <chat skill>.` The system prompt section says that each skill applies only to the output named with it, names the `chat` skill, and lists the other always-on skills as `Always-on skills: <names>.`
 
-Needs start from the deliverable, not the topic.
+A need starts from the deliverable the prompt asks for. A `readers` or `users` need starts from tool evidence: a call its skills' gates match, or, for `readers`, a Bash command `gh issue create|comment` or `gh pr create|edit` anywhere in a chained command (`cd x && gh pr create …`). A plain `git commit` is not evidence: it starts the need in nearly every coding session. No model call. Leading `VAR=value`, `env`, `sudo`, `time` and `command` are ignored, and the command must be whole words (`gh pr create-x` does not count); quotes are not parsed, so a quoted `&& gh pr create` inside `echo` counts too. In `observe` the request for the need's skills follows the first such call and the call is listed under "Would have denied", as `enforce` would deny it; in `enforce` the first such call is denied once with that request (the retry passes). So the gates of `readers` and `users` skills are effectively always on: one denial per session and after each compaction. Only the skills of the started need are asked for. The reason reads `tool: <tool> <path or command head>`. Evidence for a need that is already active only resets its misses. A need that evidence started or woke is asked for on that call, and on a later prompt only when that prompt's deliverable is its own (`text-for-others` for `readers`, `screen` for `users`) or on the next evidence; a `chat-reply` prompt or a failed classification does not repeat the request. A fresh signal for a need (its deliverable from call A, or evidence that starts or wakes it) resets the request count of its skills and turns `unavailable` ones back to `absent`, so a later README prompt asks again. Skills excluded by `notIn` in this root and skills of an untrusted project never count as evidence, and a project-only need starts only in a trusted root. A `readers` or `users` need also expires after 20 prompts (more than three words) where call A answered another deliverable.
 
-
-- A `readers` or `users` need starts from tool evidence: a call its skills' gates match, or, for `readers`, a Bash command `gh issue create|comment` or `gh pr create|edit` anywhere in a chained command (`cd x && gh pr create …`). A plain `git commit` is not evidence: it starts the need in nearly every coding session. No model call. Leading `VAR=value`, `env`, `sudo`, `time` and `command` are ignored, and the command must be whole words (`gh pr create-x` does not count); quotes are not parsed, so a quoted `&& gh pr create` inside `echo` counts too. In `observe` the request for the need's skills follows the first such call and the call is listed under "Would have denied", as `enforce` would deny it; in `enforce` the first such call is denied once with that request (the retry passes). So the gates of `readers` and `users` skills are effectively always on: one denial per session and after each compaction. Only the skills of the started need are asked for. The reason reads `tool: <tool> <path or command head>`. Evidence for a need that is already active only resets its misses. A need that evidence started or woke is asked for on that call, and on a later prompt only when that prompt's deliverable is its own (`text-for-others` for `readers`, `screen` for `users`) or on the next evidence; a `chat-reply` prompt or a failed classification does not repeat the request. A fresh signal for a need (its deliverable from call A, or evidence that starts or wakes it) resets the request count of its skills and turns `unavailable` ones back to `absent`, so a later README prompt asks again. Skills excluded by `notIn` in this root and skills of an untrusted project never count as evidence, and a project-only need starts only in a trusted root. A `readers` or `users` need also expires after 20 prompts (more than three words) where call A answered another deliverable.
 - Both classifier calls use `$.model.complete({ model: 'haiku', system, prompt, maxTokens: 10 })`. The system text is fixed; the prompt is `Labels: a, b, c`, a blank line, `Text:` and the text. The answer is trimmed and one final period removed, then it must equal a label; a label inside a sentence is `unknown-label`. A call that is not answered counts as `rejected`.
 - Cost counter. Every small-model call (both classifier calls, the skill read, the rule shaping and the init picks) goes through one adapter helper that adds the call and its `usage` to `Session.modelUse` and to the plugin store key `modelUseTotal`, once when the call returns, also when it returns after its timeout. Tokens count only for an answered call. `src/core/cost.ts` holds the price table (list prices, USD per million tokens); a model without a price keeps its tokens, shows `$ unknown for <model>` and never a dollar figure. The session count is kept over reload and resume and starts again at zero in a new session and after `/clear`. The total is read, changed and written per call without a lock across processes, so two sessions at the same moment can lose a count; a store failure never fails a hook.
 - Per prompt, two classifier calls run in parallel instead of one per need. Call A asks what the agent will produce, with one line per label in the text: `chat-reply`, `text-for-others`, `screen`, `code-or-repo-work`. Call B picks one `work` need or `none`, and counts only when A says `code-or-repo-work`. `chat-reply` starts nothing.
@@ -346,16 +346,16 @@ The propose tool's server can disconnect between turns while the hooks keep runn
 
 A release reaches a folder install only when someone checks out a tag, and nobody learns that one exists. Souffleur looks for a newer tag and, if the person allows it, installs one whose signature it can verify. The rules live in `src/core/update.ts` (tag choice, due check, lines); `src/mod/register.ts` runs git through `$.process.run`.
 
-- **Setting.** `update` is `notify` (default), `auto` or `off`; `updateSigner` is an SSH public key line. Both are user file only, like `mode`.
-- **Check.** `git ls-remote --tags --refs <repo>` with a 15 s timeout, started detached after `session.start` when the stored check (`updateCheck`, `{ at, latest? }`) is older than 24 hours. Only tags shaped `vX.Y.Z` that are newer than the running version count, picked with `compareVersions`, so `v0.2.10` beats `v0.2.9` and a pre-release or a branch never counts. A failure stores the time, so there is one try per day, and writes one debug line.
-- **Line.** The notify line shows at most once per session, at session start, and its mark (`updateShown`) lives in the session, so a reload or resume does not repeat it. If the install kind is not cached yet the detached work says it.
-- **Install kind.** A folder install is a plugin root that is the top of a git work tree (`rev-parse --show-prefix` prints nothing). Anything else is a marketplace install, which is never changed.
-- **Guard.** Before any fetch, `git status --porcelain` must print nothing and `git describe --tags --exact-match HEAD` must print a `vX.Y.Z` tag. Otherwise the install is left alone and one line says why. This protects local changes and own commits.
-- **Auto.** Starts at session start, detached after the start line, so a start never waits on git. The checkout may land during the first turn, and running sessions reload the new code like after any update. Each git call has a timeout (fetch 30 s, others 10 s). Order: guard, `fetch -q --tags <repo URL>` (the URL, not `origin`, so a changed remote cannot redirect it), resolve, verify, checkout. It runs at most once per session and tag (the same marks as the notify line). Without `updateSigner` it installs nothing and the notify line says so. A tag that does not verify is not installed, and a line says so and points to a manual update with git.
-- **Verify.** The tag is resolved once: `git rev-parse --verify refs/tags/<tag>` gives an object id, and everything after works on that id. The adapter reads it with `git cat-file tag <id>` and requires an SSH signature armor that ends the object and a `tag <name>` header equal to the tag name. Then it rewrites `allowed_signers` in the plugin data folder (`CLAUDE_PLUGIN_DATA` from `$.process.hookEnv()`) with `souffleur namespaces="git" <updateSigner>` on every run, so a key from an older setting never stays valid, and runs `git -c gpg.format=ssh -c gpg.ssh.allowedSignersFile=<file> verify-tag <id>`. Exit 0 and a stderr line starting `Good "git" signature for souffleur with ` mean verified. The checkout is `git checkout -q <id>^{commit}`, so the commit that was verified is the one installed. A tag signed by another key, a PGP-signed tag and an unsigned annotated tag all fail.
-- **Command.** `/souffleur update` is for the person only (the origin check of `block`). It looks up the newest tag now and installs it. With `updateSigner` it verifies and refuses a tag that does not verify; without it, it installs the tag unsigned and says so.
-- **Why signatures.** An account takeover on the hosting side could otherwise ship code that gates the owner's tools. The signing key stays on the maintainer's machine.
-- **Not done.** No pre-releases, branches or downgrades, no install in the middle of a turn, and no change to the marketplace install.
+- Setting. `update` is `notify` (default), `auto` or `off`; `updateSigner` is an SSH public key line. Both are user file only, like `mode`.
+- Check. `git ls-remote --tags --refs <repo>` with a 15 s timeout, started detached after `session.start` when the stored check (`updateCheck`, `{ at, latest? }`) is older than 24 hours. Only tags shaped `vX.Y.Z` that are newer than the running version count, picked with `compareVersions`, so `v0.2.10` beats `v0.2.9` and a pre-release or a branch never counts. A failure stores the time, so there is one try per day, and writes one debug line.
+- Line. The notify line shows at most once per session, at session start, and its mark (`updateShown`) lives in the session, so a reload or resume does not repeat it. If the install kind is not cached yet the detached work says it.
+- Install kind. A folder install is a plugin root that is the top of a git work tree (`rev-parse --show-prefix` prints nothing). Anything else is a marketplace install, which is never changed.
+- Guard. Before any fetch, `git status --porcelain` must print nothing and `git describe --tags --exact-match HEAD` must print a `vX.Y.Z` tag. Otherwise the install is left alone and one line says why. This protects local changes and own commits.
+- Auto. Starts at session start, detached after the start line, so a start never waits on git. The checkout may land during the first turn, and running sessions reload the new code like after any update. Each git call has a timeout (fetch 30 s, others 10 s). Order: guard, `fetch -q --tags <repo URL>` (the URL, not `origin`, so a changed remote cannot redirect it), resolve, verify, checkout. It runs at most once per session and tag (the same marks as the notify line). Without `updateSigner` it installs nothing and the notify line says so. A tag that does not verify is not installed, and a line says so and points to a manual update with git.
+- Verify. The tag is resolved once: `git rev-parse --verify refs/tags/<tag>` gives an object id, and everything after works on that id. The adapter reads it with `git cat-file tag <id>` and requires an SSH signature armor that ends the object and a `tag <name>` header equal to the tag name. Then it rewrites `allowed_signers` in the plugin data folder (`CLAUDE_PLUGIN_DATA` from `$.process.hookEnv()`) with `souffleur namespaces="git" <updateSigner>` on every run, so a key from an older setting never stays valid, and runs `git -c gpg.format=ssh -c gpg.ssh.allowedSignersFile=<file> verify-tag <id>`. Exit 0 and a stderr line starting `Good "git" signature for souffleur with ` mean verified. The checkout is `git checkout -q <id>^{commit}`, so the commit that was verified is the one installed. A tag signed by another key, a PGP-signed tag and an unsigned annotated tag all fail.
+- Command. `/souffleur update` is for the person only (the origin check of `block`). It looks up the newest tag now and installs it. With `updateSigner` it verifies and refuses a tag that does not verify; without it, it installs the tag unsigned and says so.
+- Why signatures. An account takeover on the hosting side could otherwise ship code that gates the user's tools. The signing key stays on the maintainer's machine.
+- Not done. No pre-releases, branches or downgrades, no install in the middle of a turn, and no change to the marketplace install.
 
 ### Failure handling
 
@@ -367,31 +367,11 @@ A release reaches a folder install only when someone checks out a tag, and nobod
 
 - Core: unit tests over event sequences, including compaction in process, resume then compaction, a reload of the mod mid-session, a typed `/name`, a gate denial and retry, and a duty with and without evidence.
 - Fixtures: event payloads recorded from real Claude Code sessions, with personal data removed.
-- Adapter: `claude plugin validate` and `claude plugin test`, plus one scripted headless run (`claude -p --plugin-dir`) per release that loads a large skill, compacts, and checks that Souffleur restored it.
+- Adapter: `claude plugin validate` and `claude plugin test` in CI on the version named in `VERIFIED_UP_TO`, and weekly against the latest Claude Code. There is no scripted headless run that loads a large skill, compacts and checks the restore; the 2.1.322 and 2.1.332 results in [background.md](background.md) were run by hand.
 
-## To verify before or during the plan
+## Open questions
 
-1. Does the model reliably invoke the skills a context block names before other work? Measure on the models in use.
-2. Does `skill.prompt` fire for the engine's own re-attachment after compaction? (In the first test it did not.)
-3. Does `$.state` survive a reload of the mod and a resume, and does `$.store` keyed by session id cover the rest? The reload/resume split depends on this; the reload half is the `$.state` row in [compatibility.md](compatibility.md), not verified yet.
-4. How does the status line render in the desktop and mobile clients?
-5. Plugin skill names: is the `skill.prompt` key `terse:terse-mode` or `terse-mode`?
-
-Items 1 to 5 were answered on 2.1.332, except the reload half of item 3; see [background.md](background.md). Item 4 was dropped: the status line is built for the terminal, and `/souffleur` shows the same everywhere. Items 7 to 10 were answered on 2.1.332 as well, with the evidence in [background.md](background.md#tests-for-rules-and-notes-claude-code-21332):
-
-7. A tool registered with `$.tool.register` reaches the model in the main session, and the model calls it when the system prompt section asks.
-8. One small-model call over a 43 KB skill text takes about 2 seconds and returns the requested JSON.
-9. An automatic compaction fires `session.compact` with trigger `auto`. A `context` entry on a tool result reaches the model, which may still treat it as untrusted, so a restore request sent that way is a hint, and the gate in `enforce` stays the safety net.
-10. `$.session.repo().root` gives the main working tree in a worktree session, and `$.vcs.detect` gives the worktree itself as `root`.
-
-Still open:
-
-6. Does `$.ui.ask` show its dialog in a Remote Control session in the desktop and mobile apps, and does it reject cleanly where nobody can answer? The dialogs of `init`, `migrate` and the turn-end question were tested with the test kit and in the desktop app's dialog. On 2026-11-25 the owner saw a `$.ui.ask` dialog in the desktop app over Remote Control, and on 2026-11-26 the turn-end proposal dialog in the mobile app. The `init`, `migrate` and proposal dialogs have not yet run end to end in a live session.
-
-## Left to the builder
-
-- Open: a proposal answered "this project only" still writes a top-level entry with `where`; it should go into the project's block.
-
-- File layout inside `src/`, test runner choice (Node's built-in `node:test` unless something forces otherwise), TypeScript settings.
-- Exact wording of the appended rows and denial reasons.
-- The JSON schema check for the config, as long as it needs no runtime dependency.
+- The `$.state` half of the reload and resume split is not verified live: whether `$.state` still holds the session after a hot reload of the mod. See [compatibility.md](compatibility.md).
+- The `$.ui.ask` dialogs of `init`, `migrate` and the proposal question were tested with the test kit and in the desktop app's dialog. They have not run end to end in a live session. A `$.ui.ask` dialog was seen in the desktop app over Remote Control on 2026-11-25, and the turn-end proposal dialog in the mobile app on 2026-11-26.
+- The band above the prompt in the desktop and mobile apps was checked with the test kit only.
+- A proposal answered "this project only" still writes a top-level entry with `where`; it should go into the project's block ([#120](https://github.com/r4KK4n/skill-souffleur/issues/120)).
