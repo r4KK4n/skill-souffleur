@@ -382,6 +382,16 @@ test('unknown need name in command replies with known needs', () => {
   assert.match((one(base, [command('drop nope')])[0] as { text: string }).text, /Known needs: prose, ui/)
 })
 
+test('a name from Object.prototype is not a configured need', () => {
+  for (const name of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+    const a = one(base, [command(`need ${name}`)])
+    assert.match((a[0] as { text: string }).text, /Unknown need/, name)
+    assert.match((one(base, [command(`drop ${name}`)])[0] as { text: string }).text, /Unknown need/, name)
+  }
+  const r = run(base, [command('need constructor')])
+  assert.deepEqual(r.s.needs, {})
+})
+
 test('replay resume-then-compact ends with bigtest requested on the next prompt', () => {
   const config = cfg({ skills: { bigtest: { always: true, from: 'user' } } })
   const events = toCoreEvents(loadFixture('resume-then-compact-then-clear'))

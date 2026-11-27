@@ -336,7 +336,7 @@ function parseFile(text: string, source: Origin, errors: string[], extraNeeds: r
       if (entries.length > MAX_PROJECT_ROOTS) fail(`projects: at most ${MAX_PROJECT_ROOTS} roots are read; the rest are ignored`)
       for (const [root, block] of entries.slice(0, MAX_PROJECT_ROOTS)) {
         if (!isAbsolutePath(root, MAX_GLOB)) errors.push(`projects[${show(root)}]: the root must be an absolute path; block ignored`)
-        else if (normRoot(root) in file.projects) errors.push(`projects[${show(root)}]: the root is listed twice; the later block is ignored`)
+        else if (Object.hasOwn(file.projects, normRoot(root))) errors.push(`projects[${show(root)}]: the root is listed twice; the later block is ignored`)
         else file.projects[normRoot(root)] = block
       }
     }
@@ -570,7 +570,7 @@ export function parseConfig(
   if (project && block) {
     // The block wins over the repository file too: a blocked name stays out, and may name a repository skill.
     for (const name of block.blocked) {
-      if (name in project.skills) {
+      if (Object.hasOwn(project.skills, name)) {
         delete project.skills[name]
         if (!block.blockedSkills.includes(name)) block.blockedSkills.push(name)
       }
@@ -603,7 +603,7 @@ export function parseConfig(
       root: normRoot(root),
       blocked: block.blocked,
       blockedSkills: block.blockedSkills,
-      own: [...block.ownSkills.filter((n) => n in config.skills), ...block.ownNotes.filter((id) => config.notes.some((n) => n.id === id)), ...block.ownRules.filter((id) => config.rules.some((r) => r.id === id))],
+      own: [...block.ownSkills.filter((n) => Object.hasOwn(config.skills, n)), ...block.ownNotes.filter((id) => config.notes.some((n) => n.id === id)), ...block.ownRules.filter((id) => config.rules.some((r) => r.id === id))],
       ignored: block.ignored,
     }
   }

@@ -170,7 +170,7 @@ function heal(l: Loaded, held: Session): Session {
   const s = normalizeSession(held)
   const want = [...new Set([...Object.keys(l.config.skills), ...ruleSkillNames(l.config)])]
   const have = Object.keys(s.ledger)
-  if (want.length === have.length && want.every((name) => name in s.ledger)) return s
+  if (want.length === have.length && want.every((name) => Object.hasOwn(s.ledger, name))) return s
   return decide(l.config, s, { type: 'config', now: now(), errors: l.errors }).session
 }
 
@@ -795,7 +795,7 @@ async function runInit($: Dollar, l0: Loaded, only?: string[]): Promise<string> 
   const installed = described.map((x) => x.name)
   const configured = Object.keys(config.skills)
   const hooks = findHookOverlaps(settings.value, configured, installed.filter((n) => !configured.includes(n)))
-  const reloadHooked = [...new Set(hooks.flatMap((o) => (o.skill !== undefined && installed.includes(o.skill) && !(o.skill in config.skills) ? [o.skill] : [])))]
+  const reloadHooked = [...new Set(hooks.flatMap((o) => (o.skill !== undefined && installed.includes(o.skill) && !(Object.hasOwn(config.skills, o.skill)) ? [o.skill] : [])))]
   const startHooked = new Set(hooks.flatMap((o) => (o.event === 'SessionStart' && o.skill !== undefined ? [o.skill] : [])))
   const passages = only === undefined ? findPassages(await readStanding($, l0, home, notes), configured, Infinity) : []
 
@@ -822,7 +822,7 @@ async function runInit($: Dollar, l0: Loaded, only?: string[]): Promise<string> 
   }
 
   // Skills of this project that nothing names yet: asked again here, for this project or everywhere.
-  const ownHere = new Set((await projectInstalled($)).filter((n) => !(n in config.skills) && !skip.includes(n)))
+  const ownHere = new Set((await projectInstalled($)).filter((n) => !(Object.hasOwn(config.skills, n)) && !skip.includes(n)))
   const plans: Plan[] = candidates(config, installed, reloadHooked, [...picks.map((x) => x.skill), ...ownHere], skip).filter((c) => only === undefined || only.includes(c.skill)).map(({ skill, source }) => {
     const current = currentChoice(config.skills[skill])
     const pick = picks.find((x) => x.skill === skill)
@@ -1351,7 +1351,7 @@ async function runBlock($: Dollar, l0: Loaded, verb: 'block' | 'unblock', name: 
     if (verb === 'block') {
       if (names.includes(name)) return refuse(`${name} is already blocked in ${root}.`)
       if (names.length >= MAX_LIST) return refuse(`the block of ${root} already has ${MAX_LIST} names, so nothing was written.`)
-      if (!(key in projects) && Object.keys(projects).length >= MAX_PROJECT_ROOTS) return refuse(`at most ${MAX_PROJECT_ROOTS} project blocks are read, so nothing was written.`)
+      if (!(Object.hasOwn(projects, key)) && Object.keys(projects).length >= MAX_PROJECT_ROOTS) return refuse(`at most ${MAX_PROJECT_ROOTS} project blocks are read, so nothing was written.`)
       names.push(name)
       block.block = names
     } else {
@@ -1398,7 +1398,7 @@ async function runProject($: Dollar, l: Loaded): Promise<string> {
   const notes = c.notes.filter((n) => !own.has(n.id))
   const rules = c.rules.filter((r) => !own.has(r.id))
   const off = [...offSkills, ...notes.filter((n) => !here(n.where)).map((n) => n.id), ...rules.filter((r) => !here(r.where)).map((r) => r.id)]
-  const mine = [...(p?.own ?? [])].map((n) => `${n in c.skills ? 'skill' : c.notes.some((x) => x.id === n) ? 'note' : 'rule'} ${n}`)
+  const mine = [...(p?.own ?? [])].map((n) => `${Object.hasOwn(c.skills, n) ? 'skill' : c.notes.some((x) => x.id === n) ? 'note' : 'rule'} ${n}`)
   const repo = Object.entries(c.skills).filter(([, r]) => r.from === 'project').map(([n]) => n)
   const lines = [`Souffleur: project ${root}`]
   if (blocked.length) lines.push(`Blocked here: ${blocked.join(', ')}`)
@@ -1460,7 +1460,7 @@ async function askOwnSkills($: Dollar, dialog: boolean): Promise<void> {
     return
   }
   if (configProblem(doc) || hasProjectKey(doc, l.root)) return
-  const names = (await projectInstalled($)).filter((n) => !(n in l.config.skills))
+  const names = (await projectInstalled($)).filter((n) => !(Object.hasOwn(l.config.skills, n)))
   if (!names.length) return
   const notice = () => void say($, l, `Souffleur: this project has ${names.length} skills not in your config. /souffleur init asks about them.`)
   if (!dialog) return notice()
@@ -1555,7 +1555,7 @@ async function stillUnnamed($: Dollar, l: Loaded, names: string[]): Promise<stri
   // The effective config (user file and trusted repository file), read fresh like the in-time path.
   loaded = undefined
   const fresh = (await current($)).l
-  return names.filter((n) => !(n in fresh.config.skills))
+  return names.filter((n) => !(Object.hasOwn(fresh.config.skills, n)))
 }
 
 /** At a turn end: runs the set-up a late `Set up now` asked for, if it still applies. True when it ran. */
