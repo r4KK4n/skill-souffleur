@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- A skill that is not installed in this project no longer counts as needing attention; the band in the apps stays hidden for it.
+
 ## [0.2.7] - 2026-11-27
 
 - The desktop and mobile apps show Souffleur's status in a one-row band above the prompt while something needs attention: a skill restoring or missing, degraded, not set up, or a newer release (#21).

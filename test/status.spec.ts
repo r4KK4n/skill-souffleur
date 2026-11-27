@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { decide, initSession } from '../src/core/decide.ts'
 import type { CoreEvent, Session } from '../src/core/decide.ts'
 import { requested, skillLoaded } from '../src/core/ledger.ts'
-import { renderTable, statusLine } from '../src/core/status.ts'
+import { needsAttention, renderTable, statusLine } from '../src/core/status.ts'
 import type { Config } from '../src/core/types.ts'
 import { parseConfig } from '../src/core/config.ts'
 
@@ -403,4 +403,12 @@ test('status version line with latest unknown and checked never', () => {
 
 test('status without update input has no version line', () => {
   assert.ok(!renderTable(config, fresh(), T1).includes('Version '))
+})
+
+test('a skill not installed here does not need attention, but the status line still counts it', () => {
+  const s0 = fresh()
+  const gone = { ...s0.ledger['writing-guide']!, state: 'not installed here' as const }
+  const s: Session = { ...s0, ledger: { ...skillLoaded(s0.ledger, 'writing-check', T1, 'matched prompt'), 'writing-guide': gone } }
+  assert.equal(needsAttention(s, config), false)
+  assert.match(statusLine(s, 'enforce') ?? '', /1 not installed here/)
 })
