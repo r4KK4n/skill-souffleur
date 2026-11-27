@@ -4058,6 +4058,8 @@ for (const [name, over] of [
   ['SSH armor in the message with a PGP block last', { 'cat-file': { exitCode: 0, stdout: `object a\ntype commit\ntag ${NEWER}\n\n-----BEGIN SSH SIGNATURE-----\nx\n-----END SSH SIGNATURE-----\n-----BEGIN PGP SIGNATURE-----\nzz\n-----END PGP SIGNATURE-----\n` } }],
   ['an SSH block that does not end the object', { 'cat-file': { exitCode: 0, stdout: `${SSH_TAG(NEWER)}trailing text\n` } }],
   ['the good text in the middle of a gpg line', { 'verify-tag': { exitCode: 0, stderr: 'gpg: Good signature from "x Good "git" signature for souffleur with y"' } }],
+  ['the good text after a U+2028 inside a gpg line', { 'verify-tag': { exitCode: 0, stderr: 'gpg: Good signature from "x\u2028Good "git" signature for souffleur with y"' } }],
+  ['the good text after a carriage return inside a gpg line', { 'verify-tag': { exitCode: 0, stderr: 'gpg: Good signature from "x\rGood "git" signature for souffleur with y"' } }],
   ['a verify that exits 0 without the Good line', { 'verify-tag': { exitCode: 0, stderr: 'something else' } }],
 ] as const) {
   test(`update auto: ${name} is not installed`, async ($, on) => {

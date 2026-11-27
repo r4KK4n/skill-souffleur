@@ -301,7 +301,7 @@ async function tagVerified($: Dollar, signer: string, tag: string, oid: string):
   const file = `${dir}/allowed_signers`
   await $.fs.write(file, `souffleur namespaces="git" ${signer}\n`)
   const r = await git($, ['-c', 'gpg.format=ssh', '-c', `gpg.ssh.allowedSignersFile=${file}`, 'verify-tag', oid])
-  return r.exitCode === 0 && /^Good "git" signature for souffleur with /m.test(r.stderr)
+  return r.exitCode === 0 && r.stderr.split('\n').some((line) => line.startsWith('Good "git" signature for souffleur with '))
 }
 
 type Install = { done: 'installed'; signed: boolean } | { done: 'refused'; reason: string } | { done: 'unverified' }
