@@ -741,6 +741,17 @@ test('an id change inside the process restores the stored copy of the new id (an
   expect(await table($)).toMatch(/writing-guide \| loaded/)
 })
 
+test('an in-process resume goes through the resume step: a stored pause is not carried over, as at session.start', async ($, on) => {
+  const { config } = parseConfig(ALWAYS, undefined)
+  const other = { ...decide(config, initSession(config, 's2', 1, 'startup', '2.1.331'), { type: 'skill', now: 2, skill: 'writing-guide' }).session, paused: true }
+  const w = world(on, { [USER_FILE]: ALWAYS }, { stored: { 'session:s2': other } })
+  await start($)
+  w.setId('s2')
+  const text = await table($)
+  expect(text).toMatch(/writing-guide \| loaded/)
+  expect(text).not.toMatch(/\(paused\)/)
+})
+
 test('an id change to a session with no stored copy starts fresh', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS })
   await start($)
