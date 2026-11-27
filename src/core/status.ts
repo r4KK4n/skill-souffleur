@@ -115,3 +115,12 @@ function baseLine(s: Session, mode: Mode, notesLeftOut: number, config?: Config,
   if (notesLeftOut) parts.push(`${notesLeftOut} ${notesLeftOut === 1 ? 'note' : 'notes'} over the limit`)
   return prefix ? `${prefix} ${parts.join(', ')}` : parts.join(', ')
 }
+
+/** True when the band above the prompt has something to say: a skill restoring, stale or missing, or a degraded mod. */
+export function needsAttention(s: Session, config: Config, root?: string): boolean {
+  if (s.errors.length) return true
+  return Object.entries(s.ledger).some(([name, e]) => {
+    if (config.skills[name] !== undefined && excludedIn(config.skills[name]!, root)) return false
+    return e.state === 'restoring' || e.state === 'stale' || e.state === 'unavailable' || e.state === 'not installed here'
+  })
+}

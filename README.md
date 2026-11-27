@@ -274,7 +274,7 @@ Costs:
 ## Troubleshooting
 
 - The status line says `degraded, see /souffleur`: Souffleur could not read its config, an event changed shape after a Claude Code update, or the small model failed three times in a row (for need detection or for reading skills). `/souffleur` lists what failed, and one good call clears a model error. Other errors clear once the step that failed works again.
-- No status line at all: your app may not show mod status lines. Use `/souffleur`.
+- No status line at all: your app may not show mod status lines. The desktop and mobile apps draw a one-row band above the prompt instead, but only while something needs attention (a skill restoring or missing, `degraded`, not set up, or a newer release); with everything loaded it stays hidden. `/souffleur` always works.
 - Please report problems with your Claude Code version (`claude --version`) through the [issue tracker](https://github.com/r4KK4n/skill-souffleur/issues).
 
 ## Switching off

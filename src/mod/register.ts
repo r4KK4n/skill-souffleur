@@ -1,4 +1,5 @@
-import type { Register } from 'claude-code'
+import { atom, read, update as updateAtom } from 'claude-code'
+import type { Register, RenderElement } from 'claude-code'
 import { MAX_LIST, MAX_PROJECT_ROOTS, excludedIn, isTrustedRoot, normRoot, parseConfig } from '../core/config.ts'
 import { decide, initSession, normalizeSession } from '../core/decide.ts'
 import { MIGRATE_INTRO, describeHook, findHookOverlaps, findPassages, hookQuestion, hookSteps, isGuess, migrateSteps, passageLines, removeHook } from '../core/migrate.ts'
@@ -11,7 +12,7 @@ import { EXTRACT_SYSTEM, MAX_SKILL_TEXT, extractPrompt, hashKey, parseAnswer, sh
 import type { Proposal } from '../core/proposals.ts'
 import { NO, YES_EVERYWHERE, YES_PROJECT, addEntry, answer, describeProposal, enqueue, findProposal, makeProposal, nextQuestion, parseReply, parseShaped, proposalLines, proposalNotice, shapePrompt } from '../core/proposals.ts'
 import { ruleSkillNames, sectionNotes } from '../core/rules.ts'
-import { statusLine } from '../core/status.ts'
+import { needsAttention, statusLine } from '../core/status.ts'
 import { addUsage } from '../core/cost.ts'
 import type { ModelUse, UsageFields } from '../core/cost.ts'
 import type { Config, Note, Rule } from '../core/types.ts'
@@ -28,6 +29,8 @@ type Dollar = any
 type Loaded = { config: Config; errors: string[]; root: string; tree: string; cwd: string; setUp: boolean }
 
 const REF = { plugin: 'skill-souffleur', key: 'session' } as const
+/** What the band above the prompt shows: the status text, or null while nothing needs attention. */
+const band = atom({ plugin: 'skill-souffleur', key: 'band' } as const, null as { text: string } | null)
 const RULE =
   'Souffleur keeps track of skills in this session. If a message from Souffleur asks you to load skills, invoke each one with the Skill tool before you continue.'
 const PROPOSE_SENTENCE =
@@ -175,7 +178,15 @@ async function persist($: Dollar, l: Loaded, s0: Session, quiet = false): Promis
   latest = s
   for (const line of lines) say($, l, line)
   // A broken file shows as degraded; only a clean start without a user file says "not set up".
-  $.ui.status(!l.setUp && !s.errors.length ? NOT_SET_UP : statusLine(s, l.config.mode, sectionNotes(l.config, l.root).leftOut.length, l.config, l.root))
+  const notSetUp = !l.setUp && !s.errors.length
+  const text = notSetUp ? NOT_SET_UP : statusLine(s, l.config.mode, sectionNotes(l.config, l.root).leftOut.length, l.config, l.root)
+  $.ui.status(text)
+  // The apps draw no status line: a band stands in for it, but only while something needs attention.
+  const tag = l.config.update === 'off' ? undefined : (await readCheck($))?.latest
+  const newer = tag !== undefined && compareVersions(shown(tag), PLUGIN_VERSION) === 1
+  const attention = notSetUp || needsAttention(s, l.config, l.root)
+  const bandText = newer ? [text, `${shown(tag)} is out, see /souffleur`].filter(Boolean).join(' · ') : attention ? text : undefined
+  await updateAtom($, band, () => (bandText === undefined ? null : { text: bandText }))
   await $.state.set(REF, s)
   await $.store.set(`session:${s.id}`, s)
 }
@@ -1918,6 +1929,14 @@ async function reconnectTool($: Dollar): Promise<void> {
 }
 
 export const register: Register = (on) => {
+  // On the terminal the status line says the same; any other surface gets one row while something needs attention.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const b = e.surface === 'terminal' || e.props.hasSurvey ? null : await read($, band)
+    if (!b) return next(e)
+    const { Box, Text } = $.ui.resolve(e)
+    return h(Box, null, h(Text, { wrap: 'truncate' }, b.text)) as RenderElement
+  })
+
   on('session.start', async ($, e, next) => {
     await safe($, 'session.start', undefined, async () => {
       loaded = undefined

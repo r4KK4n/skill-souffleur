@@ -4378,3 +4378,79 @@ test('status with a trailing verb from a plugin answers status and does not paus
   expect(String(r.text)).toMatch(/Mode: enforce/)
   expect(await run($, 'resume')).toBe('Souffleur: not paused.')
 })
+
+// --- The band above the prompt in the apps (#21) ---
+
+const BAND = (surface: 'terminal' | 'desktop') => ({ plugin: 'skill-souffleur', component: 'AbovePrompt', surface, props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 5, columns: 80 } }) as never
+const bandText = async ($: any, surface: 'terminal' | 'desktop'): Promise<string | undefined> => {
+  const ui = await $.ui.mount(BAND(surface))
+  const text = (await ui.find({ type: 'Text' }))?.text as string | undefined
+  await ui.unmount()
+  return text
+}
+
+test('the band is never drawn on the terminal, where the status line shows', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  await $.prompt.submit({ text: 'hello' })
+  expect(w.statuses.at(-1)).toMatch(/1 restoring/)
+  expect(await bandText($, 'terminal')).toBeUndefined()
+})
+
+test('on the desktop nothing is drawn while every skill is loaded', async ($, on) => {
+  world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  await skillLoaded($, 'writing-guide')
+  expect(await bandText($, 'desktop')).toBeUndefined()
+})
+
+test('on the desktop a restoring skill shows the status text', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  await $.prompt.submit({ text: 'hello' })
+  expect(await bandText($, 'desktop')).toBe(w.statuses.at(-1))
+})
+
+test('on the desktop a skill that is not installed here shows the status text', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS }, { skills: ['pdf'] })
+  await start($)
+  const text = await bandText($, 'desktop')
+  expect(text).toBe(w.statuses.at(-1))
+})
+
+test('on the desktop a session that is not set up shows the not-set-up text', async ($, on) => {
+  world(on, {})
+  await start($)
+  expect(await bandText($, 'desktop')).toBe('not set up, run /souffleur init')
+})
+
+test('on the desktop a newer release shows the status line', async ($, on) => {
+  world(on, { [USER_FILE]: ALWAYS }, { stored: { updateCheck: { at: Date.now(), latest: 'v99.0.0' } } })
+  await start($)
+  await skillLoaded($, 'writing-guide')
+  expect(await bandText($, 'desktop')).toMatch(/1 loaded · 99\.0\.0 is out, see \/souffleur$/)
+})
+
+test('on the desktop a newer release shows even with no skills configured', async ($, on) => {
+  world(on, { [USER_FILE]: '{}' }, { stored: { updateCheck: { at: Date.now(), latest: 'v99.0.0' } } })
+  await start($)
+  expect(await bandText($, 'desktop')).toBe('99.0.0 is out, see /souffleur')
+})
+
+test('update off hides the band for a newer release left in the store', async ($, on) => {
+  world(on, { [USER_FILE]: JSON.stringify({ update: 'off', skills: { 'writing-guide': { always: true } } }) }, { stored: { updateCheck: { at: Date.now(), latest: 'v99.0.0' } } })
+  await start($)
+  await skillLoaded($, 'writing-guide')
+  expect(await bandText($, 'desktop')).toBeUndefined()
+})
+
+test('a mounted band goes away when the restoring skill loads, with no new prompt', async ($, on) => {
+  world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  await $.prompt.submit({ text: 'hello' })
+  const ui = await $.ui.mount(BAND('desktop'))
+  expect((await ui.find({ type: 'Text' }))?.text).toMatch(/1 restoring/)
+  await skillLoaded($, 'writing-guide')
+  expect(await ui.find({ type: 'Text' })).toBeUndefined()
+  await ui.unmount()
+})

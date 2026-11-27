@@ -3,6 +3,8 @@
 declare module 'claude-code' {
   interface PluginState {
     'skill-souffleur': {
+      /** What the band above the prompt draws; null while nothing needs attention. */
+      band: { text: string } | null
       session: {
         ledger: Record<
           string,
