@@ -3755,7 +3755,7 @@ test('a resume shows a time in the status line at once', async ($, on) => {
 const LS = (...tags: string[]) => tags.map((t, i) => `${String(i + 1).padStart(40, 'a')}\trefs/tags/${t}`).join('\n')
 const NEWER = 'v0.2.99'
 const lsRemoteCalls = (w: World) => w.runs.filter((r) => r.argv.includes('ls-remote'))
-const FOLDER_ROOT = (argv: readonly string[]) => (argv.includes('rev-parse') ? { exitCode: 0, stdout: `${argv[2]}\n`, stderr: '' } : undefined)
+const FOLDER_ROOT = (argv: readonly string[]) => (argv.includes('rev-parse') ? { exitCode: 0, stdout: '\n', stderr: '' } : undefined)
 const MARKET_ROOT = (argv: readonly string[]) => (argv.includes('rev-parse') ? { exitCode: 128, stdout: '', stderr: 'fatal: not a git repository' } : undefined)
 const runWith = (ls: { exitCode: number; stdout: string }, root = FOLDER_ROOT): NonNullable<Opts['run']> => (argv) => {
   const r = root(argv)
@@ -3872,4 +3872,29 @@ test('update: /souffleur shows the version line from the stored check', async ($
   await start($)
   await updateSettled()
   expect(await table($)).toContain(`Version ${PLUGIN_VERSION} · latest`)
+})
+
+test('update: a cached install kind shows the line at start although rev-parse never answers', async ($, on) => {
+  const w = world(on, SETUP, { stored: { installKind: 'folder', updateCheck: { at: Date.now(), latest: NEWER } }, run: (argv) => (argv.includes('rev-parse') ? new Promise(() => {}) : { exitCode: 0, stdout: '', stderr: '' }) })
+  await start($)
+  expect(w.logs).toContain(`Souffleur ${NEWER} is out (you run ${PLUGIN_VERSION}). /souffleur update installs it.`)
+})
+
+test('update: the first run learns the install kind, stores it and says the line once', async ($, on) => {
+  const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: runWith({ exitCode: 0, stdout: '' }, MARKET_ROOT) })
+  await start($)
+  await updateSettled()
+  expect(w.stored.installKind).toBe('market')
+  expect(w.logs.filter((l) => l.includes('/plugin update installs it.')).length).toBe(1)
+  await start($)
+  await updateSettled()
+  expect(w.logs.filter((l) => l.includes('is out')).length).toBe(1)
+})
+
+test('update: a plugin folder inside a work tree (non-empty prefix) is a marketplace install', async ($, on) => {
+  const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: (argv) => (argv.includes('rev-parse') ? { exitCode: 0, stdout: 'plugins/x/\n', stderr: '' } : { exitCode: 0, stdout: '', stderr: '' }) })
+  await start($)
+  await updateSettled()
+  expect(w.stored.installKind).toBe('market')
+  expect(w.runs.find((r) => r.argv.includes('rev-parse'))!.argv).toContain('--show-prefix')
 })

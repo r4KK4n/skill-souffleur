@@ -197,15 +197,31 @@ async function readCheck($: Dollar): Promise<{ at: number; latest?: string } | u
   }
 }
 
-/** A folder install when the plugin root is the top level of a git work tree; anything else (or no git) is a marketplace install. */
+const KIND_KEY = 'installKind'
+
+/** A folder install when the plugin root is the top of a git work tree (`--show-prefix` prints nothing); anything else, or no git, is a marketplace install. */
 export async function installKind($: Dollar): Promise<'folder' | 'market'> {
   try {
-    const root: string = $.plugin.root
-    const r = await $.process.run(['git', '-C', root, 'rev-parse', '--show-toplevel'], { timeoutMs: 5000 })
-    return r.exitCode === 0 && String(r.stdout).trim() === root ? 'folder' : 'market'
+    const r = await $.process.run(['git', '-C', $.plugin.root, 'rev-parse', '--show-prefix'], { timeoutMs: 5000 })
+    return r.exitCode === 0 && String(r.stdout).trim() === '' ? 'folder' : 'market'
   } catch {
     return 'market'
   }
+}
+
+async function cachedKind($: Dollar): Promise<'folder' | 'market' | undefined> {
+  try {
+    const k: unknown = await $.store.get(KIND_KEY)
+    return k === 'folder' || k === 'market' ? k : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Remembers that the notify line for `tag` was said, so this session does not repeat it (also over reload and resume). */
+async function markShown($: Dollar, l: Loaded, tag: string): Promise<void> {
+  const cur = latest
+  if (cur && cur.id === (await $.session.id())) await persist($, l, { ...cur, updateShown: tag }, true)
 }
 
 /** Looks for a newer release tag and stores the result. Never throws; a failure stores the time so one try happens per day. */
@@ -1743,13 +1759,21 @@ export const register: Register = (on) => {
       // A newer release found earlier is shown once per session (the mark survives reload and resume).
       const found = l.config.update === 'off' ? undefined : (await readCheck($))?.latest
       const tell = found !== undefined && compareVersions(found.slice(1), PLUGIN_VERSION) === 1 && s.updateShown !== found ? found : undefined
-      if (tell !== undefined) s = { ...s, updateShown: tell }
+      const kind = tell === undefined ? undefined : await cachedKind($)
       await persist($, l, s, true)
       say($, l, startNotice(l.config, s, l.setUp, PLUGIN_VERSION))
       for (const line of first.lines) say($, l, line)
-      // Neither the line nor the check may hold the session start: both run detached.
+      let said = false
+      if (tell !== undefined && kind !== undefined) {
+        said = say($, l, updateLine(kind === 'folder' ? 'notify' : 'notify-market', tell, PLUGIN_VERSION))
+        if (said) await markShown($, l, tell)
+      }
+      // Neither the first-run line nor the check may hold the session start: both run detached.
       updateWork = (async () => {
-        if (tell !== undefined) say($, l, updateLine((await installKind($)) === 'folder' ? 'notify' : 'notify-market', tell, PLUGIN_VERSION))
+        if (l.config.update === 'off') return
+        const k = await installKind($)
+        await $.store.set(KIND_KEY, k)
+        if (tell !== undefined && !said && say($, l, updateLine(k === 'folder' ? 'notify' : 'notify-market', tell, PLUGIN_VERSION))) await markShown($, l, tell)
         await checkForUpdate($, l, now())
       })().catch(() => {})
     })
