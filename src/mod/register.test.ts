@@ -63,6 +63,10 @@ type Opts = {
   failRead?: string[]
   /** Writes to a path that matches throw. */
   failWrite?: RegExp
+  /** `mkdir` of the update lock folder always fails, as when another session wins the race. */
+  holdLock?: boolean
+  /** `$.env.get('HOME')` answers nothing. */
+  noHome?: boolean
   /** `mv -f` exits 1 and moves nothing. */
   failMv?: boolean
   /** `$.fs.stat(path, { resolve: true })` says the path is a symlink to this target. */
@@ -195,6 +199,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
     return { value: undefined } as never
   })
   const runs: World['runs'] = []
+  const dirs = new Set<string>()
   on('process.run', (_, e) => {
     const init = (e as { init?: { timeoutMs?: number } }).init
     runs.push({ argv: e.argv, ...(init?.timeoutMs === undefined ? {} : { timeoutMs: init.timeoutMs }) })
@@ -205,6 +210,20 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
       put(e.argv[3]!, text)
       writes.push({ path: e.argv[3]!, text })
       opts.onWrite?.(e.argv[3]!)
+      return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+    }
+    if (e.argv[0] === 'mkdir') {
+      const dir = e.argv[e.argv.length - 1]!
+      if (e.argv[1] === '-p') { dirs.add(dir); return { value: { exitCode: 0, stdout: '', stderr: '' } } as never }
+      if (opts.holdLock && dir.endsWith('/update.lock')) return { value: { exitCode: 1, stdout: '', stderr: 'mkdir: File exists' } } as never
+      if (dirs.has(dir) || Object.keys(files).some((f) => f.startsWith(`${dir}/`))) return { value: { exitCode: 1, stdout: '', stderr: 'mkdir: File exists' } } as never
+      dirs.add(dir)
+      return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+    }
+    if (e.argv[0] === 'rm' && e.argv[1] === '-rf') {
+      const dir = e.argv[2]!
+      dirs.delete(dir)
+      for (const f of Object.keys(files)) if (f.startsWith(`${dir}/`)) delete files[f]
       return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
     }
     if (e.argv[0] === 'rm' && e.argv[1] === '-f') {
@@ -220,7 +239,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
     return { value: undefined } as never
   })
   on('session.version', () => ({ value: { version: '2.1.332' } }))
-  on('env.get', () => ({ value: HOME }))
+  on('env.get', () => ({ value: opts.noHome ? undefined : HOME }))
   on('process.hookEnv', () => ({ value: { CLAUDE_PLUGIN_DATA: '/data/souffleur' } }))
   on('fs.exists', (_, e) => ({ value: files[e.path] !== undefined && !hidden.has(e.path) }))
   on('fs.read', (_, e) => {
@@ -5171,18 +5190,40 @@ test('a symlinked user file is written through, the link stays', async ($, on) =
 
 // ---- update lock and ownership ----
 
-test('/souffleur update: a fresh lock held by another token skips the install and runs no checkout', async ($, on) => {
-  const w = world(on, { ...SETUP }, { stored: { ...QUIET, updateLock: { at: Date.now() - 30_000, token: 'other' } }, run: gitRun() })
+const LOCK_DIR = '/data/souffleur/update.lock'
+const OWNER = `${LOCK_DIR}/owner`
+const heldBy = (at: number, token = 'other') => ({ [OWNER]: JSON.stringify({ at, token }) })
+
+test('/souffleur update: a lock held by another session skips the install and runs no git', async ($, on) => {
+  const w = world(on, { ...SETUP, ...heldBy(Date.now() - 30_000) }, { stored: QUIET, run: gitRun() })
   own(w)
   await start($)
   expect(await runUser($, 'update')).toBe('Souffleur: another session is installing an update; try again in a minute.')
   expect(ran(w, 'fetch').length).toBe(0)
   expect(ran(w, 'checkout').length).toBe(0)
-  expect((w.stored.updateLock as { token: string }).token).toBe('other')
+  expect(ran(w, 'status').length).toBe(0)
+  expect(JSON.parse(w.files[OWNER]!).token).toBe('other')
 })
 
-test('update auto: a fresh lock held by another token skips the install, says nothing and logs to debug', async ($, on) => {
-  const w = world(on, AUTO_FILE, { stored: { ...STORED_NEWER, updateLock: { at: Date.now() - 30_000, token: 'other' } }, run: gitRun() })
+test('/souffleur update: a lost race (mkdir fails, a fresh owner is there) runs no git', async ($, on) => {
+  const w = world(on, { ...SETUP, ...heldBy(Date.now()) }, { stored: QUIET, run: gitRun(), holdLock: true })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toMatch(/another session is installing/)
+  expect(ran(w, 'fetch').length).toBe(0)
+})
+
+test('/souffleur update: a failing mkdir with no readable owner is stale once, then the install is skipped', async ($, on) => {
+  const w = world(on, { ...SETUP }, { stored: QUIET, run: gitRun(), holdLock: true })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toMatch(/another session is installing/)
+  expect(ran(w, 'fetch').length).toBe(0)
+  expect(w.runs.filter((r) => r.argv[0] === 'mkdir' && r.argv[1] !== '-p').length).toBe(2)
+})
+
+test('update auto: a lock held by another session skips the install, says nothing and logs to debug', async ($, on) => {
+  const w = world(on, { ...AUTO_FILE, ...heldBy(Date.now() - 30_000) }, { stored: STORED_NEWER, run: gitRun() })
   own(w)
   await start($)
   await settleUpdate(w)
@@ -5192,22 +5233,24 @@ test('update auto: a fresh lock held by another token skips the install, says no
   expect(w.debugLogs.some((l) => l.includes('install lock'))).toBe(true)
 })
 
-test('update auto: a stale lock is taken over and released after the install', async ($, on) => {
-  const w = world(on, AUTO_FILE, { stored: { ...STORED_NEWER, updateLock: { at: Date.now() - 180_000, token: 'old' } }, run: gitRun() })
-  own(w)
-  await start($)
-  await settleUpdate(w)
-  expect(ran(w, 'checkout').length).toBe(1)
-  expect(w.stored.updateLock).toBeUndefined()
-})
+for (const [name, at] of [['an old', Date.now() - 180_000], ['a future-dated', Date.now() + 3_600_000]] as const) {
+  test(`update auto: ${name} lock is stale, taken over and released after the install`, async ($, on) => {
+    const w = world(on, { ...AUTO_FILE, ...heldBy(at, 'old') }, { stored: STORED_NEWER, run: gitRun() })
+    own(w)
+    await start($)
+    await settleUpdate(w)
+    expect(ran(w, 'checkout').length).toBe(1)
+    expect(w.files[OWNER]).toBeUndefined()
+  })
+}
 
 test('/souffleur update: the lock is released after a failed verify', async ($, on) => {
-  const w = world(on, AUTO_FILE, { stored: QUIET, run: gitRun({ 'verify-tag': { exitCode: 1 } }) })
+  const w = world(on, { ...AUTO_FILE }, { stored: QUIET, run: gitRun({ 'verify-tag': { exitCode: 1 } }) })
   own(w)
   await start($)
   expect(await runUser($, 'update')).toMatch(/not signed by your updateSigner key; not installed/)
-  expect(w.storeSets).toContain('updateLock')
-  expect(w.stored.updateLock).toBeUndefined()
+  expect(w.writes.some((x) => x.path === OWNER)).toBe(true)
+  expect(w.files[OWNER]).toBeUndefined()
 })
 
 test('/souffleur update: the lock is released after a git failure', async ($, on) => {
@@ -5215,12 +5258,21 @@ test('/souffleur update: the lock is released after a git failure', async ($, on
   own(w)
   await start($)
   await runUser($, 'update')
-  expect(w.storeSets).toContain('updateLock')
-  expect(w.stored.updateLock).toBeUndefined()
+  expect(w.writes.some((x) => x.path === OWNER)).toBe(true)
+  expect(w.files[OWNER]).toBeUndefined()
+})
+
+test('/souffleur update: a lock another session took over during the install is not removed', async ($, on) => {
+  let w!: World
+  const base = gitRun()
+  w = world(on, { ...SETUP }, { stored: QUIET, run: (argv, init) => { if (argv.includes('checkout')) w.edit(OWNER, JSON.stringify({ at: Date.now(), token: 'taken-over' })); return base(argv, init) } })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toMatch(/updated to/)
+  expect(JSON.parse(w.files[OWNER]!).token).toBe('taken-over')
 })
 
 const OWNED = `${HOME}/.claude/plugins/installed_plugins.json`
-const MARKET_LINE = `Souffleur ${NEWER_V} is out (you run ${PLUGIN_VERSION}). /plugin update installs it.`
 const MARKET_ANSWER = 'Souffleur: installed through the marketplace; run /plugin update.'
 
 /** The engine picks the plugin root, so a test learns it from the first git call, then arranges the files. */
@@ -5250,6 +5302,55 @@ test('update: a root under the plugins folder is market even when git calls it a
   links[root] = `${HOME}/.claude/plugins/marketplaces/m/plugin`
   expect(await runUser($, 'update')).toBe(MARKET_ANSWER)
   expect(ran(w, 'checkout').length).toBe(checkouts)
+})
+
+test('update auto: with update auto and a root listed in installed_plugins.json nothing is fetched or checked out', async ($, on) => {
+  const w = world(on, { ...AUTO_FILE }, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: gitRun() })
+  own(w)
+  const root = await learnRoot($, w)
+  const before = { fetch: ran(w, 'fetch').length, checkout: ran(w, 'checkout').length }
+  w.edit(OWNED, JSON.stringify({ version: 2, plugins: { 'skill-souffleur@market': [{ scope: 'user', installPath: root }] } }))
+  w.setId(`upd-${++nextId}`)
+  await start($)
+  await settleUpdate(w, 2)
+  expect(ran(w, 'fetch').length).toBe(before.fetch)
+  expect(ran(w, 'checkout').length).toBe(before.checkout)
+})
+
+test('update: a symlinked config dir is compared by real path', async ($, on) => {
+  const links: Record<string, string> = {}
+  const w = world(on, { ...SETUP }, { stored: QUIET, run: gitRun(), linkTo: links })
+  own(w)
+  const root = await learnRoot($, w)
+  const checkouts = ran(w, 'checkout').length
+  w.edit(`${HOME}/.claude/plugins`, '')
+  links[`${HOME}/.claude/plugins`] = '/real/cfg/plugins'
+  w.edit(root, '')
+  links[root] = '/real/cfg/plugins/marketplaces/m/plugin'
+  expect(await runUser($, 'update')).toBe(MARKET_ANSWER)
+  expect(ran(w, 'checkout').length).toBe(checkouts)
+})
+
+test('update: an installPath that is a symlink to the root counts as listing the root', async ($, on) => {
+  const links: Record<string, string> = {}
+  const w = world(on, { ...SETUP }, { stored: QUIET, run: gitRun(), linkTo: links })
+  own(w)
+  const root = await learnRoot($, w)
+  w.edit(root, '')
+  links[root] = '/real/checkout'
+  w.edit('/alias/checkout', '')
+  links['/alias/checkout'] = '/real/checkout'
+  w.edit(OWNED, JSON.stringify({ version: 2, plugins: { 'x@m': [{ installPath: '/alias/checkout' }] } }))
+  expect(await runUser($, 'update')).toBe(MARKET_ANSWER)
+})
+
+test('update: an unknown home folder counts as owned: market, no install', async ($, on) => {
+  const w = world(on, { ...SETUP }, { stored: QUIET, run: gitRun(), noHome: true })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toBe(MARKET_ANSWER)
+  expect(ran(w, 'fetch').length).toBe(0)
+  expect(ran(w, 'checkout').length).toBe(0)
 })
 
 for (const [name, text] of [['missing', undefined], ['broken', '{not json'], ['without plugins', '{}'], ['with other roots', JSON.stringify({ plugins: { 'x@m': [{ installPath: '/elsewhere' }, null] } })]] as const) {

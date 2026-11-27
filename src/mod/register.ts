@@ -278,19 +278,23 @@ const KIND_KEY = 'installKind'
 /** True when `path` is `dir` or lies under it. */
 const underDir = (path: string, dir: string) => path === dir || path.startsWith(dir.endsWith('/') ? dir : `${dir}/`)
 
-/** True when Claude Code owns the plugin root: it lies under `<user config dir>/plugins/` or is an `installPath` in `installed_plugins.json`. A missing or unreadable file means no ownership found. */
+/** The real path of `path` (symlinks resolved), or `path` itself when it cannot be resolved. */
+async function realOf($: Dollar, path: string): Promise<string> {
+  try {
+    return collapsePath((await $.fs.stat(path, { resolve: true }))?.realPath ?? path)
+  } catch {
+    return collapsePath(path)
+  }
+}
+
+/** True when Claude Code owns the plugin root: its real path lies under the real `<user config dir>/plugins/` or equals the real path of an `installPath` in `installed_plugins.json`. A missing or unreadable file means no ownership found; an unknown home folder counts as owned (fail safe: no install). */
 async function ownedByMarketplace($: Dollar): Promise<boolean> {
   const home = await $.env.get('HOME').catch(() => undefined)
-  if (!home) return false
+  if (!home) return true
   const plugins = `${collapsePath(home)}/.claude/plugins`
-  const roots = new Set([collapsePath($.plugin.root)])
-  try {
-    const real = (await $.fs.stat($.plugin.root, { resolve: true }))?.realPath
-    if (real) roots.add(collapsePath(real))
-  } catch {
-    // The path as given is all there is to compare.
-  }
-  if ([...roots].some((r) => underDir(r, plugins))) return true
+  const realPlugins = await realOf($, plugins)
+  const roots = new Set([collapsePath($.plugin.root), await realOf($, $.plugin.root)])
+  if ([...roots].some((r) => underDir(r, plugins) || underDir(r, realPlugins))) return true
   try {
     const listed: unknown = parseJson(await $.fs.read(`${plugins}/installed_plugins.json`))
     const all = (listed as { plugins?: Record<string, unknown> } | null)?.plugins ?? {}
@@ -298,7 +302,8 @@ async function ownedByMarketplace($: Dollar): Promise<boolean> {
       if (!Array.isArray(copies)) continue
       for (const c of copies) {
         const p: unknown = (c as { installPath?: unknown } | null)?.installPath
-        if (typeof p === 'string' && roots.has(collapsePath(p))) return true
+        if (typeof p !== 'string') continue
+        if (roots.has(collapsePath(p)) || roots.has(await realOf($, p))) return true
       }
     }
   } catch {
@@ -416,26 +421,65 @@ async function tagVerified($: Dollar, signer: string, tag: string, oid: string):
 
 type Install = { done: 'installed'; signed: boolean } | { done: 'refused'; reason: string } | { done: 'unverified' } | { done: 'busy' }
 
-/** Plugin store key of the install lock: `{ at, token }`, younger than this is held by another session. */
-const LOCK_KEY = 'updateLock'
 const LOCK_STALE_MS = 120_000
 
-/** Takes the install lock, runs `fn`, releases it. `undefined` when another session holds a fresh lock or won the race. */
+/** Runs a command without a shell; true when it exits 0. */
+async function ok($: Dollar, argv: string[]): Promise<boolean> {
+  try {
+    return (await $.process.run(argv, { timeoutMs: 5000 })).exitCode === 0
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Takes the install lock, runs `fn`, releases it. The lock is the folder `<plugin data>/update.lock`, made with `mkdir`, which fails when
+ * it exists, so one session wins. An `owner` file inside holds `{ at, token }`. A lock older than 2 minutes, dated in the future or with no
+ * readable owner and an old folder is stale: it is removed and taken once. The release removes the folder only while the token is ours.
+ * `undefined` when another session holds the lock.
+ */
 async function withInstallLock<T>($: Dollar, fn: () => Promise<T>): Promise<{ value: T } | undefined> {
-  const held: unknown = await $.store.get(LOCK_KEY)
-  const at = (held as { at?: unknown } | null)?.at
-  if (typeof at === 'number' && now() - at < LOCK_STALE_MS) return undefined
+  const data = (await $.process.hookEnv()).CLAUDE_PLUGIN_DATA
+  if (data === undefined || data === '') throw new Error('no plugin data folder')
+  const lock = `${data}/update.lock`
+  const owner = `${lock}/owner`
+  const readOwner = async (): Promise<{ at?: unknown; token?: unknown } | undefined> => {
+    try {
+      const o: unknown = parseJson(await $.fs.read(owner))
+      return typeof o === 'object' && o !== null ? o : undefined
+    } catch {
+      return undefined
+    }
+  }
+  const stale = async () => {
+    let at = (await readOwner())?.at
+    if (typeof at !== 'number') {
+      try {
+        at = (await $.fs.stat(lock))?.mtimeMs
+      } catch {
+        return true
+      }
+    }
+    return typeof at !== 'number' || at > now() || now() - at >= LOCK_STALE_MS
+  }
+  await ok($, ['mkdir', '-p', data])
+  let made = await ok($, ['mkdir', lock])
+  if (!made && (await stale())) {
+    await ok($, ['rm', '-rf', lock])
+    made = await ok($, ['mkdir', lock])
+  }
+  if (!made) return undefined
   const token = `${now()}-${Math.random().toString(36).slice(2)}`
-  await $.store.set(LOCK_KEY, { at: now(), token })
-  if (((await $.store.get(LOCK_KEY)) as { token?: unknown } | null)?.token !== token) return undefined
+  try {
+    await $.fs.write(owner, JSON.stringify({ at: now(), token }))
+  } catch (err) {
+    await ok($, ['rm', '-rf', lock])
+    throw err
+  }
   try {
     return { value: await fn() }
   } finally {
-    try {
-      if (((await $.store.get(LOCK_KEY)) as { token?: unknown } | null)?.token === token) await $.store.delete(LOCK_KEY)
-    } catch {
-      // A lock that stays is stale after two minutes.
-    }
+    if ((await readOwner())?.token === token) await ok($, ['rm', '-rf', lock])
   }
 }
 
