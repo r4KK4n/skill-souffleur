@@ -58,7 +58,7 @@ Your `~/.claude/souffleur.json` stays where it is, and so does the backup of `se
 
 ## Update notice and automatic update
 
-This is the one network request Souffleur makes itself. Once a day, in the background, it runs `git ls-remote --tags --refs https://github.com/r4KK4n/skill-souffleur` to read the tag list from github.com, and shows one line at the next session start: `Souffleur 0.2.4 is out (you run 0.2.3). /souffleur update installs it.` (`/plugin update installs it.` for the marketplace install). Only tags shaped `vX.Y.Z` count, and only a newer one than the version you run. The look-up never delays a session start, and a failed one stays silent and is tried again after a day. `/souffleur` shows the version, the newest release, when it was checked and the setting. `plugin.json` declares `github.com` as the one network host.
+This is the only request Souffleur makes unasked. Once a day, in the background, it runs `git ls-remote --tags --refs https://github.com/r4KK4n/skill-souffleur` to read the tag list from github.com, and shows one line at the next session start: `Souffleur 0.2.4 is out (you run 0.2.3). /souffleur update installs it.` (`/plugin update installs it.` for the marketplace install). Only tags shaped `vX.Y.Z` count, and only a newer one than the version you run. The look-up never delays a session start, and a failed one stays silent and is tried again after a day. `/souffleur` shows the version, the newest release, when it was checked and the setting. `plugin.json` declares `github.com` as the one network host.
 
 The setting `update` in `~/.claude/souffleur.json` (user file only):
 
@@ -66,7 +66,7 @@ The setting `update` in `~/.claude/souffleur.json` (user file only):
 - `"auto"`: at session start, after the first line, Souffleur installs a newer release when its tag is signed by the key you list in `updateSigner`. It says `Souffleur updated to 0.2.4 (tag signed by your key).` A tag that is unsigned or signed by another key is not installed.
 - `"off"`: no look-up and no line. Nothing then goes to github.com.
 
-`auto` and `/souffleur update` also fetch from that repository URL. Everything else Souffleur sends goes through Claude Code's own model calls (see [data.md](data.md)).
+`auto` and `/souffleur update` also fetch from that repository URL, but only when you set `auto` or type the command. Everything else Souffleur sends goes through Claude Code's own model calls (see [data.md](data.md)).
 
 ```json
 {

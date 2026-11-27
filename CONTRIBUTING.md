@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for taking the time to help. Souffleur is maintained by one person, so small, focused changes are the easiest to review.
+One person maintains Souffleur, so small, focused changes are the easiest to review.
 
 ## Before you start
 

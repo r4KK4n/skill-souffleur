@@ -15,6 +15,8 @@ Version 0.2.8, tag `v0.2.8`, verified on Claude Code 2.1.332. Souffleur is a Cla
    ```
 
    From a shell, or in a Remote Control session, use the two `claude plugin` commands in [docs/updates.md](docs/updates.md#marketplace-install).
+
+   Then run `/reload-plugins` or restart the session, so the running session loads it.
 2. Run `/souffleur init`. It asks how Souffleur should keep your skills, one question per plugin, and writes `~/.claude/souffleur.json`.
 3. Run `/souffleur`. It shows what Souffleur knows about the session:
 
@@ -24,40 +26,45 @@ Version 0.2.8, tag `v0.2.8`, verified on Claude Code 2.1.332. Souffleur is a Cla
    | Skill | State | Since | Reason |
    | --- | --- | --- | --- |
    | writing-guide | loaded | 09:12 | skill.prompt |
-   | ui-checklist | restoring | 09:41 | skill.prompt |
+   | ui-checklist | restoring | 09:42 | skill.prompt |
    | code-style | not needed yet | 09:03 | |
 
    Active needs:
    - prose (since 09:12)
+   - ui (since 09:35)
+
+   Small model: 14 calls, 9.1k in / 0.2k out, about $0.01 this session (total 120 calls, about $0.09). Estimate at list price.
+   Version 0.2.8 · latest 0.2.8 · checked 08:55 · update: notify
 
    Claude Code 2.1.332
    ```
 
-   Here a compaction at 09:41 cut `ui-checklist`, and Souffleur has asked the model to load it again.
+   Here a compaction cut `ui-checklist`. The Since column of a restoring row is the time of the request: at 09:42 Souffleur asked the model to load it again.
 
 Keep the default mode, `observe`, for a few sessions and look at `/souffleur` after a compaction. If the ledger matches what you saw, you can switch to `enforce`.
 
 ## What it does
 
 - Tracks which skills a session loaded, and notices when compaction or a resume drops or truncates one.
-- Decides from the current work which skills it needs, and asks the model to invoke the missing ones again. It does not inject skill text itself.
-- In `enforce` mode, holds back a configured step, such as writing a file, until the skills it needs are loaded.
+- Decides from the current work which skills it needs (a skill's need is the kind of work it serves, such as writing), and asks the model to invoke the missing ones again. It does not inject skill text itself.
+- In `enforce` mode, holds back a configured step, such as writing a file (a gate), until the skills it needs are loaded.
 - Shows which skills are active, since when and why.
 
 You choose the skills and the rules in `~/.claude/souffleur.json` ([docs/config.md](docs/config.md)). What you type in the chat still wins: if you tell the model not to invoke any skill, it follows you and only mentions Souffleur's request.
 
-Souffleur shows up in four places. A short note in your prompt asks the model to load a missing skill first. The status line shows a summary such as `14:02 · observe · 3 loaded, 1 restoring · ~$0.03`, and the desktop and mobile apps show a one-row band above the prompt while something needs attention. In `enforce` a step that needs a missing skill is refused once with the reason. An open duty, a step that must be followed by evidence such as a detector run, is mentioned once when it opens. `/souffleur` lists all of it.
+Souffleur shows up in four places. A short note in your prompt asks the model to load a missing skill first. The status line shows a summary such as `14:02 · observe · 3 loaded, 1 restoring · ~$0.03`, and the desktop and mobile apps show a one-row band above the prompt while something needs attention. In `enforce` a step that needs a missing skill is refused once with the reason. An open duty (a step that must be followed by evidence, such as a detector run) is mentioned once when it opens. `/souffleur` lists all of it.
 
 ## Modes
 
 `observe` is the default. Souffleur keeps the ledger, asks the model to reload skills and reports through `/souffleur`, but it never denies a tool call. Calls it would have denied are listed under "Would have denied", so you can see what `enforce` would do first.
 
-`enforce` lets gates and duties deny a tool call until the skill it names is loaded. Only your user file can set it. It is advisory: a `Bash` redirect, a file tool from an MCP server and any write by a subagent pass a `Write` gate. [What enforce does not cover](docs/config.md#what-enforce-does-not-cover) has the details.
+`enforce` lets gates and duties deny a tool call until the skill it names is loaded. A gate names the tools and paths it guards, and a duty names the evidence a step needs. Only your user file can set it. It is advisory: a `Bash` redirect, a file tool from an MCP server and any write by a subagent pass a `Write` gate. [What enforce does not cover](docs/config.md#what-enforce-does-not-cover) has the details.
 
 ## Network, files and cost
 
 - Once a day Souffleur runs `git ls-remote --tags --refs` against `https://github.com/r4KK4n/skill-souffleur` to look for a newer release (`update: "notify"`, the default). Set `"update": "off"` in `~/.claude/souffleur.json` to stop it.
-- Everything else goes through Claude Code's own model calls: two small-model calls on each prompt you type, and one per skill text it reads to propose rules (switch off with `"learn": { "skills": false }`).
+- It also fetches from that URL when you set `"update": "auto"` or type `/souffleur update`. This look-up is the only request it makes unasked.
+- Everything else goes through Claude Code's own model calls. The small model is the cheap model Claude Code runs for Souffleur: two calls on each prompt you type, and one per skill text it reads to propose rules (switch off with `"learn": { "skills": false }`).
 - It reads your config files, and writes `~/.claude/souffleur.json` only after your answer. [docs/data.md](docs/data.md) lists every read, write, store and cost.
 
 ## If you already use reload hooks
@@ -66,7 +73,7 @@ Hooks that re-inject a skill at session start or remind the model on every promp
 
 ## Updates and install options
 
-Souffleur tells you about a newer release at session start. `"update": "auto"` installs signed releases, and the maintainer's public key is in [docs/updates.md](docs/updates.md#signed-releases). To have updates reach running sessions without a restart, install from a release tag into your skills folder:
+Souffleur tells you about a newer release at session start. `"update": "auto"` installs signed releases (folder installs only), and the maintainer's public key is in [docs/updates.md](docs/updates.md#signed-releases). To have updates reach running sessions without a restart, uninstall the marketplace plugin first (`claude plugin uninstall skill-souffleur@skill-souffleur`), then install from a release tag into your skills folder:
 
 ```
 git clone --branch v0.2.8 https://github.com/r4KK4n/skill-souffleur ~/.claude/skills/skill-souffleur
