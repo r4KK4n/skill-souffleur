@@ -10,7 +10,7 @@ const T = Date.UTC(2026, 10, 26, 8, 0)
 const config: Config = {
   mode: 'enforce',
   needs: { prose: { for: 'readers', what: 'Writing text people read.' } },
-  trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true,
+  trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true, update: 'notify',
   skills: {
     'terse:terse-mode': { always: true, from: 'user' },
     'writing-guide': { need: 'prose', from: 'user' },

@@ -10,6 +10,8 @@ type FileConfig = {
   notes: Note[]
   learn?: { skills: boolean }
   notices?: boolean
+  update?: 'notify' | 'auto' | 'off'
+  updateSigner?: string
   /** Every skill and need key the file spells out, valid or not, for clash checks. */
   skillKeys: string[]
   needKeys: string[]
@@ -307,7 +309,7 @@ function parseFile(text: string, source: Origin, errors: string[], extraNeeds: r
 
   for (const key of Object.keys(obj)) {
     if (key === 'skills' || key === 'needs') continue
-    if (key === 'mode' || key === 'trustProjects' || key === 'rules' || key === 'notes' || key === 'learn' || key === 'notices' || key === 'projects') {
+    if (key === 'mode' || key === 'trustProjects' || key === 'rules' || key === 'notes' || key === 'learn' || key === 'notices' || key === 'update' || key === 'updateSigner' || key === 'projects') {
       if (source === 'project') fail(`${key} is only allowed in the user config; ignored`)
       continue
     }
@@ -343,6 +345,14 @@ function parseFile(text: string, source: Origin, errors: string[], extraNeeds: r
   if (source === 'user' && obj.notices !== undefined) {
     if (typeof obj.notices === 'boolean') file.notices = obj.notices
     else fail('notices: must be true or false; ignored')
+  }
+  if (source === 'user' && obj.update !== undefined) {
+    if (obj.update === 'notify' || obj.update === 'auto' || obj.update === 'off') file.update = obj.update
+    else fail('update: must be "notify", "auto" or "off"; ignored')
+  }
+  if (source === 'user' && obj.updateSigner !== undefined) {
+    if (typeof obj.updateSigner === 'string' && /^(ssh-|ecdsa-|sk-)\S*( |$)/.test(obj.updateSigner) && !hasLineBreak(obj.updateSigner)) file.updateSigner = obj.updateSigner
+    else fail('updateSigner: must be an SSH public key line; ignored')
   }
   if (source === 'user' && obj.learn !== undefined) {
     const l = obj.learn
@@ -517,7 +527,7 @@ export function parseConfig(
   root?: string,
 ): { config: Config; errors: string[] } {
   const errors: string[] = []
-  const config: Config = { mode: 'observe', skills: {}, needs: {}, trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true }
+  const config: Config = { mode: 'observe', skills: {}, needs: {}, trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true, update: 'notify' }
 
   const read = (source: Origin, text: string | undefined): FileConfig | undefined => {
     if (text === undefined) return undefined
@@ -548,6 +558,8 @@ export function parseConfig(
     if (user.trustProjects) config.trustProjects = user.trustProjects
     if (user.learn) config.learn = user.learn
     if (user.notices !== undefined) config.notices = user.notices
+    if (user.update !== undefined) config.update = user.update
+    if (user.updateSigner !== undefined) config.updateSigner = user.updateSigner
     config.rules = user.rules
     config.notes = user.notes
     config.userNeeds = Object.keys(user.needs)

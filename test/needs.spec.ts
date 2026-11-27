@@ -16,7 +16,7 @@ test('neededSkills keeps config order and includes always skills', () => {
   const config: Config = {
     mode: 'observe',
     needs,
-    trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true,
+    trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true, update: 'notify',
     skills: {
       a: { need: 'ui', from: 'user' },
       b: { always: true, from: 'user' },
@@ -31,7 +31,7 @@ test('neededSkills keeps config order and includes always skills', () => {
 
 test('neededSkills leaves out skills excluded in the root, extras included', () => {
   const config: Config = {
-    mode: 'observe', needs, trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true,
+    mode: 'observe', needs, trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true, update: 'notify',
     skills: { a: { always: true, from: 'user', notIn: ['/work/p'] }, b: { need: 'ui', from: 'user' }, c: { from: 'user', notIn: ['/work/p'] } },
   }
   assert.deepEqual(neededSkills(config, { ui: {} }, ['c'], '/work/p/'), ['b'])

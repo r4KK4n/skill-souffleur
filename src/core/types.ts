@@ -37,6 +37,10 @@ export type Config = {
   learn: { skills: boolean }
   /** Session notices in the transcript. Only the user file sets it. */
   notices: boolean
+  /** Release notice and install: notify, auto or off. Only the user file sets it. */
+  update: 'notify' | 'auto' | 'off'
+  /** SSH public key line that must have signed a release tag for auto to install it. Only the user file sets it. */
+  updateSigner?: string
   /** The need names the user file defines: proposals may name only these. */
   userNeeds?: string[]
   /** The need names only the project file defines: they count only for a trusted root. */

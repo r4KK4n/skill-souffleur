@@ -6,6 +6,7 @@ import type { Proposal } from './proposals.ts'
 import { checkReply, replySkill, reminderLine } from './reply.ts'
 import { checkRules, contextNotes, ruleKind, ruleSkillNames } from './rules.ts'
 import { renderTable } from './status.ts'
+import type { UpdateInfo } from './status.ts'
 import type { ModelUse } from './cost.ts'
 import type { Audience, Config, NeedName, SkillName } from './types.ts'
 
@@ -160,8 +161,8 @@ export function normalizeSession(s: Session): Session {
   return missing.length ? ({ ...s, ...Object.fromEntries(missing) } as Session) : s
 }
 
-export function statusText(config: Config, session: Session, now: number, root?: string, total?: ModelUse): string {
-  return renderTable(config, session, now, root, total)
+export function statusText(config: Config, session: Session, now: number, root?: string, total?: ModelUse, update?: UpdateInfo): string {
+  return renderTable(config, session, now, root, total, update)
 }
 
 const lastN = <T>(list: T[], item: T): T[] => [...list, item].slice(-KEEP)

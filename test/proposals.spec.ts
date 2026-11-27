@@ -5,7 +5,7 @@ import { addEntry, answer, describeProposal, enqueue, makeProposal, nextQuestion
 import type { Proposal } from '../src/core/proposals.ts'
 import type { Config, Note, Rule } from '../src/core/types.ts'
 
-const config: Config = { mode: 'observe', skills: {}, needs: { ui: { for: 'users', what: 'Building a screen.' } }, trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true }
+const config: Config = { mode: 'observe', skills: {}, needs: { ui: { for: 'users', what: 'Building a screen.' } }, trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true, update: 'notify' }
 const fresh = () => initSession(config, 's1', 0, 'clear')
 const ruleRaw = (skill: string) => ({ kind: 'rule', before: { tools: ['Agent'] }, skill })
 const prop = (raw: unknown, from = 'slip'): Proposal => {
