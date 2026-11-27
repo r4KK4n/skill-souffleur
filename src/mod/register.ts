@@ -96,10 +96,19 @@ async function homeOf($: Dollar): Promise<string | undefined> {
  * `CLAUDE_CONFIG_DIR` when set, else `<home>/.claude`. Every path under the user's folder is built from this.
  */
 async function userDir($: Dollar): Promise<string | undefined> {
-  const cfg: string | undefined = await $.env.get('CLAUDE_CONFIG_DIR').catch(() => undefined)
-  if (cfg?.trim()) return dropSlash(cfg.trim())
+  const cfg = await configDirEnv($)
+  if (cfg) return cfg
   const home = await homeOf($)
   return home ? `${dropSlash(home)}/.claude` : undefined
+}
+
+/** `CLAUDE_CONFIG_DIR` when it is an absolute folder (`/x`, `X:\`, `X:/` or UNC `\\`) other than the root; otherwise undefined: a relative, blank or root value is ignored. */
+async function configDirEnv($: Dollar): Promise<string | undefined> {
+  const raw: string | undefined = await $.env.get('CLAUDE_CONFIG_DIR').catch(() => undefined)
+  const cfg = raw?.trim()
+  if (!cfg || !/^(\/|[A-Za-z]:[\\/]|\\\\)/.test(cfg)) return undefined
+  const dir = dropSlash(cfg)
+  return /^([A-Za-z]:)?[\\/]*$/.test(dir) ? undefined : dir
 }
 
 /** The user file as shown to the person (`~` for the home folder), for texts that name it. */
@@ -112,8 +121,9 @@ const dirOf = (path: string) => path.slice(0, Math.max(path.lastIndexOf('/'), pa
 const fileExists = async ($: Dollar, path: string): Promise<boolean> => {
   try {
     return Boolean(await $.fs.exists(path))
-  } catch {
-    return false
+  } catch (err) {
+    // Only a plain "not found" says it is not there; any other failure keeps the configured path.
+    return !/ENOENT|not found/i.test(message(err))
   }
 }
 
@@ -125,9 +135,9 @@ async function userConfig($: Dollar): Promise<{ path: string; dir: string; legac
   const dir = await userDir($)
   if (!dir) return undefined
   const path = `${dir}/souffleur.json`
-  const cfg: string | undefined = await $.env.get('CLAUDE_CONFIG_DIR').catch(() => undefined)
+  const cfg = await configDirEnv($)
   const home = await homeOf($)
-  if (cfg?.trim() && home) {
+  if (cfg && home) {
     const old = `${dropSlash(home)}/.claude/souffleur.json`
     if (old !== path && !(await fileExists($, path)) && (await fileExists($, old))) return { path: old, dir, legacy: dir }
   }
@@ -344,28 +354,35 @@ async function realOf($: Dollar, path: string): Promise<string> {
   }
 }
 
-/** True when Claude Code owns the plugin root: its real path lies under the real `<user config dir>/plugins/` or equals the real path of an `installPath` in `installed_plugins.json`. A missing or unreadable file means no ownership found; an unknown home folder counts as owned (fail safe: no install). */
+/** True when Claude Code owns the plugin root: its real path lies under the real `<user config dir>/plugins/` or `~/.claude/plugins/` or equals the real path of an `installPath` in `installed_plugins.json`. A missing or unreadable file means no ownership found; an unknown home folder counts as owned (fail safe: no install). */
 async function ownedByMarketplace($: Dollar): Promise<boolean> {
   const dir = await userDir($)
-  // collapsePath reads `/` only: a Windows-style folder cannot be compared, so it counts as owned (no install).
-  if (!dir || dir.includes('\\')) return true
-  const plugins = `${collapsePath(dir)}/plugins`
-  const realPlugins = await realOf($, plugins)
+  const home = await homeOf($)
+  // collapsePath reads `/` only: a folder that does not start with `/` (a drive path, `\`) cannot be compared, so it counts as owned (no install).
+  const plain = (p: string | undefined): p is string => p !== undefined && p.startsWith('/') && !p.includes('\\')
+  if (!plain(dir) || !plain(home)) return true
+  // Claude Code may keep plugins in the configured folder or in `~/.claude`: both count.
+  const folders = [...new Set([`${collapsePath(dir)}/plugins`, `${collapsePath(home)}/.claude/plugins`])]
   const roots = new Set([collapsePath($.plugin.root), await realOf($, $.plugin.root)])
-  if ([...roots].some((r) => underDir(r, plugins) || underDir(r, realPlugins))) return true
-  try {
-    const listed: unknown = parseJson(await $.fs.read(`${plugins}/installed_plugins.json`))
-    const all = (listed as { plugins?: Record<string, unknown> } | null)?.plugins ?? {}
-    for (const copies of Object.values(all)) {
-      if (!Array.isArray(copies)) continue
-      for (const c of copies) {
-        const p: unknown = (c as { installPath?: unknown } | null)?.installPath
-        if (typeof p !== 'string') continue
-        if (roots.has(collapsePath(p)) || roots.has(await realOf($, p))) return true
+  for (const plugins of folders) {
+    const realPlugins = await realOf($, plugins)
+    if ([...roots].some((r) => underDir(r, plugins) || underDir(r, realPlugins))) return true
+  }
+  for (const plugins of folders) {
+    try {
+      const listed: unknown = parseJson(await $.fs.read(`${plugins}/installed_plugins.json`))
+      const all = (listed as { plugins?: Record<string, unknown> } | null)?.plugins ?? {}
+      for (const copies of Object.values(all)) {
+        if (!Array.isArray(copies)) continue
+        for (const c of copies) {
+          const p: unknown = (c as { installPath?: unknown } | null)?.installPath
+          if (typeof p !== 'string') continue
+          if (roots.has(collapsePath(p)) || roots.has(await realOf($, p))) return true
+        }
       }
+    } catch {
+      // No file or not JSON: nothing owns the folder.
     }
-  } catch {
-    // No file or not JSON: nothing owns the folder.
   }
   return false
 }

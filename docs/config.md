@@ -4,7 +4,7 @@ The reference for `~/.claude/souffleur.json` (the user file) and a project's `.c
 
 ## Where the user file lives
 
-The user file sits in your Claude folder: `~/.claude` (`%USERPROFILE%\.claude` on Windows, where `HOME` is not set), or the folder named by `CLAUDE_CONFIG_DIR` when that is set. Souffleur reads and writes `settings.json`, `CLAUDE.md`, the memory index, `plugins/installed_plugins.json` and its own backups in the same folder.
+The user file sits in your Claude folder: `~/.claude` (`%USERPROFILE%\.claude` on Windows, where `HOME` is not set), or the folder named by `CLAUDE_CONFIG_DIR` when that is set. Souffleur reads `CLAUDE.md`, the memory index and `plugins/installed_plugins.json` there, writes its own `souffleur.json` and backups there, and writes `settings.json` only through `/souffleur migrate` after your answer. `CLAUDE_CONFIG_DIR` counts only as an absolute folder (not the root); a relative, blank or root value is ignored and `~/.claude` is used. Plugin ownership checks look in both the configured folder and `~/.claude/plugins`.
 
 If you set `CLAUDE_CONFIG_DIR` after you already had a file in `~/.claude`, and `<CLAUDE_CONFIG_DIR>/souffleur.json` does not exist, Souffleur keeps using `~/.claude/souffleur.json` so your setup does not disappear. `/souffleur` then shows once per session: `Config: using ~/.claude/souffleur.json; CLAUDE_CONFIG_DIR is <dir>. Move the file there to follow it.` Souffleur never moves or copies the file itself. Once `<CLAUDE_CONFIG_DIR>/souffleur.json` exists, it wins and the old file is ignored.
 
