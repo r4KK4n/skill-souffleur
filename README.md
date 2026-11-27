@@ -4,7 +4,7 @@ Keeps the skills a Claude Code session needs loaded across compaction and resume
 
 It is for people who rely on a few long skills (a writing guide, a design checklist, a rule set) in long sessions. Claude Code cuts a skill's text during compaction, and after a resume plus compaction it does not bring the text back. The model then works without rules it followed an hour earlier, and Claude Code does not say so. Souffleur keeps a ledger of the skills a session has loaded, notices when one is cut or dropped, and asks the model to load it again when the current task needs it. [docs/background.md](docs/background.md) has the measurements and the upstream reports.
 
-Version 0.2.8, tag `v0.2.8`, verified on Claude Code 2.1.332. Souffleur is a Claude Code mod, TypeScript that runs inside Claude Code through its early-access mod API, so a Claude Code update can break it until it is adapted. It is provided as is. [docs/compatibility.md](docs/compatibility.md) lists what was checked on which version and how.
+Version 0.2.9, tag `v0.2.9`, verified on Claude Code 2.1.332. Souffleur is a Claude Code mod, TypeScript that runs inside Claude Code through its early-access mod API, so a Claude Code update can break it until it is adapted. It is provided as is. [docs/compatibility.md](docs/compatibility.md) lists what was checked on which version and how.
 
 ## Quick start
 
@@ -34,7 +34,7 @@ Version 0.2.8, tag `v0.2.8`, verified on Claude Code 2.1.332. Souffleur is a Cla
    - ui (since 09:35)
 
    Small model: 14 calls, 9.1k in / 0.2k out, about $0.01 this session (total 120 calls, about $0.09). Estimate at list price.
-   Version 0.2.8 · latest 0.2.8 · checked 08:55 · update: notify
+   Version 0.2.9 · latest 0.2.9 · checked 08:55 · update: notify
 
    Claude Code 2.1.332
    ```
@@ -76,7 +76,7 @@ Hooks that re-inject a skill at session start or remind the model on every promp
 Souffleur tells you about a newer release at session start. `"update": "auto"` installs signed releases (folder installs only), and the maintainer's public key is in [docs/updates.md](docs/updates.md#signed-releases). To have updates reach running sessions without a restart, uninstall the marketplace plugin first (`claude plugin uninstall skill-souffleur@skill-souffleur`), then install from a release tag into your skills folder:
 
 ```
-git clone --branch v0.2.8 https://github.com/r4KK4n/skill-souffleur ~/.claude/skills/skill-souffleur
+git clone --branch v0.2.9 https://github.com/r4KK4n/skill-souffleur ~/.claude/skills/skill-souffleur
 ```
 
 ## Uninstall and pause
@@ -91,7 +91,7 @@ git clone --branch v0.2.8 https://github.com/r4KK4n/skill-souffleur ~/.claude/sk
 
 ## Status
 
-- Works and has tests: the ledger, restores after compaction and resume, need detection, gates, duties, rules and notes, `/souffleur`, signed updates. Release tags `v0.1.0` to `v0.2.8`.
+- Works and has tests: the ledger, restores after compaction and resume, need detection, gates, duties, rules and notes, `/souffleur`, signed updates. Release tags `v0.1.0` to `v0.2.9`.
 - Not verified live: the dialogs of `init`, `migrate` and proposals have not run end to end in a live session, and the band in the apps was checked with the test kit only. See [docs/data.md](docs/data.md#limits).
 - Next: project rule files, not only skills ([#42](https://github.com/r4KK4n/skill-souffleur/issues/42)); see the other [open issues](https://github.com/r4KK4n/skill-souffleur/issues).
 
