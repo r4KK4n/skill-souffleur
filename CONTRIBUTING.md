@@ -26,13 +26,19 @@ claude plugin test .
 - Add or update tests for any change in behaviour.
 - Write commit messages in the [Conventional Commits](https://www.conventionalcommits.org/) format, for example `fix: keep the ledger after a resumed session`.
 - Update `CHANGELOG.md` under "Unreleased" if users will notice the change.
-- If users will notice the change, also raise `version` in `.claude-plugin/plugin.json` and in the plugin entry of `.claude-plugin/marketplace.json` (patch for a fix, minor for a new feature). Claude Code compares this number, so without a new one `claude plugin update` reports "already at the latest version" and the change never reaches an installed copy. A test fails when the two files differ.
+- If users will notice the change, also raise `version` in `.claude-plugin/plugin.json` and in the plugin entry of `.claude-plugin/marketplace.json` (see Versions and releases for which part to raise). Claude Code compares this number, so without a new one `claude plugin update` reports "already at the latest version" and the change never reaches an installed copy. A test fails when the two files differ.
 
 Pull requests are merged with squash, so the pull request title becomes the commit message. Write it in the same format.
 
 ## Versions and releases
 
-The version in `plugin.json` and `marketplace.json` follows [Semantic Versioning](https://semver.org/). Do not touch the `CHANGELOG.md` headings in a pull request: the maintainer moves the "Unreleased" entries under the new version when tagging. The maintainer also creates the tag `v<version>`, for example `v0.1.0`.
+The version in `plugin.json` and `marketplace.json` follows [Semantic Versioning](https://semver.org/). While the major version is 0, the rules are:
+
+- A new feature or a change in behaviour raises the minor version (0.3.0).
+- A fix raises the patch version.
+- A change to a config key that breaks existing files raises the minor version, and the `CHANGELOG.md` entry names the key.
+
+Releases are cut from `main` with a signed tag. Pushing the tag `v<version>` starts `.github/workflows/release.yml`, which creates the GitHub release from the matching `CHANGELOG.md` section and fails when that section is missing. Do not touch the `CHANGELOG.md` headings in a pull request: the maintainer moves the "Unreleased" entries under the new version when tagging. The maintainer also creates the tag `v<version>`, for example `v0.1.0`.
 
 ### Cutting a release
 
@@ -50,7 +56,7 @@ The maintainer does these steps after the version and changelog are on `main`:
    ```
 
    `git verify-tag` needs an `allowed_signers` file that lists the public key from [docs/updates.md](docs/updates.md#signed-releases).
-4. Push the tag with `git push origin v0.2.9`.
+4. Push the tag with `git push origin v0.2.9`. The release workflow then publishes the release.
 
 Tags from `v0.2.4` on are signed with the key in [docs/updates.md](docs/updates.md#signed-releases); earlier tags are not. Automatic updates install only tags that verify against the key a user lists as `updateSigner`.
 
