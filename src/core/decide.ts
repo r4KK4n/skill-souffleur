@@ -60,7 +60,7 @@ export type Session = {
   classifyFails?: number
   /** Call B runs that failed in a row (a prompt where A said code work); prompts where B did not run neither count nor clear. */
   workFails?: number
-  /** Prompts left that skip the classifier after call A failed `FAIL_LIMIT` times in a row; the first prompt after it probes once (kept over reload and resume). */
+  /** Prompts left that skip the classifier after call A failed `FAIL_LIMIT` times in a row; the first prompt after it probes once (kept over reload, cleared by a resume). */
   classifyPause?: number
   learnFails?: number
   /** When this copy was stored last, so old copies in the plugin store can be removed. */
@@ -202,7 +202,7 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
       // a resume (a new process) restarts them.
       if (e.start === 'resume' || e.start === 'reload') {
         const counters = e.start === 'resume'
-          ? { liveAgents: [], mainSkillCalls: [], agentDenied: false, learnCalls: [], fieldDenied: [] }
+          ? { liveAgents: [], mainSkillCalls: [], agentDenied: false, learnCalls: [], fieldDenied: [], classifyPause: 0 }
           : {}
         return {
           session: { ...s, paused: false, lastSeen: e.now, ...counters, ...(e.version === undefined ? {} : { version: e.version }) },

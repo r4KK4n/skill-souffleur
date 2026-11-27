@@ -18,7 +18,13 @@ const LATE = '\0late'
 
 /** The first `head` and the last `tail` characters of a long text, joined by a line with an ellipsis; a text that fits stays as it is. */
 export function clip(text: string, head = 1500, tail = 500): string {
-  return text.length <= head + tail ? text : `${text.slice(0, head)}\n…\n${text.slice(text.length - tail)}`
+  if (text.length <= head + tail) return text
+  // A cut between the two halves of a surrogate pair would leave a lone half: move the cut off it.
+  const high = (i: number) => text.charCodeAt(i) >= 0xd800 && text.charCodeAt(i) <= 0xdbff
+  const low = (i: number) => text.charCodeAt(i) >= 0xdc00 && text.charCodeAt(i) <= 0xdfff
+  const end = high(head - 1) ? head - 1 : head
+  const start = text.length - tail
+  return `${text.slice(0, end)}\n…\n${text.slice(low(start) ? start + 1 : start)}`
 }
 
 /**
