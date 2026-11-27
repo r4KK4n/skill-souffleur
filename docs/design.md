@@ -149,7 +149,7 @@ After any compaction every `loaded` skill becomes `stale`. Measuring which skill
 
 ### Needs
 
-- On every user prompt (`prompt.submit`, not prompts submitted by a plugin), the adapter makes two classifier calls in parallel; call A has a budget of 2.5 s and call B 4 s, both from the start (see Audience): what the agent will produce, and, for code or repo work, which `work` need applies. A call that is late or fails gives no verdict for the prompt. Each call sends at most the first 1,500 and the last 500 characters of the prompt, joined by a line with an ellipsis, and passes its budget to `$.model.complete` as `timeoutMs` (2,500 and 4,000), so a late request stops and is not billed on. The calls are skipped when every configured need is already active and none is dormant.
+- On every user prompt (`prompt.submit`, not prompts submitted by a plugin), the adapter makes two classifier calls in parallel; call A has a budget of 2.5 s and call B 4 s, both from the start (see Audience): what the agent will produce, and, for code or repo work, which `work` need applies. A call that is late or fails gives no verdict for the prompt. Each call sends at most the first 1,500 and the last 500 characters of the prompt, joined by a line with an ellipsis, and passes its budget to `$.model.complete` as `timeoutMs` (2,500 and 4,000), so a late request stops and is not billed on.
 - A matched need stays active across prompts that do not mention it. Work on a prototype spans many prompts that do not mention it again; dropping the need after one unrelated prompt would bring back the original problem. It ends by itself only after a long run of misses (see Status).
 - `/souffleur need ui` and `/souffleur drop ui` let the user set or clear a need by hand.
 

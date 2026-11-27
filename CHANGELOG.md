@@ -12,7 +12,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
-- The classifier is bounded. Each call gets at most the first 1,500 and the last 500 characters of a prompt, and its request has its own timeout (2.5 s for call A, 4 s for call B), so it stops instead of running on and being billed. After three failed runs of call A the classifier is skipped for the next 10 prompts, then tried once: a good answer ends the pause, a failure starts another one. The calls are also skipped when every configured need is already active (#90).
+- The classifier is bounded. Each call gets at most the first 1,500 and the last 500 characters of a prompt, and its request has its own timeout (2.5 s for call A, 4 s for call B), so it stops instead of running on and being billed. After three failed runs of call A the classifier is skipped for the next 10 prompts, then tried once: a good answer ends the pause, a failure starts another one (#90).
 
 ### Fixed
 

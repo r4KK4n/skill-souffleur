@@ -2225,10 +2225,9 @@ export const register: Register = (on) => {
       const trusted = isTrustedRoot(config, l.root)
       const needs = Object.fromEntries(Object.entries(config.needs).filter(([name]) => trusted || !(config.projectNeeds ?? []).includes(name)))
       const wanted = fromUser && answered === undefined && !session.paused && Object.keys(needs).length > 0
-      // Nothing to learn when every configured need is already active and none is dormant; a pause after repeated failures skips the calls too.
-      const settled = Object.keys(needs).every((name) => session.needs[name] !== undefined && session.needs[name]!.dormant !== true)
-      const breaker = wanted && !settled && (session.classifyPause ?? 0) > 0
-      const classify = wanted && !settled && !breaker
+      // After repeated failures of call A the classifier pauses for a number of prompts.
+      const breaker = wanted && (session.classifyPause ?? 0) > 0
+      const classify = wanted && !breaker
       // The skill listing runs beside the classification and gives up after its own short budget.
       const listing = fromUser ? safe($, 'installed', undefined, () => refreshInstalled($)) : undefined
       const verdict = classify

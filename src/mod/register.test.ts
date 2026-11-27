@@ -3984,14 +3984,6 @@ test('after three failed runs the classifier pauses for 10 prompts, then probes 
   expect(w.classifyCalls()).toBe(12)
 })
 
-test('no classifier call when every configured need is already active', async ($, on) => {
-  const w = world(on, { [USER_FILE]: COST_CFG }, { classify: 'no-match' })
-  await start($)
-  await run($, 'need n')
-  await $.prompt.submit({ text: 'fix the build' })
-  expect(w.classifyCalls()).toBe(0)
-})
-
 test('a classifier answer with whitespace and a period still starts the need', async ($, on) => {
   const w = world(on, { [USER_FILE]: COST_CFG }, { classify: (labels) => (labels?.includes('chat-reply') ? ' code-or-repo-work.\n' : 'n.') })
   await start($)
