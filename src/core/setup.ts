@@ -225,7 +225,7 @@ export function applyChoice(
 ): { config: unknown; note?: string; pruned?: string[] } {
   const problem = configProblem(userConfig)
   if (problem) return { config: userConfig, note: `${skill}: the config file was not changed because ${problem}.` }
-  const inStandard = isObject(userConfig) && isObject(userConfig.skills) && skill in userConfig.skills
+  const inStandard = isObject(userConfig) && isObject(userConfig.skills) && Object.hasOwn(userConfig.skills, skill)
   if (!inStandard && isObject(userConfig) && isObject(userConfig.projects) && Object.values(userConfig.projects).some((b) => isObject(b) && isObject(b.skills) && Object.hasOwn(b.skills, skill))) {
     return { config: userConfig, note: `${skill} is already a skill of a project block, so it was not added to the standard. Rename or remove it there first.` }
   }
