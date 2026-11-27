@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- A failing store write can no longer drop a decision: the session copy is written at turn end, after a compaction, on a proposal change and at session end instead of on every tool call, a failed copy or status update only shows as degraded, and stored copies are capped at 50 and expire after 14 days (#87).
+
 ## [0.2.8] - 2026-11-27
 
 - A skill that is not installed in this project no longer counts as needing attention; the band in the apps stays hidden for it.
