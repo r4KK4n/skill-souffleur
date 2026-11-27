@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Security
+
+- A command without an `origin` is no longer treated as the person's: `/souffleur update`, `accept`, `pause` and the other state-changing verbs now refuse it. Only `composer`, `bridge` and `sdk` count (#93).
+
 ### Fixed
 
 - Every write of `~/.claude/souffleur.json` now goes through one path: a uniquely named temporary copy that is parsed back and moved over the file (a symlinked file is written through), a re-read right before the move with up to 3 retries when another session saved meanwhile (far fewer lost entries; a save in the instant between the re-read and the move can still win), one backup per session start with the newest 3 kept (only `.bak-<13-digit ms>` copies are pruned), and a reload of the config at the next prompt when either config file changed on disk (#91).

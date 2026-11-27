@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { isFromUser, presentArgs, toolFields } from '../src/mod/map.ts'
+import { isFromUser, isUserOrigin, presentArgs, toolFields } from '../src/mod/map.ts'
 
 const input = (extra: Record<string, unknown> = {}) => ({ text: 'hello', origin: { kind: 'composer' }, ...extra })
 
@@ -24,6 +24,12 @@ test('toolFields reads the flat string arguments and ignores other types', () =>
 
 test('isFromUser treats a prompt without origin as typed (the test kit sets none)', () => {
   assert.equal(isFromUser({ text: 'hello' } as never), true)
+})
+
+test('isUserOrigin counts composer, bridge and sdk, and nothing else, not even a missing origin', () => {
+  for (const kind of ['composer', 'bridge', 'sdk']) assert.equal(isUserOrigin({ origin: { kind } }), true)
+  for (const kind of ['plugin', 'peer', 'scheduled-trigger']) assert.equal(isUserOrigin({ origin: { kind } }), false)
+  assert.equal(isUserOrigin({}), false)
 })
 
 test('presentArgs drops reserved metadata', () => {

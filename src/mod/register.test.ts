@@ -770,7 +770,7 @@ const SETTINGS = JSON.stringify(
   2,
 )
 const PICKS = JSON.stringify({ skills: [{ name: 'ui-checklist', need: 'ui', needText: 'Building a screen.' }] })
-const run = async ($: any, args: string) => (await $.command.run({ command: 'souffleur', args })).text as string
+const run = async ($: any, args: string) => (await $.command.run({ command: 'souffleur', args, origin: COMPOSER })).text as string
 const SKILLS = ['writing-guide', 'ui-checklist', 'pdf']
 
 test('init asks per skill and writes the user file', async ($, on) => {
@@ -2883,7 +2883,7 @@ test('the Agent brief check leaves out a skill excluded in this project', async 
   const cfg = JSON.stringify({ mode: 'enforce', skills: { 'ui-design': { need: 'ui', notIn: ['/work/proj'] }, 'writing-guide': { need: 'ui' } }, needs: { ui: 'Designing something a user sees.' } })
   world(on, { [USER_FILE]: cfg })
   await start($)
-  await $.command.run({ command: 'souffleur', args: 'need ui' })
+  await $.command.run({ command: 'souffleur', args: 'need ui', origin: COMPOSER })
   const r = await $.tool.call({ tool: 'Agent', prompt: 'do it', description: 'd', subagent_type: 'general-purpose' } as never)
   expect(JSON.stringify(r)).toMatch(/Configured skills: writing-guide\./)
 })
@@ -3373,6 +3373,14 @@ test('block and unblock answer for unknown names, and write nothing', async ($, 
   expect(await run($, 'block nothing-here')).toBe("Souffleur: nothing-here is not in your standard or this project's block.")
   expect(await run($, 'block bad name!')).toMatch(/not a valid name/)
   expect(await run($, 'block')).toMatch(/usage/i)
+  expect(w.writes.length).toBe(0)
+})
+
+test('/souffleur pause without an origin is refused', async ($, on) => {
+  const w = world(on, { [USER_FILE]: BLOCKABLE })
+  await start($)
+  const r = await $.command.run({ command: 'souffleur', args: 'pause' } as never)
+  expect(String(r.text)).toMatch(/only the user can run \/souffleur pause/)
   expect(w.writes.length).toBe(0)
 })
 
@@ -4479,7 +4487,7 @@ test('update auto: never delays session.start', async ($, on) => {
   await start($)
 })
 
-const runUser = async ($: any, args: string, origin?: unknown) => (await $.command.run({ command: 'souffleur', args, ...(origin ? { origin } : {}) })).text as string
+const runUser = async ($: any, args: string, origin: unknown = COMPOSER) => (await $.command.run({ command: 'souffleur', args, ...(origin ? { origin } : {}) })).text as string
 
 test('/souffleur update: installs an unsigned tag when no signer is set, with the unsigned wording', async ($, on) => {
   const w = world(on, SETUP, { stored: QUIET, run: gitRun() })
