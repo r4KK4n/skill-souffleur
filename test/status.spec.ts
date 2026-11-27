@@ -317,3 +317,38 @@ test('absent rows read not needed yet in the table', () => {
   assert.match(out, /^\| writing-guide \| not needed yet \|/m)
   assert.doesNotMatch(out, /\| absent \|/)
 })
+
+const used = (over: Partial<NonNullable<Session['modelUse']>> = {}): NonNullable<Session['modelUse']> => ({ calls: 42, input: 18_000, output: 1_200, cacheRead: 300, cacheWrite: 0, usd: 0.03, ...over })
+
+test('status line appends the session dollars and omits them at 0 calls', () => {
+  const s0 = fresh()
+  const s: Session = { ...s0, ledger: skillLoaded(s0.ledger, 'writing-guide', T1, 'matched prompt') }
+  assert.equal(statusLine({ ...s, modelUse: used() }, 'enforce'), '1 loaded · ~$0.03')
+  assert.equal(statusLine({ ...s, modelUse: used({ calls: 0, usd: 0 }) }, 'enforce'), '1 loaded')
+  assert.equal(statusLine({ ...s, modelUse: used({ usd: 0.001 }) }, 'enforce'), '1 loaded · < $0.01')
+  assert.equal(statusLine({ ...s, modelUse: used({ usd: 0, unpriced: ['mystery-1'] }) }, 'enforce'), '1 loaded · $ unknown')
+  assert.equal(statusLine({ ...s, modelUse: used() }, 'observe'), 'observe · 1 loaded · ~$0.03')
+})
+
+test('status line with notices off still shows the cost', () => {
+  const quiet: Config = { ...config, notices: false }
+  const s0 = fresh(quiet)
+  const s: Session = { ...s0, ledger: skillLoaded(s0.ledger, 'writing-guide', T1, 'matched prompt'), modelUse: used() }
+  assert.equal(statusLine(s, 'enforce', 0, quiet), '1 loaded · ~$0.03')
+})
+
+test('table shows the small-model line after the reply check, with the total', () => {
+  const s: Session = { ...fresh(), modelUse: used(), replyCheck: { total: 3, over: 1, sinceReminder: 0 } }
+  const total = used({ calls: 310, usd: 0.21 })
+  const out = renderTable(config, s, T1, undefined, total)
+  assert.match(out, /^Small model: 42 calls, 18\.3k in \/ 1\.2k out, about \$0\.03 this session \(total 310 calls, about \$0\.21\)\. Estimate at list price\.$/m)
+  assert.ok(out.indexOf('Small model:') > out.indexOf('Reply check:') || !out.includes('Reply check:'))
+  assert.doesNotMatch(renderTable(config, fresh(), T1), /Small model/)
+})
+
+test('the status command reads the total from the event', () => {
+  const s: Session = { ...fresh(), modelUse: used() }
+  const r = decide(config, s, { type: 'command', now: T1, args: '', total: used({ calls: 310, usd: 0.21 }) })
+  const text = r.actions.flatMap((a) => (a.kind === 'reply' ? [a.text] : []))[0]!
+  assert.match(text, /\(total 310 calls, about \$0\.21\)/)
+})

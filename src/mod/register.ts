@@ -12,6 +12,8 @@ import type { Proposal } from '../core/proposals.ts'
 import { NO, YES_EVERYWHERE, YES_PROJECT, addEntry, answer, describeProposal, enqueue, findProposal, makeProposal, nextQuestion, parseReply, parseShaped, proposalLines, proposalNotice, shapePrompt } from '../core/proposals.ts'
 import { ruleSkillNames, sectionNotes } from '../core/rules.ts'
 import { statusLine } from '../core/status.ts'
+import { addUsage } from '../core/cost.ts'
+import type { ModelUse } from '../core/cost.ts'
 import type { Config, Note, Rule } from '../core/types.ts'
 import { notices, startNotice } from '../core/notices.ts'
 import { PLUGIN_VERSION } from './version.ts'
@@ -197,6 +199,47 @@ async function pruneStore($: Dollar, currentId: string): Promise<void> {
   } catch {
     // housekeeping only
   }
+}
+
+/** The fixed instruction of both classifier calls; the labels and the text go in the prompt. */
+const CLASSIFIER_SYSTEM = 'You are a classifier. Answer with exactly one of the labels you are given and nothing else.'
+
+/** Plugin store key of the small-model count over all sessions. */
+const TOTAL_KEY = 'modelUseTotal'
+
+const isUse = (v: unknown): v is ModelUse => typeof v === 'object' && v !== null && typeof (v as ModelUse).calls === 'number' && typeof (v as ModelUse).usd === 'number'
+
+/** The small-model count over all sessions; undefined when none is stored or the store fails. */
+async function readTotal($: Dollar): Promise<ModelUse | undefined> {
+  try {
+    const stored: unknown = await $.store.get(TOTAL_KEY)
+    return isUse(stored) ? stored : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Every small-model call goes through here. A call that came back is counted once in the session and once in the total,
+ * with its tokens when it was answered, however late it comes back. The total is read, changed and written (best effort:
+ * another process may add a call in between, and that call is lost). A failure to count never fails the caller.
+ */
+async function callModel($: Dollar, request: { model: string; [key: string]: unknown }): Promise<any> {
+  const r = await $.model.complete(request)
+  const usage = r?.isAnswered === true ? r.usage : undefined
+  try {
+    await update($, (_l, s) => ({ ...s, modelUse: addUsage(s.modelUse, request.model, usage) }))
+  } catch {
+    // the count is a courtesy
+  }
+  try {
+    await serial(async () => {
+      await $.store.set(TOTAL_KEY, addUsage(await readTotal($), request.model, usage))
+    })
+  } catch {
+    // the total is best effort
+  }
+  return r
 }
 
 /** Session reads and writes wait for each other: two hooks at the same moment must not both read the old state. */
@@ -475,7 +518,7 @@ async function runInit($: Dollar, l0: Loaded, only?: string[]): Promise<string> 
   let picks: Suggestion[] = []
   if (pool.length) {
     try {
-      const r = await $.model.complete({ model: 'haiku', prompt: picksPrompt(pool, needTexts(config.needs)) })
+      const r = await callModel($, { model: 'haiku', prompt: picksPrompt(pool, needTexts(config.needs)) })
       if (r.isAnswered) {
         picks = parsePicks(r.text, pool.map((x) => x.name), needTexts(config.needs))
         for (const name of parseSkips(r.text, pool.map((x) => x.name))) skips.add(name)
@@ -1397,7 +1440,7 @@ async function learnFrom($: Dollar, a: LearnAction): Promise<void> {
     if (l === undefined) return
     claimed = true
     const nonce = Math.random().toString(36).slice(2, 10)
-    const r = await $.model.complete({ model: 'haiku', system: EXTRACT_SYSTEM, prompt: extractPrompt(a.skill, text, nonce), maxTokens: 1500, timeoutMs: READ_TIMEOUT_MS })
+    const r = await callModel($, { model: 'haiku', system: EXTRACT_SYSTEM, prompt: extractPrompt(a.skill, text, nonce), maxTokens: 1500, timeoutMs: READ_TIMEOUT_MS })
     const origin = { name: a.skill, ...(a.source === undefined ? {} : { source: a.source }), ...(a.pluginName === undefined ? {} : { pluginName: a.pluginName }) }
     const found = r.isAnswered ? parseAnswer(r.text, origin, l.config, text) : undefined
     if (found === undefined) throw new Error('no usable answer')
@@ -1479,7 +1522,7 @@ async function runRule($: Dollar, text: string): Promise<string> {
   const { l } = await current($)
   let raw = ''
   try {
-    const r = await $.model.complete({ model: 'haiku', prompt: shapePrompt(text, l.config.needs) })
+    const r = await callModel($, { model: 'haiku', prompt: shapePrompt(text, l.config.needs) })
     if (r.isAnswered) raw = r.text
   } catch {
     // the words become a note
@@ -1708,7 +1751,10 @@ export const register: Register = (on) => {
         ? await classifyDeliverable(
             e.text,
             needs,
-            async (text, labels) => (await $.model.classify(text, labels)) ?? '',
+            async (text, labels) => {
+              const r = await callModel($, { model: 'haiku', system: CLASSIFIER_SYSTEM, prompt: `Labels: ${labels.join(', ')}\n\nText:\n${text}`, maxTokens: 10 })
+              return r.isAnswered ? r.text : ''
+            },
             (ms) => $.clock.sleep(ms),
           )
         : undefined
@@ -1867,7 +1913,8 @@ export const register: Register = (on) => {
         // Read the files again, so a hand edit applies at once.
         loaded = undefined
         await apply($, (l0) => ({ type: 'config', now: now(), errors: l0.errors }))
-        const { actions, l } = await apply($, (l0) => ({ type: 'command', now: now(), args: e.args ?? '', root: l0.root }))
+        const total = await readTotal($)
+        const { actions, l } = await apply($, (l0) => ({ type: 'command', now: now(), args: e.args ?? '', root: l0.root, ...(total === undefined ? {} : { total }) }))
         const text = actions.flatMap((a) => (a.kind === 'reply' ? [a.text] : []))[0]
         const verb = (e.args ?? '').trim().split(/\s+/)[0] ?? ''
         const note = '\n\nSouffleur is not set up: there is no ~/.claude/souffleur.json. Run /souffleur init to add one.'

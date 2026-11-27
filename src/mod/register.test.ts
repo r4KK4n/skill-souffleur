@@ -81,6 +81,16 @@ type Opts = {
   listMode?: 'hidden' | 'throws' | 'junk' | 'hangs'
   /** `$.ui.log` throws. */
   failLog?: boolean
+  /** The usage every answered `$.model.complete` returns. */
+  usage?: Record<string, number>
+  /** Every classifier request (call A and B). */
+  classifyRequests?: Record<string, unknown>[]
+  /** The classifier answers only after this resolves (a late answer). */
+  holdClassify?: Promise<void>
+  /** The classifier call comes back not answered. */
+  classifyRejected?: boolean
+  /** `$.store.set` of this key throws. */
+  failStoreKey?: string
   /** An Agent tool call stays open until this resolves, as a running subagent keeps it open. */
   holdAgent?: Promise<void>
   /** A dialog never answers and never rejects, as in a session whose client does not show it. */
@@ -106,6 +116,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   const storeData: Record<string, unknown> = opts.stored ?? {}
   on('store.get', (_, e) => ({ value: storeData[e.key] === undefined ? undefined : JSON.parse(JSON.stringify(storeData[e.key])) }) as never)
   on('store.set', (_, e) => {
+    if (opts.failStoreKey === e.key) throw new Error('disk full')
     storeData[e.key] = JSON.parse(JSON.stringify(e.value))
     return { value: undefined } as never
   })
@@ -163,15 +174,6 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
     return { value: text }
   })
   let classifyCalls = 0
-  on('model.classify', (_, e) => {
-    classifyCalls += 1
-    const labels = (e as { labels: readonly string[] }).labels
-    const raw = typeof opts.classify === 'function' ? opts.classify(labels) : (opts.classify ?? 'no-match')
-    // 'match' / 'no-match' stand for the old per-need answers: A answers code work, B picks the first need.
-    if (raw !== 'match' && raw !== 'no-match') return { value: raw }
-    if (labels.includes('chat-reply')) return { value: raw === 'match' ? 'code-or-repo-work' : 'chat-reply' }
-    return { value: raw === 'match' ? labels[0]! : 'none' }
-  })
   on('store.keys', () => ({ value: Object.keys(storeData) }) as never)
   on('ui.status', (_, e) => {
     statuses.push(e.text)
@@ -206,13 +208,23 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
     } as never
   })
   on('model.complete', (_, e) => {
-    const call = e as { system?: string; prompt?: string }
+    const call = e as { system?: string; prompt?: string; maxTokens?: number; model?: string }
+    if (/^Labels: /.test(call.prompt ?? '')) {
+      classifyCalls += 1
+      opts.classifyRequests?.push(e as Record<string, unknown>)
+      const labels = call.prompt!.split('\n')[0]!.slice('Labels: '.length).split(', ')
+      const raw = typeof opts.classify === 'function' ? opts.classify(labels) : (opts.classify ?? 'no-match')
+      // 'match' / 'no-match' stand for the old per-need answers: A answers code work, B picks the first need.
+      const text = raw !== 'match' && raw !== 'no-match' ? raw : labels.includes('chat-reply') ? (raw === 'match' ? 'code-or-repo-work' : 'chat-reply') : raw === 'match' ? labels[0]! : 'none'
+      const answer = () => ({ value: opts.classifyRejected ? { isAnswered: false, reason: 'api-error', status: 500, error: 'server_error', usage: {} } : { isAnswered: true, text, usage: opts.usage ?? {} } }) as never
+      return opts.holdClassify ? opts.holdClassify.then(answer) : answer()
+    }
     if (/checkable obligations/.test(call.system ?? '')) {
       opts.skillCalls?.push(String(call.prompt))
       opts.skillRequests?.push(e as Record<string, unknown>)
-      return Promise.resolve(opts.skillAnswer ? opts.skillAnswer(String(call.prompt)) : '[]').then((text) => (text === null ? ({ value: { isAnswered: false, usage: {} } } as never) : ({ value: { isAnswered: true, text, usage: {} } } as never)))
+      return Promise.resolve(opts.skillAnswer ? opts.skillAnswer(String(call.prompt)) : '[]').then((text) => (text === null ? ({ value: { isAnswered: false, usage: {} } } as never) : ({ value: { isAnswered: true, text, usage: opts.usage ?? {} } } as never)))
     }
-    return { value: { isAnswered: true, text: /Turn the user instruction/.test(String(call.prompt)) ? (opts.shaped ?? '') : (opts.proposals ?? '{"skills":[]}'), usage: {} } } as never
+    return { value: { isAnswered: true, text: /Turn the user instruction/.test(String(call.prompt)) ? (opts.shaped ?? '') : (opts.proposals ?? '{"skills":[]}'), usage: opts.usage ?? {} } } as never
   })
   on('tool.call', async (_, e) => {
     if (e.tool === 'Agent' && opts.holdAgent) await opts.holdAgent
@@ -3539,4 +3551,123 @@ test('block works on a user file that starts with a byte order mark', async ($, 
   await start($)
   expect(await run($, 'block writing-guide')).toMatch(/blocked in/)
   expect(JSON.parse(userWrites(w).at(-1)!.text).projects['/work/proj'].block).toEqual(['writing-guide'])
+})
+
+// --- Small-model cost (#64) ---
+
+const COST_CFG = JSON.stringify({ mode: 'enforce', skills: { g: { need: 'n' } }, needs: { n: { for: 'work', what: 'Something.' } } })
+const USAGE = { input_tokens: 100, output_tokens: 2, cache_read_input_tokens: 50, cache_creation_input_tokens: 0 }
+
+test('the classifier asks through complete with a fixed instruction, the labels and the text', async ($, on) => {
+  const requests: Record<string, unknown>[] = []
+  const w = world(on, { [USER_FILE]: COST_CFG }, { classify: 'match', usage: USAGE, classifyRequests: requests })
+  await start($)
+  await $.prompt.submit({ text: 'fix the build' })
+  expect(w.classifyCalls()).toBe(2)
+  const a = requests.find((r) => String(r.prompt).includes('chat-reply'))!
+  expect(a.model).toBe('haiku')
+  expect(a.maxTokens).toBe(10)
+  expect(String(a.system)).toMatch(/classifier/i)
+  expect(String(a.prompt)).toMatch(/^Labels: chat-reply, text-for-others, screen, code-or-repo-work\n\nText:\nWhat will the agent produce[\s\S]*Prompt:\nfix the build$/)
+  const b = requests.find((r) => !String(r.prompt).includes('chat-reply'))!
+  expect(String(b.prompt)).toMatch(/^Labels: n, none\n\nText:\n/)
+  expect(a.system).toBe(b.system)
+})
+
+test('a classifier answer with whitespace and a period still starts the need', async ($, on) => {
+  const w = world(on, { [USER_FILE]: COST_CFG }, { classify: (labels) => (labels?.includes('chat-reply') ? ' code-or-repo-work.\n' : 'n.') })
+  await start($)
+  await $.prompt.submit({ text: 'fix the build' })
+  expect(w.debugLogs.join('\n')).not.toMatch(/classifier/)
+})
+
+test('every classifier call is counted with its tokens in /souffleur, the status and the store total', async ($, on) => {
+  const w = world(on, { [USER_FILE]: COST_CFG }, { classify: 'match', usage: { input_tokens: 1_000_000, output_tokens: 0 } })
+  await start($)
+  await $.prompt.submit({ text: 'fix the build' })
+  expect(await table($)).toMatch(/^Small model: 2 calls, 2\.0M in \/ 0 out, about \$0\.20 this session \(total 2 calls, about \$0\.20\)\. Estimate at list price\.$/m)
+  expect(w.statuses.at(-1)).toMatch(/ · ~\$0\.20$/)
+  expect(w.stored['modelUseTotal']).toMatchObject({ calls: 2, input: 2_000_000, usd: 0.2 })
+})
+
+test('a rejected classifier call counts as a call without tokens', async ($, on) => {
+  const w = world(on, { [USER_FILE]: COST_CFG }, { classifyRejected: true, usage: USAGE })
+  await start($)
+  await $.prompt.submit({ text: 'fix the build' })
+  expect(w.classifyCalls()).toBeGreaterThan(0)
+  expect(await table($)).toMatch(/^Small model: \d calls, 0 in \/ 0 out,/m)
+  expect(w.debugLogs.join('\n')).toMatch(/classifier: rejected/)
+})
+
+test('a late classifier result after the timeout is counted once', async ($, on) => {
+  let release!: () => void
+  const hold = new Promise<void>((r) => { release = r })
+  const w = world(on, { [USER_FILE]: COST_CFG }, { classify: 'match', usage: USAGE, holdClassify: hold })
+  await start($)
+  const p = $.prompt.submit({ text: 'fix the build' })
+  await w.clock.advance(5000)
+  await p
+  expect(w.debugLogs.join('\n')).toMatch(/classifier: timeout/)
+  expect(await table($)).not.toMatch(/Small model/)
+  release()
+  await settle()
+  expect(await table($)).toMatch(/^Small model: 2 calls, 300 in \/ 4 out,/m)
+  await settle()
+  expect(await table($)).toMatch(/^Small model: 2 calls,/m)
+  expect(w.stored['modelUseTotal']).toMatchObject({ calls: 2 })
+})
+
+test('the learn call and the rule shaping call are counted', async ($, on) => {
+  world(on, { [USER_FILE]: ENFORCE }, { shaped: '{"kind":"note","text":"Always say hi."}', usage: USAGE })
+  await start($)
+  await mainLoad($, 'skill-a', 'Always do a.')
+  expect(await table($)).toMatch(/^Small model: 1 call, 150 in \/ 2 out,/m)
+  await run($, 'rule Always say hi')
+  expect(await table($)).toMatch(/^Small model: 2 calls, 300 in \/ 4 out,/m)
+})
+
+test('the status line shows the cost with notices off', async ($, on) => {
+  const cfg = JSON.stringify({ mode: 'enforce', notices: false, skills: { g: { need: 'n' } }, needs: { n: { for: 'work', what: 'Something.' } } })
+  const w = world(on, { [USER_FILE]: cfg }, { classify: 'match', usage: { input_tokens: 1_000_000 } })
+  await start($)
+  await $.prompt.submit({ text: 'fix the build' })
+  expect(w.statuses.at(-1)).toMatch(/ · ~\$0\.20$/)
+  expect(w.toasts).toEqual([])
+})
+
+test('no calls: no cost in the status and no line in /souffleur', async ($, on) => {
+  const w = world(on, { [USER_FILE]: COST_CFG })
+  await start($)
+  expect(w.statuses.at(-1) ?? '').not.toMatch(/\$/)
+  expect(await table($)).not.toMatch(/Small model/)
+})
+
+test('a new session starts at zero while the total keeps counting', async ($, on) => {
+  const w = world(on, { [USER_FILE]: COST_CFG }, { classify: 'match', usage: USAGE })
+  await start($)
+  await $.prompt.submit({ text: 'one' })
+  w.setId('s2')
+  expect(await table($)).toMatch(/^Small model: no calls this session \(total 2 calls,/m)
+  await $.prompt.submit({ text: 'two' })
+  expect(await table($)).toMatch(/^Small model: 2 calls, 300 in \/ 4 out, .* this session \(total 4 calls,/m)
+})
+
+test('the count survives a reload of the session', async ($, on) => {
+  const w = world(on, { [USER_FILE]: COST_CFG }, { classify: 'match', usage: USAGE })
+  await start($)
+  await $.prompt.submit({ text: 'one' })
+  await start($)
+  expect(await table($)).toMatch(/^Small model: 2 calls,/m)
+  expect(w.stored['modelUseTotal']).toMatchObject({ calls: 2 })
+})
+
+test('a store failure for the total fails no hook and keeps the session count', async ($, on) => {
+  const w = world(on, { [USER_FILE]: COST_CFG }, { classify: 'match', usage: USAGE, failStoreKey: 'modelUseTotal' })
+  await start($)
+  const r = await $.prompt.submit({ text: 'fix the build' })
+  expect(r.text).toBe('fix the build')
+  const t = await table($)
+  expect(t).toMatch(/^Small model: 2 calls,/m)
+  expect(t).not.toMatch(/Errors:/)
+  expect(w.stored['modelUseTotal']).toBeUndefined()
 })
