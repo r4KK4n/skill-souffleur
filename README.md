@@ -264,7 +264,7 @@ Costs:
 
 ## Limits
 
-- Subagents are not gated. When the session hands work to a subagent while a need is active, the brief has to name the skills the subagent should load, or say `skills: none`.
+- Subagents are not gated. When the session hands work to a subagent while a need is active or an always-on skill that is not `for: chat` applies, the brief has to name the skills the subagent should load, or say `skills: none`.
 - Souffleur checks that a skill is loaded and that a duty left its trace. It does not judge how well the model followed a skill.
 - A restore request after a compaction in the middle of a long turn rides on the next tool result. Models may treat such notes as untrusted and skip them; in `enforce` the gate still catches the next gated step.
 - A skill that does not load after two requests is marked `unavailable` and is neither requested nor gated again in that session.
