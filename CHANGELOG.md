@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- An answer to the project-skills question that comes after the two-minute limit now counts: `Set up now` and `Ignore all here` act as if given in time, unless the project got a block meanwhile. Before, the late answer was dropped without a word.
+
+- Before the question opens, one chat line names every skill (40 at most), because the app cuts the question text. `Ignore all here` now says how many skills it ignored.
+
 ## [0.2.0] - 2026-11-26
 
 - Once per session, in a repository with no project block yet, Souffleur asks one question about the project's own skills that your config does not name: set them up now (init's round, for this project or everywhere), ignore them all here, or later. Where no dialog opens it shows one notice. Nothing is written for `Later`, a dismissal or a timeout.

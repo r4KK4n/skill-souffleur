@@ -85,6 +85,8 @@ type Opts = {
   holdAgent?: Promise<void>
   /** A dialog never answers and never rejects, as in a session whose client does not show it. */
   holdAsk?: boolean | Promise<string>
+  /** Only the first dialog is held until this resolves; later dialogs take `answers`. */
+  holdFirstAsk?: Promise<string>
 }
 
 /** Answers every call the mod makes on `$`; files maps an absolute path to its text, a missing path throws. */
@@ -96,6 +98,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   const seen: World['seen'] = { prompts: [] }
   const writes: World['writes'] = []
   const asked: string[] = []
+  let firstHeld = false
   const hidden = new Set<string>()
   const answers = opts.answers === 'reject' ? [] : [...(opts.answers ?? [])]
   const storeData: Record<string, unknown> = opts.stored ?? {}
@@ -216,6 +219,10 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
     asked.push(question)
     options.push(((e as unknown as { questions: { options?: ({ label: string } | string)[] }[] }).questions[0]!.options ?? []).map((o) => (typeof o === 'string' ? o : o.label)))
     opts.onAsk?.()
+    if (opts.holdFirstAsk && !firstHeld) {
+      firstHeld = true
+      return opts.holdFirstAsk.then((l) => ({ result: { questions: [], answers: { [question]: l } } })) as never
+    }
     if (opts.holdAsk) return (opts.holdAsk === true ? new Promise(() => {}) : opts.holdAsk.then((l) => ({ result: { questions: [], answers: { [question]: l } } }))) as never
     const label = answers.shift()
     if (opts.answers === 'reject' || label === undefined) throw new Error('nobody to ask')
@@ -3157,19 +3164,87 @@ test('a dismissed own-skill dialog writes nothing and proposals are still asked'
   expect(userWrites(w).length).toBe(1)
 })
 
-test('a timed out own-skill dialog writes nothing, and a late tap is ignored', async ($, on) => {
-  let tap: (label: string) => void = () => {}
-  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['proj-skill'], holdAsk: new Promise<string>((r) => { tap = r }) })
-  await start($)
+const ownLate = (opts: Opts = {}) => {
+  let tap!: (label: string) => void
+  const held = new Promise<string>((r) => { tap = r })
+  return { tap, held, opts: { repoRoot: MAIN, projectSkills: ['a-skill', 'b-skill'], holdFirstAsk: held, ...opts } as Opts }
+}
+const ownTimedOut = async ($: any, w: World) => {
   const t = turnEnd($)
   await new Promise((r) => setTimeout(r, 50))
   await w.clock.advance(120_000)
   await t
-  tap('Ignore all here')
-  await new Promise((r) => setTimeout(r, 50))
+}
+
+test('a late Set up now runs the round and writes into the block', async ($, on) => {
+  const { tap, opts } = ownLate({ answers: ['When the task needs it', 'This project only', "Don't watch"] })
+  const w = world(on, { [USER_FILE]: STD }, opts)
+  await start($)
+  await ownTimedOut($, w)
   expect(w.writes.length).toBe(0)
+  tap('Set up now')
+  await idle()
+  expect(rootBlock(w).skills['a-skill'].need).toBeTruthy()
+  expect(w.asked.some((q) => /where/i.test(q) && /a-skill/.test(q))).toBe(true)
+})
+
+test('a late Ignore all here writes ignored and one feedback line', async ($, on) => {
+  const { tap, opts } = ownLate()
+  const w = world(on, { [USER_FILE]: STD }, opts)
+  await start($)
+  await ownTimedOut($, w)
+  tap('Ignore all here')
+  await idle()
+  expect(rootBlock(w)).toEqual({ ignored: ['a-skill', 'b-skill'] })
+  expect(w.logs.filter((l) => l === 'Souffleur: 2 skills ignored in this project.').length).toBe(1)
+})
+
+test('an in-time Ignore all here also says how many were ignored', async ($, on) => {
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['a-skill', 'b-skill'], answers: ['Ignore all here'] })
+  await start($)
   await turnEnd($)
-  expect(w.asked.length).toBe(1)
+  expect(w.logs.filter((l) => l === 'Souffleur: 2 skills ignored in this project.').length).toBe(1)
+})
+
+test('a late Later does nothing', async ($, on) => {
+  const { tap, opts } = ownLate()
+  const w = world(on, { [USER_FILE]: STD }, opts)
+  await start($)
+  await ownTimedOut($, w)
+  tap('Later')
+  await idle()
+  expect(w.writes.length).toBe(0)
+  expect(w.logs.some((l) => /ignored in this project/.test(l))).toBe(false)
+})
+
+test('a late answer after the key was written meanwhile does nothing', async ($, on) => {
+  const { tap, opts } = ownLate()
+  const w = world(on, { [USER_FILE]: STD }, opts)
+  await start($)
+  await ownTimedOut($, w)
+  w.files[USER_FILE] = JSON.stringify({ mode: 'enforce', skills: { 'writing-guide': { always: true } }, projects: { [MAIN]: { ignored: ['a-skill'] } } })
+  const before = w.writes.length
+  tap('Ignore all here')
+  await idle()
+  expect(w.writes.length).toBe(before)
+  expect(w.logs.some((l) => /ignored in this project/.test(l))).toBe(false)
+})
+
+test('a line names every skill before the dialog opens', async ($, on) => {
+  const names = Array.from({ length: 7 }, (_, i) => `skill-${i}`)
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: names, answers: ['Later'] })
+  await start($)
+  await turnEnd($)
+  const line = `Souffleur: skills in this project not in your config: ${names.join(', ')}`
+  expect(w.logs.some((l) => l.startsWith(line))).toBe(true)
+})
+
+test('more than 40 names: the line shows 40 and counts the rest', async ($, on) => {
+  const names = Array.from({ length: 45 }, (_, i) => `s${String(i).padStart(2, '0')}`)
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: names, answers: ['Later'] })
+  await start($)
+  await turnEnd($)
+  expect(w.logs.some((l) => /not in your config: s00, .*s39 and 5 more/.test(l))).toBe(true)
 })
 
 test('where no dialog opens one notice names the count and nothing is written', async ($, on) => {

@@ -1004,23 +1004,43 @@ async function askOwnSkills($: Dollar, dialog: boolean): Promise<void> {
   if (!names.length) return
   const notice = () => void say($, l, `Souffleur: this project has ${names.length} skills not in your config. /souffleur init asks about them.`)
   if (!dialog) return notice()
+  // The app cuts a long question, so the full list goes to the chat first.
+  const listed = names.slice(0, MAX_NAMES_LINE).join(', ') + (names.length > MAX_NAMES_LINE ? ` and ${names.length - MAX_NAMES_LINE} more` : '')
+  say($, l, `Souffleur: skills in this project not in your config: ${listed}`)
   const shown = names.slice(0, 5).join(', ') + (names.length > 5 ? ', …' : '')
   const question = `This project has ${names.length} skill${names.length === 1 ? '' : 's'} not in your config: ${shown}. Set ${names.length === 1 ? 'it' : 'them'} up now?`
   let answer: unknown
+  const asking = Promise.resolve().then(() => $.ui.ask(question, { options: [OWN_NOW, OWN_IGNORE, OWN_LATER], header: 'Souffleur' }))
   try {
-    const asking = Promise.resolve().then(() => $.ui.ask(question, { options: [OWN_NOW, OWN_IGNORE, OWN_LATER], header: 'Souffleur' }))
     asking.catch(() => undefined) // a late rejection after a timeout is nobody's business
     answer = await Promise.race([asking, $.clock.sleep(ASK_WAIT_MS).then(() => Promise.reject(new TimedOut()))])
   } catch (err) {
-    // Dismissed or timed out: ask again next session. Nobody can answer: say so once.
-    if (!(err instanceof TimedOut) && !DISMISSED.test(message(err))) notice()
+    if (err instanceof TimedOut) {
+      // The dialog stays open: a tap after the limit still counts while the root has no block.
+      asking.then((late) => lateOwnAnswer($, l, names, late), () => undefined)
+      return
+    }
+    // Dismissed: ask again next session. Nobody can answer: say so once.
+    if (!DISMISSED.test(message(err))) notice()
     return
   }
+  await actOnOwnAnswer($, l, names, answer)
+}
+
+/** The names line shows at most this many names. */
+const MAX_NAMES_LINE = 40
+/** Set once an answer to the project question was acted on, so a late one cannot act twice. */
+let ownActed = false
+
+/** `Set up now` runs init's round for the names, `Ignore all here` writes them to `ignored`; anything else does nothing. */
+async function actOnOwnAnswer($: Dollar, l: Loaded, names: string[], answer: unknown): Promise<void> {
   if (answer === OWN_NOW) {
+    ownActed = true
     say($, l, await runInit($, l, names))
     return
   }
   if (answer !== OWN_IGNORE) return
+  ownActed = true
   const kept = names.slice(0, MAX_LIST)
   const r = await editUserFile($, (d) => {
     let config: unknown = d
@@ -1028,7 +1048,26 @@ async function askOwnSkills($: Dollar, dialog: boolean): Promise<void> {
     return { config }
   })
   if (!r.ok) say($, l, `Souffleur: ${r.text}.`)
-  else if (names.length > kept.length) say($, l, `Souffleur: the ignored list of this project holds ${MAX_LIST} names; ${names.length - kept.length} skills stay unasked. /souffleur init asks about them.`)
+  else {
+    say($, l, `Souffleur: ${kept.length} skill${kept.length === 1 ? '' : 's'} ignored in this project.`)
+    if (names.length > kept.length) say($, l, `Souffleur: the ignored list of this project holds ${MAX_LIST} names; ${names.length - kept.length} skills stay unasked. /souffleur init asks about them.`)
+  }
+}
+
+/** An answer after the two-minute limit: acts only while the root still has no block and nothing acted on this question yet. */
+async function lateOwnAnswer($: Dollar, l: Loaded, names: string[], answer: unknown): Promise<void> {
+  if (ownActed || (answer !== OWN_NOW && answer !== OWN_IGNORE)) return
+  try {
+    const home: string | undefined = await $.env.get('HOME')
+    if (!home) return
+    const st = await readState($, `${home}/.claude/souffleur.json`, home)
+    if (st.kind !== 'ok') return
+    const doc = parseJson(st.text)
+    if (configProblem(doc) || hasProjectKey(doc, l.root)) return
+    await actOnOwnAnswer($, l, names, answer)
+  } catch {
+    // a late answer that cannot be applied leaves everything as it was
+  }
 }
 
 /**
