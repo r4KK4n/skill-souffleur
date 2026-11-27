@@ -723,18 +723,34 @@ function collapsePath(path: string): string {
 
 const insideDir = (path: string, dir: string) => path === dir || path.startsWith(dir === '/' ? '/' : `${dir}/`)
 
-/** A project CLAUDE.md may import only files inside the project root or `~/.claude`, by their real path too: a symlink out does not count. */
-async function importAllowed($: Dollar, target: string, roots: string[]): Promise<boolean> {
+/**
+ * A project CLAUDE.md may import only files inside the given project roots, or `.md` files under `claudeDir`, by their real path too:
+ * a symlink out does not count. A stat that fails says nothing about where the path leads, so the import is skipped.
+ */
+async function importAllowed($: Dollar, target: string, roots: string[], claudeDir: string): Promise<boolean> {
   const flat = collapsePath(target)
-  if (!roots.some((r) => insideDir(flat, collapsePath(r)))) return false
-  const real = (await $.fs.stat(flat, { resolve: true }).catch(() => undefined))?.realPath
-  if (real === undefined) return true
-  const realRoots = [...roots.map(collapsePath)]
-  for (const r of roots) {
-    const rr = (await $.fs.stat(r, { resolve: true }).catch(() => undefined))?.realPath
-    if (rr !== undefined) realRoots.push(collapsePath(rr))
+  const okIn = (path: string, projectRoots: string[], claude: string) => projectRoots.some((r) => insideDir(path, r)) || (insideDir(path, claude) && /\.md$/i.test(path))
+  const flatRoots = roots.map(collapsePath)
+  const flatClaude = collapsePath(claudeDir)
+  if (!okIn(flat, flatRoots, flatClaude)) return false
+  let real: string | undefined
+  try {
+    real = (await $.fs.stat(flat, { resolve: true }))?.realPath
+  } catch (err) {
+    $.ui.log(`import skipped: could not resolve ${flat}: ${message(err)}`, { to: 'debug' })
+    return false
   }
-  return realRoots.some((r) => insideDir(collapsePath(real), r))
+  if (real === undefined) return true
+  const resolved = async (r: string) => {
+    const rr = (await $.fs.stat(r, { resolve: true }).catch(() => undefined))?.realPath
+    return rr === undefined ? undefined : collapsePath(rr)
+  }
+  const realRoots = [...flatRoots]
+  for (const r of roots) {
+    const rr = await resolved(r)
+    if (rr !== undefined) realRoots.push(rr)
+  }
+  return okIn(collapsePath(real), realRoots, (await resolved(claudeDir)) ?? flatClaude)
 }
 
 /**
@@ -758,7 +774,7 @@ async function readStanding($: Dollar, l: Loaded, home: string, notes: string[])
       const target = ref.startsWith('/') ? ref : ref.startsWith('~/') ? `${home}/${ref.slice(2)}` : `${dir}/${ref.replace(/^\.\//, '')}`
       if (seen.has(target)) continue
       seen.add(target)
-      if (project && !(await importAllowed($, target, [l.root, `${home}/.claude`]))) continue
+      if (project && !(await importAllowed($, target, [l.root, l.tree, l.cwd], `${home}/.claude`))) continue
       const imported = await readOptional($, target, notes, home)
       if (imported !== undefined) files.push({ file: shownPath(home, target), text: imported, project })
     }

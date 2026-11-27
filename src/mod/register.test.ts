@@ -104,6 +104,10 @@ type Opts = {
   classifyRejected?: boolean
   /** `$.store.set` of this key throws. */
   failStoreKey?: string
+  /** The working directory `$.session.cwd` answers. */
+  cwd?: string
+  /** `$.fs.stat` of these paths throws something other than not-found. */
+  failStat?: string[]
   /** `$.store.keys` answers only after this resolves, as a slow store does. */
   holdKeys?: Promise<void>
   /** `$.store.keys` rejects. */
@@ -152,7 +156,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   mock.session(on)
   const options: string[][] = []
   on('session.id', () => ({ value: id }))
-  on('session.cwd', () => ({ value: '/work/proj' }))
+  on('session.cwd', () => ({ value: opts.cwd ?? '/work/proj' }))
   on('session.repo', () => ({ value: opts.repoRoot ? { root: opts.repoRoot, remote: null, internal: false, name: null } : null }))
   const tools: { name: string }[] = []
   const failRead: string[] = []
@@ -252,6 +256,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   })
   on('fs.stat', (_, e) => {
     const text = files[e.path]
+    if (opts.failStat?.includes(e.path)) throw new Error('EIO: i/o error')
     if (text === undefined || hidden.has(e.path)) throw new Error(`stat ${e.path} failed: ENOENT`)
     const real = opts.linkTo?.[e.path]
     return { value: { kind: 'file', size: text.length, mtimeMs: mtimes[e.path] ?? 0, isLink: real !== undefined, ...(real === undefined ? {} : { realPath: real }) } } as never
@@ -1299,6 +1304,37 @@ test('CLAUDE.md imports outside the project root and ~/.claude are not read', as
   expect(text).not.toMatch(/secret\.md/)
   expect(text).not.toMatch(/home\.md/)
   expect(text).not.toMatch(/link\.md/)
+})
+
+test('CLAUDE.md imports: a worktree outside the main root keeps its own files', async ($, on) => {
+  const files = { [USER_FILE]: ALWAYS, [SETTINGS_PATH]: '{}', [`${HOME}/.claude/CLAUDE.md`]: 'x', '/wt/feature/CLAUDE.md': '@AGENTS.md', '/wt/feature/AGENTS.md': 'Always load writing-guide first.' }
+  world(on, files, { skills: SKILLS, failRead: [`${HOME}/.claude/CLAUDE.md`], repoRoot: '/work/main', cwd: '/wt/feature' })
+  await $.session.start({ cwd: '/wt/feature', surface: 'terminal', isInteractive: true })
+  expect(await run($, 'migrate')).toMatch(/AGENTS\.md:1/)
+})
+
+test('CLAUDE.md imports under ~/.claude must be .md files', async ($, on) => {
+  const files = {
+    [USER_FILE]: ALWAYS, [SETTINGS_PATH]: '{}', [`${HOME}/.claude/CLAUDE.md`]: 'x',
+    '/work/proj/CLAUDE.md': '@~/.claude/.credentials.json\n@~/.claude/souffleur.json\n@~/.claude/rules.md',
+    [`${HOME}/.claude/.credentials.json`]: 'Always load writing-guide (creds).',
+    [`${HOME}/.claude/rules.md`]: 'Always load writing-guide (rules).',
+  }
+  world(on, files, { skills: SKILLS, failRead: [`${HOME}/.claude/CLAUDE.md`] })
+  await start($)
+  const text = await run($, 'migrate')
+  expect(text).toMatch(/rules\.md:1/)
+  expect(text).not.toMatch(/credentials/)
+  expect(text).not.toMatch(/souffleur\.json:/)
+})
+
+test('CLAUDE.md imports: a failed stat skips the import and logs to debug', async ($, on) => {
+  const files = { [USER_FILE]: ALWAYS, [SETTINGS_PATH]: '{}', [`${HOME}/.claude/CLAUDE.md`]: 'x', '/work/proj/CLAUDE.md': '@AGENTS.md', '/work/proj/AGENTS.md': 'Always load writing-guide first.' }
+  const w = world(on, files, { skills: SKILLS, failRead: [`${HOME}/.claude/CLAUDE.md`], failStat: ['/work/proj/AGENTS.md'] })
+  await start($)
+  const text = await run($, 'migrate')
+  expect(text).not.toMatch(/AGENTS\.md:1/)
+  expect(w.debugLogs.some((l) => /import skipped/.test(l))).toBe(true)
 })
 
 test('init applies at once: a new skill shows in the table and the status line', async ($, on) => {
