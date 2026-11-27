@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-11-27
+
 - Learning reads a skill's text only when its source is one Souffleur knows to be safe (user, policy, plugin, built-in, synced); any other source needs a trusted project (#33).
 
 - `/souffleur init` asks once per plugin when two or more of its skills have no setting yet (#43): all when the task needs it, don't watch any, ask one by one, or decide later. Every per-skill question now offers `Decide later`, which skips the skill and writes nothing, in place of `Stop`; closing a dialog still stops `init`. `Loaded by its own plugin at start (rare)` is offered only when it is the current or the recommended answer.
