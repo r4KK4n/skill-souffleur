@@ -8,6 +8,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - A gate or skill rule on a skill that does not load now stops denying after three denials of that skill in one turn (#30). The calls pass and are listed under `Would have denied` as `released after 3 denials: <skill> did not load`, and one error shows through the degraded notice. A skill in state `unavailable` is no longer denied; it is only listed. The counters start again with each prompt of yours.
 
+- The status line now starts with the local time Souffleur last saw the session (`14:02 · observe · 9 loaded`), set by your prompts and by the end of each main-session turn (#41). A time that stops moving shows that the session is gone. A reload or resume keeps it.
+
 ## [0.2.2] - 2026-11-27
 
 - `/souffleur` and the status line now show what the small model costs. `/souffleur` lists the calls, tokens and an estimated dollar cost for this session and in total, at list price; the status line adds `· ~$0.03` for the session. The classifier calls now go through `$.model.complete` (same speed as `$.model.classify`), which reports the tokens. A classifier answer in quotes or backticks, after `Label:`, in another case, or with spaces or a final period still counts; a label inside a sentence does not. Counting runs after the answer, so it never delays a prompt. The total is kept in the plugin store and is best effort: two sessions at the same moment can lose a count.

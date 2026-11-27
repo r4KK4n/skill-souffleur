@@ -1843,6 +1843,12 @@ export const register: Register = (on) => {
   // At the end of a turn: one question about the first waiting proposal; where no dialog opens, a notice with a reply hint.
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
+    // The main loop is alive: stamp the time the status line shows. A subagent's turn end says nothing about the session.
+    if (e.agentId === undefined) {
+      await safe($, 'turn.seen', undefined, async () => {
+        await apply($, () => ({ type: 'seen', now: now() }))
+      })
+    }
     if (e.agentId === undefined && e.reason === 'answer' && personTurn && typeof e.answer === 'string') {
       await safe($, 'turn.reply', undefined, async () => {
         await apply($, (l) => ({ type: 'reply', now: now(), answer: e.answer, fromCommand: lastPromptCommand, aborted: e.isAborted, root: l.root }))

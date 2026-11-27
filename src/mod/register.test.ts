@@ -926,7 +926,7 @@ test('a configured skill that is not installed here is not requested and shows a
   const r = await $.prompt.submit({ text: 'hello' })
   expect(r.context).toBe(undefined)
   expect(await table($)).toMatch(/\| writing-guide \| not installed here \|/)
-  expect(w.statuses.at(-1)).toBe('observe · 0 loaded, 1 not installed here')
+  expect(w.statuses.at(-1)).toMatch(/^\d\d:\d\d · observe · 0 loaded, 1 not installed here$/)
 })
 
 
@@ -1810,7 +1810,7 @@ test('three classifier failures in a row make the status degraded, a good run cl
   await $.prompt.submit({ text: 'two' })
   expect(w.statuses.at(-1)).not.toMatch(/degraded/)
   await $.prompt.submit({ text: 'three' })
-  expect(w.statuses.at(-1)).toBe('degraded, see /souffleur')
+  expect(w.statuses.at(-1)).toMatch(/^\d\d:\d\d · degraded, see \/souffleur$/)
   expect(await table($)).toMatch(/classifier: /)
   answer = 'no-match'
   await $.prompt.submit({ text: 'four' })
@@ -3701,4 +3701,39 @@ test('counting never delays the answer: a held total write does not hold the pro
   release()
   await settle()
   expect(w.stored['modelUseTotal']).toMatchObject({ calls: 2 })
+})
+
+// --- Liveness time in the status line (#41) ---
+
+const HHMM = (ms: number) => { const d = new Date(ms); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}` }
+
+test('the status line shows the time of the last person prompt', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  expect(w.statuses.at(-1)).not.toMatch(/^\d\d:\d\d · /)
+  await $.prompt.submit({ text: 'hello' })
+  expect(w.statuses.at(-1)).toBe(`${HHMM(Date.now())} · observe · 0 loaded, 1 restoring`)
+})
+
+test('a main-loop turn end stamps lastSeen; a subagent turn end does not', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  await $.prompt.submit({ text: 'hello' })
+  const first = (w.stored['session:s1'] as any).lastSeen as number
+  await w.clock.advance(120_000)
+  await turnEnd($, { agentId: 'a1' })
+  expect((w.stored['session:s1'] as any).lastSeen).toBe(first)
+  await turnEnd($)
+  const later = (w.stored['session:s1'] as any).lastSeen as number
+  expect(later).toBeGreaterThan(first)
+  expect(w.statuses.at(-1)).toMatch(new RegExp(`^${HHMM(later)} · `))
+})
+
+test('a resume shows the stored lastSeen in the status line at once', async ($, on) => {
+  const { config } = parseConfig(ALWAYS, undefined)
+  const seen = new Date(2026, 10, 27, 14, 2).getTime()
+  const old = { ...initSession(config, 's1', 1, 'startup', '2.1.331'), lastSeen: seen }
+  const w = world(on, { [USER_FILE]: ALWAYS }, { stored: { 'session:s1': old } })
+  await start($)
+  expect(w.statuses.at(-1)).toMatch(/^14:02 · /)
 })

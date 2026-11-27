@@ -872,7 +872,7 @@ test('three failed call B runs in a row record one classifier B error, a good B 
   assert.equal(three.workFails, 3)
   assert.equal(three.errors.filter((m) => /^classifier B: /.test(m)).length, 1)
   assert.match(three.errors[0]!, /^classifier B: the small model failed to pick a work need 3 prompts in a row, so work needs are not detected$/)
-  assert.equal(statusLine(three, 'enforce'), 'degraded, see /souffleur')
+  assert.match(statusLine(three, 'enforce')!, /^\d\d:\d\d · degraded, see \/souffleur$/)
   assert.equal(run(workCfg, [b(true)], three).s.errors.length, 1, 'recorded once')
   const good = run(workCfg, [b(false)], three).s
   assert.equal(good.workFails, 0)
