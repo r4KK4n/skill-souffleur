@@ -13,7 +13,7 @@ const T1 = Date.UTC(2026, 10, 25, 9, 5)
 const config: Config = {
   mode: 'enforce',
   needs: { prose: { for: 'readers', what: 'Writing text people read.' }, ui: { for: 'users', what: 'Building a screen.' } },
-  trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true,
+  trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true, update: 'notify',
   skills: {
     'writing-guide': { need: 'prose', from: 'user' },
     'writing-check': { need: 'prose', from: 'user' },
@@ -232,7 +232,7 @@ test('a multi-violation reason stays apart from a single one and prints all its 
 
 test('table: excluded skill shows its state text, needs without an audience get the init hint', () => {
   const c: Config = {
-    mode: 'enforce', trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true,
+    mode: 'enforce', trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true, update: 'notify',
     needs: { prose: { for: 'work', what: 'Text.', noAudience: true }, ui: { for: 'users', what: 'Screens.' } },
     skills: { 'ui-design': { need: 'ui', from: 'user', notIn: ['/work/p'] }, 'writing-guide': { need: 'prose', from: 'user' } },
   }
@@ -246,7 +246,7 @@ test('table: excluded skill shows its state text, needs without an audience get 
 })
 
 test('status line leaves excluded skills out of the counts', () => {
-  const c: Config = { mode: 'enforce', trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true, needs: {}, skills: { a: { always: true, from: 'user', notIn: ['/work/p'] }, b: { always: true, from: 'user' } } }
+  const c: Config = { mode: 'enforce', trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true, update: 'notify', needs: {}, skills: { a: { always: true, from: 'user', notIn: ['/work/p'] }, b: { always: true, from: 'user' } } }
   let s = fresh(c)
   s = { ...s, ledger: skillLoaded(skillLoaded(s.ledger, 'a', T0, 'x'), 'b', T0, 'x') }
   assert.equal(statusLine(s, 'enforce', 0, c, '/work/p/'), '1 loaded')
@@ -255,7 +255,7 @@ test('status line leaves excluded skills out of the counts', () => {
 
 test('needs without an audience: heading, and none for an untrusted project need', () => {
   const c: Config = {
-    mode: 'enforce', trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true,
+    mode: 'enforce', trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true, update: 'notify',
     needs: { prose: { for: 'work', what: 'Text.', noAudience: true }, pn: { for: 'work', what: 'P.', noAudience: true } },
     projectNeeds: ['pn'], skills: {},
   }
@@ -268,7 +268,7 @@ test('needs without an audience: heading, and none for an untrusted project need
 
 test('audience hints: an always-on skill without "for" gets a hint, one with "for" or an excluded one does not', () => {
   const c: Config = {
-    mode: 'enforce', trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true, needs: {},
+    mode: 'enforce', trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true, update: 'notify', needs: {},
     skills: { 'chisle:chisle': { always: true, from: 'user' }, terse: { always: true, for: 'chat', from: 'user' }, gone: { always: true, from: 'user', notIn: ['/work/p'] } },
   }
   const s = initSession(c, 's', T0, 'clear')
@@ -385,4 +385,22 @@ test('a person prompt and a seen event set lastSeen; a prompt not from the perso
   assert.equal(decide(config, fresh(), { type: 'prompt', now: T1, text: 'hi', fromUser: false, matched: [] }).session.lastSeen, undefined)
   assert.equal(initSession(config, 's', T0, 'clear').lastSeen, T0, 'a session start stamps it')
   assert.equal(decide(config, a, { type: 'seen', now: T1 + 5 }).session.lastSeen, T1 + 5)
+})
+
+test('status shows the version line after the Small model line', () => {
+  const s = { ...fresh(), modelUse: { calls: 1, input: 10, output: 5, cacheRead: 0, cacheWrite: 0, usd: 0 } }
+  const text = renderTable(config, s, T1, undefined, undefined, { current: '0.2.3', latest: 'v0.2.4', at: Date.UTC(2026, 10, 25, 7, 5) })
+  const lines = text.split('\n')
+  const small = lines.findIndex((l) => l.startsWith('Small model:'))
+  assert.ok(small >= 0)
+  assert.equal(lines[small + 1], 'Version 0.2.3 · latest 0.2.4 · checked 07:05 · update: notify')
+})
+
+test('status version line with latest unknown and checked never', () => {
+  const text = renderTable({ ...config, update: 'off' }, fresh(), T1, undefined, undefined, { current: '0.2.3' })
+  assert.ok(text.split('\n').includes('Version 0.2.3 · latest unknown · checked never · update: off'))
+})
+
+test('status without update input has no version line', () => {
+  assert.ok(!renderTable(config, fresh(), T1).includes('Version '))
 })

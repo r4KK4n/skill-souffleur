@@ -6,6 +6,7 @@ import type { Proposal } from './proposals.ts'
 import { checkReply, replySkill, reminderLine } from './reply.ts'
 import { checkRules, contextNotes, ruleKind, ruleSkillNames } from './rules.ts'
 import { renderTable } from './status.ts'
+import type { UpdateInfo } from './status.ts'
 import type { ModelUse } from './cost.ts'
 import type { Audience, Config, NeedName, SkillName } from './types.ts'
 
@@ -75,6 +76,8 @@ export type Session = {
   turnTries?: SkillName[]
   /** When Souffleur last saw the session: a person's prompt or a main-loop turn end. Shown in the status line; kept over reload and resume. */
   lastSeen?: number
+  /** The release tag whose notify line this session already showed; kept over reload and resume. */
+  updateShown?: string
 }
 
 export type CoreEvent =
@@ -85,7 +88,7 @@ export type CoreEvent =
   | { type: 'prompt'; now: number; text: string; fromUser: boolean; matched: NeedName[]; root?: string; classifierFailed?: boolean; workFailed?: boolean; deliverable?: Deliverable }
   /** `present` names the arguments the call carries, for field rules. */
   | { type: 'tool'; now: number; tool: string; path?: string; command?: string; brief?: string; skill?: string; model?: string; present?: string[]; agentId?: string; root?: string; tree?: string }
-  | { type: 'command'; now: number; args: string; root?: string; /** The small-model count over all sessions, from the plugin store. */ total?: ModelUse }
+  | { type: 'command'; now: number; args: string; root?: string; /** The small-model count over all sessions, from the plugin store. */ total?: ModelUse; /** What the stored release check says. */ update?: UpdateInfo }
   | { type: 'typed'; now: number; name: string }
   | { type: 'agentDone'; now: number }
   /** A main-loop turn ended (any reason): the session is alive. */
@@ -160,8 +163,8 @@ export function normalizeSession(s: Session): Session {
   return missing.length ? ({ ...s, ...Object.fromEntries(missing) } as Session) : s
 }
 
-export function statusText(config: Config, session: Session, now: number, root?: string, total?: ModelUse): string {
-  return renderTable(config, session, now, root, total)
+export function statusText(config: Config, session: Session, now: number, root?: string, total?: ModelUse, update?: UpdateInfo): string {
+  return renderTable(config, session, now, root, total, update)
 }
 
 const lastN = <T>(list: T[], item: T): T[] => [...list, item].slice(-KEEP)
@@ -659,7 +662,7 @@ function onCommand(config: Config, s: Session, e: Extract<CoreEvent, { type: 'co
   switch (verb) {
     case '':
     case 'status':
-      return reply(s, statusText(config, s, e.now, e.root, e.total))
+      return reply(s, statusText(config, s, e.now, e.root, e.total, e.update))
     case 'pause':
       return reply({ ...s, paused: true }, 'Souffleur: paused for this session: no restore requests, no need detection, no turn-end questions, no gate, duty or brief denial. /souffleur resume turns them on again.')
     case 'resume':
@@ -673,6 +676,6 @@ function onCommand(config: Config, s: Session, e: Extract<CoreEvent, { type: 'co
       return reply({ ...s, needs: rest }, `Need ${arg} is off.`)
     }
     default:
-      return reply(s, 'Usage: /souffleur [status | need <name> | drop <name> | pause | resume | init | migrate | rule <text> | review | accept <id> | decline <id> | block <name> | unblock <name> | project]')
+      return reply(s, 'Usage: /souffleur [status | need <name> | drop <name> | pause | resume | init | migrate | rule <text> | review | accept <id> | decline <id> | block <name> | unblock <name> | project | update]')
   }
 }

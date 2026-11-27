@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-11-27
+
+- Souffleur tells you when a newer release exists and can install it (#68). The user file takes `"update": "notify" | "auto" | "off"` (default `notify`). Once a day it looks up the release tags on GitHub in the background and shows one line at the next session start. `/souffleur` has a new line with the version, the newest release, the time of the last check and the setting.
+- `"update": "auto"` installs a newer release at session start, in the background, and only when the release tag is signed by the SSH key in the new user-file key `updateSigner`. A tag that is unsigned or signed by another key is not installed; a line says so. Without `updateSigner`, auto only shows the notify line. Auto and `/souffleur update` touch only the folder install, never one with uncommitted changes or one that is not exactly on a release tag.
+- `/souffleur update` installs the newest release now. With `updateSigner` set it checks the signature first; without it, the tag installs unsigned and the answer says so. Only you can run it, not a plugin or the model.
+- The marketplace install is not changed: its line points to `/plugin update`.
+
 ## [0.2.3] - 2026-11-27
 
 - A gate or skill rule on a skill that does not load now stops denying after three denials of that skill in one turn, once the model has tried to load it with a `Skill` call (#30). The calls pass and are listed under `Would have denied` as `released after 3 denials: <skill> did not load`, and one error shows through the degraded notice. A skill in state `unavailable` is no longer denied; it is only listed. The counters start again with each prompt of yours.

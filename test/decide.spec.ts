@@ -9,7 +9,7 @@ import { loadFixture, toCoreEvents } from './fixtures.ts'
 const base: Config = {
   mode: 'enforce',
   needs: { prose: { for: 'readers', what: 'Writing text people read.' }, ui: { for: 'users', what: 'Building a screen.' } },
-  trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true,
+  trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true, update: 'notify',
   skills: {
     'writing-guide': { need: 'prose', from: 'user' },
     'writing-check': { need: 'prose', from: 'user' },

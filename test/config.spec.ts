@@ -52,7 +52,7 @@ test('unknown need on a skill is an error and drops the skill', () => {
 test('missing files give an empty config without errors', () => {
   const { config, errors } = parseConfig(undefined, undefined)
   assert.deepEqual(errors, [])
-  assert.deepEqual(config, { mode: 'observe', skills: {}, needs: {}, trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true })
+  assert.deepEqual(config, { mode: 'observe', skills: {}, needs: {}, trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true, update: 'notify' })
 })
 
 test('mode defaults to observe', () => {
@@ -711,4 +711,54 @@ test('where on an own note or rule and notIn on an own skill are errors and drop
   assert.ok(errors.some((e) => e.includes('projects["/work/a"].skills.own-a') && e.includes('notIn')))
   assert.ok(errors.some((e) => e.includes('projects["/work/a"].notes.own-n') && e.includes('where')))
   assert.ok(errors.some((e) => e.includes('projects["/work/a"].rules.own-r') && e.includes('where')))
+})
+
+test('update defaults to notify and updateSigner is unset', () => {
+  const r = parseConfig(undefined, undefined)
+  assert.equal(r.config.update, 'notify')
+  assert.equal(r.config.updateSigner, undefined)
+})
+
+for (const v of ['notify', 'auto', 'off'] as const) {
+  test(`update "${v}" read from user file`, () => {
+    const r = parseConfig(JSON.stringify({ update: v }), undefined)
+    assert.deepEqual(r.errors, [])
+    assert.equal(r.config.update, v)
+  })
+}
+
+test('update with another value → error text above, default stays', () => {
+  for (const bad of ['yes', true, 'AUTO', null]) {
+    const r = parseConfig(JSON.stringify({ update: bad }), undefined)
+    assert.equal(r.config.update, 'notify')
+    assert.equal(r.errors.filter((e) => /update: must be "notify", "auto" or "off"; ignored/.test(e)).length, 1)
+  }
+})
+
+test('update in project file → only allowed in the user config', () => {
+  const r = parseConfig(undefined, JSON.stringify({ update: 'auto' }))
+  assert.equal(r.config.update, 'notify')
+  assert.equal(r.errors.filter((e) => /update is only allowed in the user config; ignored/.test(e)).length, 1)
+})
+
+test('updateSigner accepts ssh-, ecdsa- and sk- key lines', () => {
+  for (const key of ['ssh-ed25519 AAAAC3Nz user@host', 'ssh-ed25519\tAAAAC3Nz', 'ssh-ed25519 AAAAC3Nz', 'ecdsa-sha2-nistp256 AAAA', 'sk-ssh-ed25519@openssh.com AAAA']) {
+    const r = parseConfig(JSON.stringify({ updateSigner: key }), undefined)
+    assert.deepEqual(r.errors, [])
+    assert.equal(r.config.updateSigner, key)
+  }
+})
+
+test('updateSigner with another value → error text above', () => {
+  for (const bad of ['gpg-key', 'ssh-ed25519 AAAA\nssh-rsa BBB', 'ssh-ed25519 AAAA c\u0000d', 'ssh-ed25519 AAAA c\u001bd', 'ssh-ed25519 AAAA c\u007fd', 'ssh-ed25519 AAAA c\rd', '', 5, 'xssh-ed25519 A', 'ssh-', 'sk-', 'ssh- ', 'ssh-ed25519', 'ssh-ed25519 ']) {
+    const r = parseConfig(JSON.stringify({ updateSigner: bad }), undefined)
+    assert.equal(r.config.updateSigner, undefined)
+    assert.equal(r.errors.filter((e) => /updateSigner: must be an SSH public key line; ignored/.test(e)).length, 1)
+  }
+})
+
+test('updateSigner in project file → only allowed in the user config', () => {
+  const r = parseConfig(undefined, JSON.stringify({ updateSigner: 'ssh-ed25519 AAAA' }))
+  assert.equal(r.config.updateSigner, undefined)
+  assert.equal(r.errors.filter((e) => /updateSigner is only allowed in the user config; ignored/.test(e)).length, 1)
 })

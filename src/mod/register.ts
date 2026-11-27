@@ -17,6 +17,9 @@ import type { ModelUse, UsageFields } from '../core/cost.ts'
 import type { Config, Note, Rule } from '../core/types.ts'
 import { notices, startNotice } from '../core/notices.ts'
 import { PLUGIN_VERSION } from './version.ts'
+import { isCheckDue, isUpdateCheck, newestRelease, refusalLine, shown, updateLine } from '../core/update.ts'
+import type { UpdateInfo } from '../core/status.ts'
+import { compareVersions } from '../core/version.ts'
 import { isFromUser, isUserOrigin, presentArgs, toolFields } from './map.ts'
 
 // The hooks' `$` is the engine interface; the adapter calls only documented members.
@@ -175,6 +178,194 @@ async function persist($: Dollar, l: Loaded, s0: Session, quiet = false): Promis
   $.ui.status(!l.setUp && !s.errors.length ? NOT_SET_UP : statusLine(s, l.config.mode, sectionNotes(l.config, l.root).leftOut.length, l.config, l.root))
   await $.state.set(REF, s)
   await $.store.set(`session:${s.id}`, s)
+}
+
+/** Plugin store key of the last release check. */
+const UPDATE_KEY = 'updateCheck'
+const REPO_URL = 'https://github.com/r4KK4n/skill-souffleur'
+
+async function readCheck($: Dollar): Promise<{ at: number; latest?: string } | undefined> {
+  try {
+    const stored: unknown = await $.store.get(UPDATE_KEY)
+    return isUpdateCheck(stored) ? stored : undefined
+  } catch {
+    return undefined
+  }
+}
+
+const KIND_KEY = 'installKind'
+
+/** A folder install when the plugin root is the top of a git work tree (`--show-prefix` prints nothing); anything else, or no git, is a marketplace install. */
+export async function installKind($: Dollar): Promise<'folder' | 'market'> {
+  try {
+    const r = await $.process.run(['git', '-C', $.plugin.root, 'rev-parse', '--show-prefix'], { timeoutMs: 5000 })
+    return r.exitCode === 0 && String(r.stdout).trim() === '' ? 'folder' : 'market'
+  } catch {
+    return 'market'
+  }
+}
+
+async function cachedKind($: Dollar): Promise<'folder' | 'market' | undefined> {
+  try {
+    const k: unknown = await $.store.get(KIND_KEY)
+    return k === 'folder' || k === 'market' ? k : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Remembers that the notify line for `tag` was said, so this session does not repeat it (also over reload and resume). */
+/** `session id + tag` of the last update line said, set at the moment it is said (the stored mark follows after an await). */
+let toldKey = ''
+
+async function markShown($: Dollar, tag: string): Promise<void> {
+  await update($, (_l, s) => ({ ...s, updateShown: tag }))
+}
+
+/** Looks for a newer release tag and stores the result. Never throws; a failure stores the time so one try happens per day. */
+export async function checkForUpdate($: Dollar, l: Loaded, at: number): Promise<void> {
+  const before = await readCheck($)
+  try {
+    if (l.config.update === 'off' || !isCheckDue(before, at)) return
+    let check: { at: number; latest?: string }
+    try {
+      const r = await $.process.run(['git', 'ls-remote', '--tags', '--refs', REPO_URL], { timeoutMs: 15000 })
+      if (r.exitCode !== 0) throw new Error(`git exited with ${r.exitCode}`)
+      const out = String(r.stdout)
+      const newest = newestRelease(out, PLUGIN_VERSION)
+      if (newest !== undefined) check = { at, latest: newest }
+      else if (out.trim() !== '' && !/^[0-9a-f]+\trefs\/tags\//m.test(out)) {
+        $.ui.log('update check: unparsable ls-remote output', { to: 'debug' })
+        check = { at }
+      } else check = { at, latest: `v${PLUGIN_VERSION}` }
+    } catch (err) {
+      $.ui.log(`update check failed: ${message(err)}`, { to: 'debug' })
+      check = { at, ...(before?.latest === undefined ? {} : { latest: before.latest }) }
+    }
+    await $.store.set(UPDATE_KEY, check)
+  } catch {
+    // A courtesy check: the next start tries again.
+  }
+}
+
+/** The stored check as `/souffleur` shows it. */
+async function updateInfo($: Dollar): Promise<UpdateInfo> {
+  const c = await readCheck($)
+  return { current: PLUGIN_VERSION, ...(c?.latest === undefined ? {} : { latest: c.latest }), ...(c === undefined ? {} : { at: c.at }) }
+}
+
+const RELEASE_TAG = /^v\d+\.\d+\.\d+$/
+const GIT_TIMEOUT_MS = 10_000
+const FETCH_TIMEOUT_MS = 30_000
+
+type Run = { exitCode: number; stdout: string; stderr: string }
+
+async function git($: Dollar, args: readonly string[], timeoutMs = GIT_TIMEOUT_MS): Promise<Run> {
+  const r = await $.process.run(['git', '-C', $.plugin.root, ...args], { timeoutMs })
+  return { exitCode: r.exitCode, stdout: String(r.stdout), stderr: String(r.stderr ?? '') }
+}
+
+/** Why the folder install must be left alone, or undefined when it is clean and exactly on a release tag. */
+async function installBlocker($: Dollar): Promise<string | undefined> {
+  const status = await git($, ['status', '--porcelain'])
+  if (status.exitCode !== 0) throw new Error(`git status exited with ${status.exitCode}`)
+  if (status.stdout.trim() !== '') return 'uncommitted changes in the install'
+  const at = await git($, ['describe', '--tags', '--exact-match', 'HEAD'])
+  return at.exitCode === 0 && RELEASE_TAG.test(at.stdout.trim()) ? undefined : 'the install is not on a release tag'
+}
+
+/** Git verifies the last signature block of a tag, so the last `-----BEGIN ` line must open an SSH signature that ends the object; armor quoted in the message does not count. */
+function endsInSshSignature(obj: string): boolean {
+  const lines = obj.replace(/\n$/, '').split('\n')
+  const begin = lines.map((l, i) => (l.startsWith('-----BEGIN ') ? i : -1)).filter((i) => i >= 0).pop()
+  return begin !== undefined && lines[begin] === '-----BEGIN SSH SIGNATURE-----' && lines[lines.length - 1] === '-----END SSH SIGNATURE-----' && !lines.slice(begin + 1, -1).some((l) => l.startsWith('-----'))
+}
+
+/**
+ * True when the tag object `oid` (the object `refs/tags/<tag>` pointed to when it was resolved) is an SSH-signed tag named `tag`
+ * whose signature is the `updateSigner` key's. Git picks the verifier from the signature armor, so a PGP-signed tag would pass
+ * `gpg.format=ssh`; the armor is therefore required here. The signature does not cover the ref name, so the object's own
+ * `tag` header must equal `tag`. The allowed_signers file is rewritten each time, so an older key never stays valid.
+ */
+async function tagVerified($: Dollar, signer: string, tag: string, oid: string): Promise<boolean> {
+  const obj = await git($, ['cat-file', 'tag', oid])
+  if (obj.exitCode !== 0) return false
+  const header = obj.stdout.split('\n\n')[0] ?? ''
+  if (!header.split('\n').includes(`tag ${tag}`) || !endsInSshSignature(obj.stdout)) return false
+  const dir = (await $.process.hookEnv()).CLAUDE_PLUGIN_DATA
+  if (dir === undefined || dir === '') throw new Error('no plugin data folder')
+  const file = `${dir}/allowed_signers`
+  await $.fs.write(file, `souffleur namespaces="git" ${signer}\n`)
+  const r = await git($, ['-c', 'gpg.format=ssh', '-c', `gpg.ssh.allowedSignersFile=${file}`, 'verify-tag', oid])
+  return r.exitCode === 0 && r.stderr.split('\n').some((line) => line.startsWith('Good "git" signature for souffleur with '))
+}
+
+type Install = { done: 'installed'; signed: boolean } | { done: 'refused'; reason: string } | { done: 'unverified' }
+
+/** Fetches, resolves `tag` once to an object id, verifies that object when a signer is set (or `needSigner`), and checks out its commit. Throws on a git failure. */
+async function installTag($: Dollar, l: Loaded, tag: string, needSigner: boolean): Promise<Install> {
+  const blocker = await installBlocker($)
+  if (blocker !== undefined) return { done: 'refused', reason: blocker }
+  const f = await git($, ['fetch', '-q', '--tags', REPO_URL], FETCH_TIMEOUT_MS)
+  if (f.exitCode !== 0) throw new Error(`git fetch exited with ${f.exitCode}`)
+  const signer = l.config.updateSigner
+  if (signer === undefined && needSigner) return { done: 'unverified' }
+  const resolved = await git($, ['rev-parse', '--verify', `refs/tags/${tag}`])
+  const oid = resolved.stdout.trim()
+  if (resolved.exitCode !== 0 || !/^[0-9a-f]{40,64}$/.test(oid)) throw new Error(`git rev-parse exited with ${resolved.exitCode}`)
+  if (signer !== undefined && !(await tagVerified($, signer, tag, oid))) return { done: 'unverified' }
+  const c = await git($, ['checkout', '-q', `${oid}^{commit}`])
+  if (c.exitCode !== 0) throw new Error(`git checkout exited with ${c.exitCode}`)
+  return { done: 'installed', signed: signer !== undefined }
+}
+
+/** Automatic install, run detached after the start line: only a tag signed by `updateSigner` installs, once per session and tag. */
+async function autoInstall($: Dollar, l: Loaded, sid: string): Promise<void> {
+  const tag = (await readCheck($))?.latest
+  if (tag === undefined || compareVersions(tag.slice(1), PLUGIN_VERSION) !== 1) return
+  if (latest?.id === sid && latest.updateShown === tag) return
+  if (toldKey === `${sid}:${tag}`) return
+  toldKey = `${sid}:${tag}`
+  const tell = async (line: string) => {
+    if (say($, l, line)) await markShown($, tag)
+  }
+  if (l.config.updateSigner === undefined) return tell(updateLine('auto-no-signer', tag, PLUGIN_VERSION))
+  try {
+    const r = await installTag($, l, tag, true)
+    if (r.done === 'refused') await tell(refusalLine(r.reason, $.plugin.root))
+    else if (r.done === 'unverified') await tell(updateLine('auto-unverified', tag, PLUGIN_VERSION, $.plugin.root))
+    else await tell(updateLine('auto-done', tag, PLUGIN_VERSION))
+  } catch (err) {
+    $.ui.log(`update install failed: ${message(err)}`, { to: 'debug' })
+  }
+}
+
+/** `/souffleur update`: installs the newest release now. Verifies when a signer is set; installs an unsigned tag only because the person asked. */
+/** First line of a git message, cut to 120 characters, without a final dot; `fallback` when it is empty. */
+function shortReason(text: string, fallback: string): string {
+  return text.split('\n').map((x) => x.trim()).find((x) => x !== '')?.slice(0, 120).replace(/\.+$/, '') || fallback
+}
+
+async function runUpdate($: Dollar, l: Loaded): Promise<string> {
+  if ((await installKind($)) === 'market') return 'Souffleur: installed through the marketplace; run /plugin update.'
+  let r: { exitCode: number; stdout: unknown; stderr?: unknown }
+  try {
+    r = await $.process.run(['git', 'ls-remote', '--tags', '--refs', REPO_URL], { timeoutMs: 15000 })
+  } catch (err) {
+    return `Souffleur: could not look up releases: ${shortReason(message(err), 'git failed')}.`
+  }
+  if (r.exitCode !== 0) return `Souffleur: could not look up releases: ${shortReason(String(r.stderr ?? ''), `git exited with ${r.exitCode}`)}.`
+  const tag = newestRelease(String(r.stdout), PLUGIN_VERSION)
+  if (tag === undefined) return `Souffleur: ${PLUGIN_VERSION} is the newest release.`
+  let done: Install
+  try {
+    done = await installTag($, l, tag, false)
+  } catch (err) {
+    return `Souffleur: could not install ${shown(tag)}: ${message(err).split('\n')[0]!.slice(0, 120)}.`
+  }
+  if (done.done === 'refused') return refusalLine(done.reason, $.plugin.root)
+  if (done.done === 'unverified') return `Souffleur: ${shown(tag)} is not signed by your updateSigner key; not installed.`
+  return `Souffleur: updated to ${shown(tag)} (${done.signed ? 'signed' : 'unsigned; you asked for it'})\nRunning sessions pick it up at their next turn.`
 }
 
 /** Stored copies of sessions not touched for this long are removed at session start. */
@@ -1672,19 +1863,50 @@ export const register: Register = (on) => {
         // Resume or reload: the ledger stays, what the config said last time does not.
         s = decide(l.config, { ...before, errors: [] }, { type: 'start', now: now(), start: held?.id === id ? 'reload' : 'resume', version }).session
         s = decide(l.config, s, { type: 'config', now: now(), errors: l.errors }).session
-      } else s = await freshSession($, l, id, 'startup')
+      } else {
+        s = await freshSession($, l, id, 'startup')
+        toldKey = '' // a new session has told nothing yet
+      }
       restoredAskStopped = s.askStopped === true
       // Problems that hold at the start are news once; a resumed session's stored `noticed` keeps them from repeating.
       const first = notices(l.config, s, s, l.root)
       s = first.session
+      // A newer release found earlier is shown once per session (the mark survives reload and resume).
+      const found = l.config.update === 'off' ? undefined : (await readCheck($))?.latest
+      const tell = found !== undefined && compareVersions(found.slice(1), PLUGIN_VERSION) === 1 && s.updateShown !== found ? found : undefined
+      const kind = tell === undefined ? undefined : await cachedKind($)
       await persist($, l, s, true)
       say($, l, startNotice(l.config, s, l.setUp, PLUGIN_VERSION))
       for (const line of first.lines) say($, l, line)
+      let said = false
+      if (tell !== undefined && kind !== undefined && (l.config.update === 'notify' || kind === 'market')) {
+        said = say($, l, updateLine(kind === 'folder' ? 'notify' : 'notify-market', tell, PLUGIN_VERSION))
+        if (said) toldKey = `${s.id}:${tell}`
+        if (said) await markShown($, tell)
+      }
+      // Neither the first-run line nor the check may hold the session start: both run detached.
+      void (async () => {
+        try {
+          if (l.config.update === 'off') return
+          const k = await installKind($)
+          await $.store.set(KIND_KEY, k)
+          if (tell !== undefined && !said && (l.config.update === 'notify' || k === 'market') && latest?.updateShown !== tell && toldKey !== `${s.id}:${tell}`) {
+            if (say($, l, updateLine(k === 'folder' ? 'notify' : 'notify-market', tell, PLUGIN_VERSION))) {
+              toldKey = `${s.id}:${tell}`
+              await markShown($, tell)
+            }
+          }
+          await checkForUpdate($, l, now())
+          if (l.config.update === 'auto' && k === 'folder') await autoInstall($, l, s.id)
+        } finally {
+          $.ui.log('update work done', { to: 'debug' })
+        }
+      })().catch(() => {})
     })
     await pruneStore($, await $.session.id())
     await safe($, 'installed', undefined, () => refreshInstalled($))
     await safe($, 'command.register', undefined, async () => {
-      await $.command.register({ name: 'souffleur', description: 'Show which skills Souffleur keeps loaded', argumentHint: '[status | need <name> | drop <name> | pause | resume | init | migrate | rule <text> | review | accept <id> | decline <id> | block <name> | unblock <name> | project]' })
+      await $.command.register({ name: 'souffleur', description: 'Show which skills Souffleur keeps loaded', argumentHint: '[status | need <name> | drop <name> | pause | resume | init | migrate | rule <text> | review | accept <id> | decline <id> | block <name> | unblock <name> | project | update]' })
     })
     interactive = e.isInteractive === true
     lastPromptKind = undefined
@@ -1910,6 +2132,16 @@ export const register: Register = (on) => {
         if (text !== undefined) return { text }
         return next(e)
       }
+      if (verb0 === 'update') {
+        if (!isUserOrigin(e)) return { text: 'Souffleur: only the user can run /souffleur update; a plugin or the model cannot.' }
+        const text = await safe($, 'command.run.update', undefined as string | undefined, async () => {
+          loaded = undefined
+          const { l } = await current($)
+          return runUpdate($, l)
+        })
+        if (text !== undefined) return { text }
+        return next(e)
+      }
       if (verb0 === 'rule' || verb0 === 'review' || verb0 === 'accept' || verb0 === 'decline') {
         if (!isUserOrigin(e)) return { text: `Souffleur: only the user can run /souffleur ${verb0}; a plugin or the model cannot.` }
         const rest = (e.args ?? '').trim().slice(verb0.length).trim()
@@ -1925,7 +2157,8 @@ export const register: Register = (on) => {
         loaded = undefined
         await apply($, (l0) => ({ type: 'config', now: now(), errors: l0.errors }))
         const total = await readTotal($)
-        const { actions, l } = await apply($, (l0) => ({ type: 'command', now: now(), args: e.args ?? '', root: l0.root, ...(total === undefined ? {} : { total }) }))
+        const update = await updateInfo($)
+        const { actions, l } = await apply($, (l0) => ({ type: 'command', now: now(), args: e.args ?? '', root: l0.root, update, ...(total === undefined ? {} : { total }) }))
         const text = actions.flatMap((a) => (a.kind === 'reply' ? [a.text] : []))[0]
         const verb = (e.args ?? '').trim().split(/\s+/)[0] ?? ''
         const note = '\n\nSouffleur is not set up: there is no ~/.claude/souffleur.json. Run /souffleur init to add one.'

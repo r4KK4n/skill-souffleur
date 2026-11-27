@@ -6,7 +6,7 @@ import type { Action, CoreEvent, Session } from '../src/core/decide.ts'
 import { NOTE_CAP, sectionNotes } from '../src/core/rules.ts'
 import type { Config, Note, Rule } from '../src/core/types.ts'
 
-const empty: Config = { mode: 'enforce', skills: {}, needs: { ui: { for: 'users', what: 'Building a screen.' } }, trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true }
+const empty: Config = { mode: 'enforce', skills: {}, needs: { ui: { for: 'users', what: 'Building a screen.' } }, trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true, update: 'notify' }
 const cfg = (patch: Partial<Config>): Config => ({ ...empty, ...patch })
 
 let t = 0

@@ -32,6 +32,8 @@ type World = {
   classifyCalls: () => number
   /** The lines written with `$.ui.log` (transcript). */
   logs: string[]
+  /** Every `$.process.run` call: its argv and timeout. */
+  runs: { argv: readonly string[]; timeoutMs?: number }[]
   /** The lines written with `$.ui.log(..., { to: 'debug' })`. */
   debugLogs: string[]
   /** From now on `$.tool.list` does not show the propose tool, as after a disconnect. */
@@ -101,6 +103,8 @@ type Opts = {
   holdFirstAsk?: Promise<string>
   /** The first dialogs are held, one promise each, in order; later dialogs take `answers`. */
   holdQueue?: Promise<string>[]
+  /** What `$.process.run` answers; sees the argv. Absent: every run exits 0 with no output. */
+  run?: (argv: readonly string[], init?: { timeoutMs?: number }) => { exitCode: number; stdout: string; stderr: string } | Promise<{ exitCode: number; stdout: string; stderr: string }> | Error
 }
 
 /** Answers every call the mod makes on `$`; files maps an absolute path to its text, a missing path throws. */
@@ -162,12 +166,21 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
     logs.push(e.text)
     return { value: undefined } as never
   })
+  const runs: World['runs'] = []
+  on('process.run', (_, e) => {
+    const init = (e as { init?: { timeoutMs?: number } }).init
+    runs.push({ argv: e.argv, ...(init?.timeoutMs === undefined ? {} : { timeoutMs: init.timeoutMs }) })
+    const out = opts.run ? opts.run(e.argv, init) : { exitCode: 0, stdout: '', stderr: '' }
+    if (out instanceof Error) return { deny: out.message } as never
+    return (out instanceof Promise ? out.then((value) => ({ value })) : { value: out }) as never
+  })
   on('ui.toast', (_, e) => {
     toasts.push(e.text)
     return { value: undefined } as never
   })
   on('session.version', () => ({ value: { version: '2.1.332' } }))
   on('env.get', () => ({ value: HOME }))
+  on('process.hookEnv', () => ({ value: { CLAUDE_PLUGIN_DATA: '/data/souffleur' } }))
   on('fs.exists', (_, e) => ({ value: files[e.path] !== undefined && !hidden.has(e.path) }))
   on('fs.read', (_, e) => {
     if (failRead.includes(e.path) || opts.failRead?.includes(e.path)) throw new Error('EACCES: permission denied')
@@ -253,7 +266,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   on('turn.complete', (_, e) => ({ text: e.answer }))
   on('session.compact', () => (opts.skipCompact ? { skip: 'vetoed' } : { messages: [{ role: 'user', text: 'summary', toolUses: [] }] }))
   on('command.run', () => ({}))
-  return { statuses, setId: (next) => { id = next }, seen, writes, asked, options, clock, hide: (path) => void hidden.add(path), files, tools, toasts, failRead, answers, driftAfter: (path, n) => { drift.path = path; drift.left = n }, stored: storeData, classifyCalls: () => classifyCalls, logs, debugLogs, dropTool: () => { toolGone = true } }
+  return { statuses, setId: (next) => { id = next }, seen, writes, asked, options, clock, hide: (path) => void hidden.add(path), files, tools, toasts, failRead, answers, driftAfter: (path, n) => { drift.path = path; drift.left = n }, stored: storeData, classifyCalls: () => classifyCalls, logs, runs, debugLogs, dropTool: () => { toolGone = true } }
 }
 
 const COMPOSE = { model: 'm', promptModel: 'm', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] } as never
@@ -663,7 +676,7 @@ test('the /souffleur command shows its arguments in the typeahead', async ($, on
   registeredCommands.length = 0
   world(on, { [USER_FILE]: ALWAYS })
   await start($)
-  expect(JSON.stringify(registeredCommands)).toContain('"argumentHint":"[status | need <name> | drop <name> | pause | resume | init | migrate | rule <text> | review | accept <id> | decline <id> | block <name> | unblock <name> | project]"')
+  expect(JSON.stringify(registeredCommands)).toContain('"argumentHint":"[status | need <name> | drop <name> | pause | resume | init | migrate | rule <text> | review | accept <id> | decline <id> | block <name> | unblock <name> | project | update]"')
 })
 
 // ---- review fixes ----
@@ -3735,4 +3748,475 @@ test('a resume shows a time in the status line at once', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS }, { stored: { 'session:s1': old } })
   await start($)
   expect(w.statuses.at(-1)).toMatch(/^\d\d:\d\d · /)
+})
+
+// ---- update notice ----
+
+const LS = (...tags: string[]) => tags.map((t, i) => `${String(i + 1).padStart(40, 'a')}\trefs/tags/${t}`).join('\n')
+const NEWER = 'v0.2.99'
+const NEWER_V = NEWER.slice(1)
+const lsRemoteCalls = (w: World) => w.runs.filter((r) => r.argv.includes('ls-remote'))
+const FOLDER_ROOT = (argv: readonly string[]) => (argv.includes('rev-parse') ? { exitCode: 0, stdout: '\n', stderr: '' } : undefined)
+const MARKET_ROOT = (argv: readonly string[]) => (argv.includes('rev-parse') ? { exitCode: 128, stdout: '', stderr: 'fatal: not a git repository' } : undefined)
+const runWith = (ls: { exitCode: number; stdout: string }, root = FOLDER_ROOT): NonNullable<Opts['run']> => (argv) => {
+  const r = root(argv)
+  if (r) return r
+  return { ...ls, stderr: '' }
+}
+const SETUP = { [USER_FILE]: ALWAYS }
+
+test('update: a due check runs ls-remote once and stores updateCheck', async ($, on) => {
+  const w = world(on, SETUP, { run: runWith({ exitCode: 0, stdout: LS('v0.1.0', NEWER, 'v0.3.0-rc.1') }) })
+  await start($)
+  await settleUpdate(w)
+  const calls = lsRemoteCalls(w)
+  expect(calls.length).toBe(1)
+  expect(calls[0]!.argv).toEqual(['git', 'ls-remote', '--tags', '--refs', 'https://github.com/r4KK4n/skill-souffleur'])
+  expect(calls[0]!.timeoutMs).toBe(15000)
+  expect(w.stored.updateCheck).toEqual({ at: expect.any(Number), latest: NEWER })
+})
+
+test('update: nothing newer stores the running version as latest', async ($, on) => {
+  const w = world(on, SETUP, { run: runWith({ exitCode: 0, stdout: LS('v0.1.0', `v${PLUGIN_VERSION}`) }) })
+  await start($)
+  await settleUpdate(w)
+  expect(w.stored.updateCheck).toEqual({ at: expect.any(Number), latest: `v${PLUGIN_VERSION}` })
+  expect(w.logs.some((l) => l.includes('is out'))).toBe(false)
+})
+
+test('update: unparsable ls-remote output logs a debug line and stores at only', async ($, on) => {
+  const w = world(on, SETUP, { run: runWith({ exitCode: 0, stdout: '<html>nope</html>' }) })
+  await start($)
+  await settleUpdate(w)
+  expect(w.debugLogs).toContain('update check: unparsable ls-remote output')
+  expect(w.stored.updateCheck).toEqual({ at: expect.any(Number) })
+})
+
+test('update: a fresh check does not run', async ($, on) => {
+  const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now() - 3_600_000 } }, run: runWith({ exitCode: 0, stdout: LS(NEWER) }) })
+  await start($)
+  await settleUpdate(w)
+  expect(lsRemoteCalls(w).length).toBe(0)
+})
+
+test('update: an old check runs again', async ($, on) => {
+  const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now() - 90_000_000 } }, run: runWith({ exitCode: 0, stdout: LS(NEWER) }) })
+  await start($)
+  await settleUpdate(w)
+  expect(lsRemoteCalls(w).length).toBe(1)
+})
+
+test('update: off runs nothing and says nothing', async ($, on) => {
+  const w = world(on, { [USER_FILE]: JSON.stringify({ update: 'off' }) }, { stored: { updateCheck: { at: 1, latest: NEWER } }, run: runWith({ exitCode: 0, stdout: LS(NEWER) }) })
+  await start($)
+  await settleUpdate(w)
+  expect(w.runs.length).toBe(0)
+  expect(w.logs.some((l) => l.includes('is out'))).toBe(false)
+})
+
+test('update: a failed run stores at, logs to debug and shows no notice', async ($, on) => {
+  const w = world(on, SETUP, { run: runWith({ exitCode: 128, stdout: '' }) })
+  await start($)
+  await settleUpdate(w)
+  expect(w.stored.updateCheck).toEqual({ at: expect.any(Number) })
+  expect(w.debugLogs.some((l) => l.startsWith('update check failed: '))).toBe(true)
+  expect(w.logs.some((l) => l.includes('is out'))).toBe(false)
+})
+
+test('update: a rejected run (timeout) is stored too and keeps the earlier latest', async ($, on) => {
+  const w = world(on, SETUP, { stored: { updateCheck: { at: 1, latest: 'v0.0.1' } }, run: (argv) => (argv.includes('rev-parse') ? FOLDER_ROOT(argv)! : new Error('timed out')) })
+  await start($)
+  await settleUpdate(w)
+  expect(w.stored.updateCheck).toEqual({ at: expect.any(Number), latest: 'v0.0.1' })
+  expect(w.debugLogs.some((l) => l.startsWith('update check failed: ') && l.includes('timed out'))).toBe(true)
+})
+
+test('update: a stored newer latest says the notify line once; a reload does not repeat it', async ($, on) => {
+  const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: runWith({ exitCode: 0, stdout: '' }) })
+  await start($)
+  await settleUpdate(w)
+  const line = `Souffleur ${NEWER_V} is out (you run ${PLUGIN_VERSION}). /souffleur update installs it.`
+  expect(w.logs.filter((l) => l === line).length).toBe(1)
+  await start($)
+  await settleUpdate(w, 2)
+  expect(w.logs.filter((l) => l === line).length).toBe(1)
+})
+
+test('update: the marketplace install is pointed to /plugin update', async ($, on) => {
+  const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: runWith({ exitCode: 0, stdout: '' }, MARKET_ROOT) })
+  await start($)
+  await settleUpdate(w)
+  expect(w.logs).toContain(`Souffleur ${NEWER_V} is out (you run ${PLUGIN_VERSION}). /plugin update installs it.`)
+})
+
+test('update: a stored latest that is not newer says nothing', async ($, on) => {
+  const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now(), latest: `v${PLUGIN_VERSION}` } }, run: runWith({ exitCode: 0, stdout: '' }) })
+  await start($)
+  await settleUpdate(w)
+  expect(w.logs.some((l) => l.includes('is out'))).toBe(false)
+})
+
+test('update: a never-resolving process.run does not hold session.start', async ($, on) => {
+  world(on, SETUP, { run: () => new Promise(() => {}) })
+  await start($)
+})
+
+test('update: /souffleur shows the version line from the stored check', async ($, on) => {
+  const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: runWith({ exitCode: 0, stdout: '' }) })
+  await start($)
+  await settleUpdate(w)
+  expect(await table($)).toContain(`Version ${PLUGIN_VERSION} · latest ${NEWER_V} ·`)
+})
+
+test('update: a cached install kind shows the line at start although rev-parse never answers', async ($, on) => {
+  const w = world(on, SETUP, { stored: { installKind: 'folder', updateCheck: { at: Date.now(), latest: NEWER } }, run: (argv) => (argv.includes('rev-parse') ? new Promise(() => {}) : { exitCode: 0, stdout: '', stderr: '' }) })
+  await start($)
+  expect(w.logs).toContain(`Souffleur ${NEWER_V} is out (you run ${PLUGIN_VERSION}). /souffleur update installs it.`)
+})
+
+test('update: the first run learns the install kind, stores it and says the line once', async ($, on) => {
+  const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: runWith({ exitCode: 0, stdout: '' }, MARKET_ROOT) })
+  await start($)
+  await settleUpdate(w)
+  expect(w.stored.installKind).toBe('market')
+  expect(w.logs.filter((l) => l.includes('/plugin update installs it.')).length).toBe(1)
+  await start($)
+  await settleUpdate(w, 2)
+  expect(w.logs.filter((l) => l.includes('is out')).length).toBe(1)
+})
+
+test('update: a plugin folder inside a work tree (non-empty prefix) is a marketplace install', async ($, on) => {
+  const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: (argv) => (argv.includes('rev-parse') ? { exitCode: 0, stdout: 'plugins/x/\n', stderr: '' } : { exitCode: 0, stdout: '', stderr: '' }) })
+  await start($)
+  await settleUpdate(w)
+  expect(w.stored.installKind).toBe('market')
+  expect(w.runs.find((r) => r.argv.includes('rev-parse'))!.argv).toContain('--show-prefix')
+})
+
+test('update: a second start before the first detached work finishes does not say the line twice', async ($, on) => {
+  let release: (v: { exitCode: number; stdout: string; stderr: string }) => void = () => {}
+  const held = new Promise<{ exitCode: number; stdout: string; stderr: string }>((r) => { release = r })
+  const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: (argv) => (argv.includes('rev-parse') ? held : { exitCode: 0, stdout: '', stderr: '' }) })
+  await start($)
+  await start($)
+  release({ exitCode: 0, stdout: '\n', stderr: '' })
+  await settleUpdate(w, 2)
+  await new Promise((r) => setTimeout(r, 20))
+  expect(w.logs.filter((l) => l.includes('is out')).length).toBe(1)
+})
+
+// ---- update install ----
+
+/**
+ * Waits until the detached update work of `starts` session starts has said it is done (debug line `update work done`).
+ * The engine runs its own copy of the mod, so the test cannot read a promise from it; the debug line is the signal.
+ */
+const settleUpdate = async (w: World, starts = 1) => {
+  for (let i = 0; i < 200 && w.debugLogs.filter((l) => l === 'update work done').length < starts; i++) await new Promise((r) => setTimeout(r, 15))
+  expect(w.debugLogs.filter((l) => l === 'update work done').length).toBeGreaterThanOrEqual(starts)
+}
+
+let nextId = 0
+/** A session id of its own, so the module-level once-per-session guards of an earlier test do not apply. */
+const own = (w: World) => w.setId(`upd-${++nextId}`)
+
+const SIGNER = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA test@example'
+const AUTO_FILE = { [USER_FILE]: JSON.stringify({ update: 'auto', updateSigner: SIGNER }) }
+const AUTO_NO_SIGNER = { [USER_FILE]: JSON.stringify({ update: 'auto' }) }
+const OK = { exitCode: 0, stdout: '', stderr: '' }
+const STORED_NEWER = { installKind: 'folder', updateCheck: { at: Date.now(), latest: NEWER } }
+/** Nothing newer is known, so the session start does no install of its own. */
+const QUIET = { installKind: 'folder', updateCheck: { at: Date.now(), latest: 'v0.0.1' } }
+const OID = 'f'.repeat(40)
+const SSH_TAG = (name: string) => `object ${'a'.repeat(40)}\ntype commit\ntag ${name}\ntagger t <t@t> 1 +0000\n\nrelease\n-----BEGIN SSH SIGNATURE-----\nU1NIU0lH\n-----END SSH SIGNATURE-----\n`
+const GOOD = 'Good "git" signature for souffleur with ED25519 key SHA256:abc'
+type Out = { exitCode: number; stdout?: string; stderr?: string } | Error
+/** A folder install on a clean tag; `over` answers a git subcommand first (`resolve` is `rev-parse --verify`). */
+const gitRun = (over: Record<string, Out> = {}): NonNullable<Opts['run']> => (argv) => {
+  const sub = argv.includes('--verify') ? 'resolve' : ['rev-parse', 'status', 'describe', 'fetch', 'verify-tag', 'cat-file', 'checkout', 'ls-remote'].find((c) => argv.includes(c))
+  const out = (o: Out) => (o instanceof Error ? o : { exitCode: o.exitCode, stdout: o.stdout ?? '', stderr: o.stderr ?? '' })
+  if (sub !== undefined && over[sub] !== undefined) return out(over[sub]!)
+  switch (sub) {
+    case 'rev-parse': return { exitCode: 0, stdout: '\n', stderr: '' }
+    case 'resolve': return { exitCode: 0, stdout: `${OID}\n`, stderr: '' }
+    case 'describe': return { exitCode: 0, stdout: `v${PLUGIN_VERSION}\n`, stderr: '' }
+    case 'ls-remote': return { exitCode: 0, stdout: LS(NEWER), stderr: '' }
+    case 'cat-file': return { exitCode: 0, stdout: SSH_TAG(NEWER), stderr: '' }
+    case 'verify-tag': return { exitCode: 0, stdout: '', stderr: GOOD }
+    default: return OK
+  }
+}
+const ran = (w: World, sub: string) => w.runs.filter((r) => r.argv.includes(sub))
+/** The plugin root the mod asked git about. */
+const rootOf = (w: World) => String(w.runs[0]!.argv[2])
+const AUTO_LINE = `Souffleur updated to ${NEWER_V} (tag signed by your key).`
+
+test('update auto: a verified tag is fetched, verified, checked out and said once', async ($, on) => {
+  const w = world(on, AUTO_FILE, { stored: STORED_NEWER, run: gitRun() })
+  own(w)
+  await start($)
+  await settleUpdate(w)
+  expect(w.logs.filter((l) => l === AUTO_LINE).length).toBe(1)
+  expect(ran(w, 'checkout').length).toBe(1)
+  expect(ran(w, 'checkout')[0]!.argv.at(-1)).toBe(`${OID}^{commit}`)
+  expect(ran(w, 'fetch')[0]!.timeoutMs).toBe(30000)
+  for (const r of ran(w, 'status').concat(ran(w, 'describe'), ran(w, 'verify-tag'), ran(w, 'checkout'))) expect(r.timeoutMs).toBe(10000)
+  expect((w.stored.updateCheck as { latest: string }).latest).toBe(NEWER)
+  await start($)
+  await settleUpdate(w)
+  expect(ran(w, 'checkout').length).toBe(1)
+  expect(w.logs.filter((l) => l === AUTO_LINE).length).toBe(1)
+})
+
+test('update auto: the allowed_signers file is written with the current key before verifying', async ($, on) => {
+  const w = world(on, AUTO_FILE, { stored: STORED_NEWER, run: gitRun() })
+  own(w)
+  await start($)
+  await settleUpdate(w)
+  const w2 = w.writes.filter((x) => x.path === '/data/souffleur/allowed_signers')
+  expect(w2.map((x) => x.text)).toEqual([`souffleur namespaces="git" ${SIGNER}\n`])
+  const v = ran(w, 'verify-tag')[0]!.argv
+  expect(v).toContain('gpg.format=ssh')
+  expect(v).toContain('gpg.ssh.allowedSignersFile=/data/souffleur/allowed_signers')
+  expect(v[v.length - 1]).toBe(OID)
+})
+
+test('update auto: a tag that does not verify says so and runs no checkout', async ($, on) => {
+  const w = world(on, AUTO_FILE, { stored: STORED_NEWER, run: gitRun({ 'verify-tag': { exitCode: 1 } }) })
+  own(w)
+  await start($)
+  await settleUpdate(w)
+  expect(w.logs).toContain(`Souffleur ${NEWER_V} is out but its tag is not signed by your updateSigner key; not installed. Update by hand with git in ${rootOf(w)}.`)
+  expect(ran(w, 'checkout').length).toBe(0)
+})
+
+test('update auto: without updateSigner it says the no-signer line and runs no checkout', async ($, on) => {
+  const w = world(on, AUTO_NO_SIGNER, { stored: STORED_NEWER, run: gitRun() })
+  own(w)
+  await start($)
+  await settleUpdate(w)
+  expect(w.logs).toContain(`Souffleur ${NEWER_V} is out (you run ${PLUGIN_VERSION}). /souffleur update installs it. Set updateSigner to let auto install it.`)
+  expect(w.logs.filter((l) => l.includes('is out')).length).toBe(1)
+  expect(w.stored.installKind).toBe('folder')
+  expect(ran(w, 'checkout').length).toBe(0)
+  expect(ran(w, 'fetch').length).toBe(0)
+})
+
+test('update auto: a marketplace install gets the notify line and no install', async ($, on) => {
+  const w = world(on, AUTO_FILE, { stored: { ...STORED_NEWER, installKind: 'market' }, run: gitRun({ 'rev-parse': { exitCode: 128 } }) })
+  own(w)
+  await start($)
+  await settleUpdate(w)
+  expect(w.logs).toContain(`Souffleur ${NEWER_V} is out (you run ${PLUGIN_VERSION}). /plugin update installs it.`)
+  expect(ran(w, 'checkout').length).toBe(0)
+})
+
+for (const [name, over, reason] of [
+  ['a dirty tree', { status: { exitCode: 0, stdout: ' M src/x.ts\n' } }, 'uncommitted changes in the install'],
+  ['HEAD not on a tag', { describe: { exitCode: 128 } }, 'the install is not on a release tag'],
+  ['HEAD on a pre-release tag', { describe: { exitCode: 0, stdout: 'v0.3.0-rc.1\n' } }, 'the install is not on a release tag'],
+] as const) {
+  test(`update auto: ${name} is refused with its reason and nothing is changed`, async ($, on) => {
+    const w = world(on, AUTO_FILE, { stored: STORED_NEWER, run: gitRun(over) })
+  own(w)
+    await start($)
+    await settleUpdate(w)
+    expect(w.logs).toContain(`Souffleur: not updated, ${reason}. Update by hand with git in ${rootOf(w)}.`)
+    expect(ran(w, 'status').length).toBe(1)
+    expect(ran(w, 'checkout').length).toBe(0)
+    expect(ran(w, 'fetch').length).toBe(0)
+  })
+}
+
+test('update auto: verification and checkout use the resolved object id, never the bare tag name', async ($, on) => {
+  const w = world(on, AUTO_FILE, { stored: STORED_NEWER, run: gitRun() })
+  own(w)
+  await start($)
+  await settleUpdate(w)
+  const resolve = w.runs.find((r) => r.argv.includes('--verify'))!.argv
+  expect(resolve).toContain(`refs/tags/${NEWER}`)
+  expect(ran(w, 'cat-file')[0]!.argv).toContain(OID)
+  expect(ran(w, 'verify-tag')[0]!.argv.at(-1)).toBe(OID)
+  expect(ran(w, 'checkout')[0]!.argv.at(-1)).toBe(`${OID}^{commit}`)
+  expect(ran(w, 'checkout')[0]!.argv).not.toContain(NEWER)
+})
+
+test('update: fetch uses the repository URL of the look-up, not origin', async ($, on) => {
+  const w = world(on, AUTO_FILE, { stored: STORED_NEWER, run: gitRun() })
+  own(w)
+  await start($)
+  await settleUpdate(w)
+  const f = ran(w, 'fetch')[0]!.argv
+  expect(f).toContain('https://github.com/r4KK4n/skill-souffleur')
+  expect(f).not.toContain('origin')
+})
+
+for (const [name, over] of [
+  ['a PGP signature (no SSH armor)', { 'cat-file': { exitCode: 0, stdout: `object a\ntype commit\ntag ${NEWER}\n\nx\n-----BEGIN PGP SIGNATURE-----\nzz\n-----END PGP SIGNATURE-----\n` } }],
+  ['a tag object named for another release', { 'cat-file': { exitCode: 0, stdout: SSH_TAG('v9.9.9') } }],
+  ['a lightweight tag (no tag object)', { 'cat-file': { exitCode: 128 } }],
+  ['SSH armor in the message with a PGP block last', { 'cat-file': { exitCode: 0, stdout: `object a\ntype commit\ntag ${NEWER}\n\n-----BEGIN SSH SIGNATURE-----\nx\n-----END SSH SIGNATURE-----\n-----BEGIN PGP SIGNATURE-----\nzz\n-----END PGP SIGNATURE-----\n` } }],
+  ['an SSH block that does not end the object', { 'cat-file': { exitCode: 0, stdout: `${SSH_TAG(NEWER)}trailing text\n` } }],
+  ['the good text in the middle of a gpg line', { 'verify-tag': { exitCode: 0, stderr: 'gpg: Good signature from "x Good "git" signature for souffleur with y"' } }],
+  ['the good text after a U+2028 inside a gpg line', { 'verify-tag': { exitCode: 0, stderr: 'gpg: Good signature from "x\u2028Good "git" signature for souffleur with y"' } }],
+  ['the good text after a carriage return inside a gpg line', { 'verify-tag': { exitCode: 0, stderr: 'gpg: Good signature from "x\rGood "git" signature for souffleur with y"' } }],
+  ['a verify that exits 0 without the Good line', { 'verify-tag': { exitCode: 0, stderr: 'something else' } }],
+] as const) {
+  test(`update auto: ${name} is not installed`, async ($, on) => {
+    const w = world(on, AUTO_FILE, { stored: STORED_NEWER, run: gitRun(over) })
+    own(w)
+    await start($)
+    await settleUpdate(w)
+    expect(ran(w, 'cat-file').length).toBe(1)
+    expect(ran(w, 'checkout').length).toBe(0)
+    expect(w.logs.some((l) => l.includes('updated to'))).toBe(false)
+    expect(w.logs.some((l) => l.includes('is not signed by your updateSigner key'))).toBe(true)
+  })
+  test(`/souffleur update: ${name} is not installed`, async ($, on) => {
+    const w = world(on, AUTO_FILE, { stored: QUIET, run: gitRun(over) })
+    own(w)
+    await start($)
+    expect(await runUser($, 'update')).toMatch(/not signed by your updateSigner key; not installed/)
+    expect(ran(w, 'checkout').length).toBe(0)
+  })
+}
+
+test('/souffleur update: checks out the resolved object id also when unsigned', async ($, on) => {
+  const w = world(on, SETUP, { stored: QUIET, run: gitRun() })
+  own(w)
+  await start($)
+  await runUser($, 'update')
+  expect(ran(w, 'checkout')[0]!.argv.at(-1)).toBe(`${OID}^{commit}`)
+})
+
+test('/souffleur update: a git failure answers with the reason, not the usage line', async ($, on) => {
+  const w = world(on, SETUP, { stored: QUIET, run: gitRun({ fetch: { exitCode: 1 } }) })
+  own(w)
+  await start($)
+  const text = await runUser($, 'update')
+  expect(text).toBe(`Souffleur: could not install ${NEWER_V}: git fetch exited with 1.`)
+})
+
+test('/souffleur update: a rejected git call answers with the reason too', async ($, on) => {
+  const w = world(on, SETUP, { stored: QUIET, run: gitRun({ fetch: new Error('timed out') }) })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toMatch(/^Souffleur: could not install 0\.2\.99: /)
+})
+
+test('/souffleur update: a failing ls-remote answers with the git message', async ($, on) => {
+  const w = world(on, SETUP, { stored: QUIET, run: gitRun({ 'ls-remote': { exitCode: 128, stderr: 'fatal: unable to access repo\nmore' } }) })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toBe('Souffleur: could not look up releases: fatal: unable to access repo.')
+})
+
+test('/souffleur update: a failing ls-remote without a message answers with the exit code', async ($, on) => {
+  const w = world(on, SETUP, { stored: QUIET, run: gitRun({ 'ls-remote': { exitCode: 128 } }) })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toBe('Souffleur: could not look up releases: git exited with 128.')
+})
+
+test('/souffleur update: a rejected ls-remote answers instead of throwing', async ($, on) => {
+  const w = world(on, SETUP, { stored: QUIET, run: gitRun({ 'ls-remote': new Error('timed out') }) })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toMatch(/^Souffleur: could not look up releases: .*timed out\.$/)
+})
+
+test('update auto: a git failure logs to debug, says nothing and does not mark the tag shown', async ($, on) => {
+  const w = world(on, AUTO_FILE, { stored: STORED_NEWER, run: gitRun({ fetch: { exitCode: 1 } }) })
+  own(w)
+  await start($)
+  await settleUpdate(w)
+  expect(ran(w, 'fetch').length).toBe(1)
+  expect(w.debugLogs.some((l) => l.startsWith('update install failed: '))).toBe(true)
+  expect(w.logs.some((l) => l.includes('updated to') || l.includes('is out'))).toBe(false)
+  expect((w.stored[`session:upd-${nextId}`] as { updateShown?: string } | undefined)?.updateShown).toBeUndefined()
+})
+
+test('update auto: a failed fetch installs nothing and says no done line', async ($, on) => {
+  const w = world(on, AUTO_FILE, { stored: STORED_NEWER, run: gitRun({ fetch: { exitCode: 1 } }) })
+  own(w)
+  await start($)
+  await settleUpdate(w)
+  expect(ran(w, 'checkout').length).toBe(0)
+  expect(w.logs.some((l) => l.includes('updated to'))).toBe(false)
+})
+
+test('update auto: never delays session.start', async ($, on) => {
+  world(on, AUTO_FILE, { stored: STORED_NEWER, run: (argv) => (argv.includes('rev-parse') ? { exitCode: 0, stdout: '\n', stderr: '' } : new Promise(() => {})) })
+  await start($)
+})
+
+const runUser = async ($: any, args: string, origin?: unknown) => (await $.command.run({ command: 'souffleur', args, ...(origin ? { origin } : {}) })).text as string
+
+test('/souffleur update: installs an unsigned tag when no signer is set, with the unsigned wording', async ($, on) => {
+  const w = world(on, SETUP, { stored: QUIET, run: gitRun() })
+  own(w)
+  await start($)
+  const text = await runUser($, 'update')
+  expect(text).toBe(`Souffleur: updated to ${NEWER_V} (unsigned; you asked for it)\nRunning sessions pick it up at their next turn.`)
+  expect(ran(w, 'checkout').length).toBe(1)
+  expect(ran(w, 'verify-tag').length).toBe(0)
+})
+
+test('/souffleur update: with a signer the tag is verified and the answer says signed', async ($, on) => {
+  const w = world(on, AUTO_FILE, { stored: QUIET, run: gitRun() })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toBe(`Souffleur: updated to ${NEWER_V} (signed)\nRunning sessions pick it up at their next turn.`)
+  expect(ran(w, 'verify-tag').length).toBe(1)
+})
+
+test('/souffleur update: with a signer a tag that does not verify is not installed', async ($, on) => {
+  const w = world(on, AUTO_FILE, { stored: QUIET, run: gitRun({ 'verify-tag': { exitCode: 1 } }) })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toMatch(/not signed by your updateSigner key; not installed/)
+  expect(ran(w, 'checkout').length).toBe(0)
+})
+
+test('/souffleur update: nothing newer says the current version is the newest', async ($, on) => {
+  const w = world(on, SETUP, { stored: QUIET, run: gitRun({ 'ls-remote': { exitCode: 0, stdout: LS(`v${PLUGIN_VERSION}`) } }) })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toBe(`Souffleur: ${PLUGIN_VERSION} is the newest release.`)
+  expect(ran(w, 'checkout').length).toBe(0)
+})
+
+test('/souffleur update: a marketplace install is pointed to /plugin update', async ($, on) => {
+  const w = world(on, SETUP, { stored: QUIET, run: gitRun({ 'rev-parse': { exitCode: 128 } }) })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toBe('Souffleur: installed through the marketplace; run /plugin update.')
+  expect(ran(w, 'checkout').length).toBe(0)
+})
+
+test('/souffleur update: a dirty tree is refused', async ($, on) => {
+  const w = world(on, SETUP, { stored: QUIET, run: gitRun({ status: { exitCode: 0, stdout: '?? x\n' } }) })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toBe(`Souffleur: not updated, uncommitted changes in the install. Update by hand with git in ${rootOf(w)}.`)
+  expect(ran(w, 'checkout').length).toBe(0)
+})
+
+test('/souffleur update: HEAD off a release tag is refused', async ($, on) => {
+  const w = world(on, SETUP, { stored: QUIET, run: gitRun({ describe: { exitCode: 128 } }) })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toBe(`Souffleur: not updated, the install is not on a release tag. Update by hand with git in ${rootOf(w)}.`)
+  expect(ran(w, 'checkout').length).toBe(0)
+})
+
+test('/souffleur update: only the user can run it', async ($, on) => {
+  const w = world(on, SETUP, { stored: QUIET, run: gitRun() })
+  own(w)
+  await start($)
+  for (const origin of [{ kind: 'plugin', name: 'other' }, { kind: 'model' }]) {
+    expect(await runUser($, 'update', origin)).toMatch(/only the user can run/i)
+  }
+  expect(ran(w, 'checkout').length).toBe(0)
+  expect(ran(w, 'fetch').length).toBe(0)
 })

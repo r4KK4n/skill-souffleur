@@ -5,7 +5,7 @@ import type { Config } from '../src/core/types.ts'
 import { enqueue, nextQuestion, answer, makeProposal, YES_PROJECT } from '../src/core/proposals.ts'
 import { MAX_FAILS, MAX_OFFERS, MAX_READS, extractPrompt, originOf, parseAnswer, parseProposals, shouldRead, skillHash, trusted } from '../src/core/learn.ts'
 
-const config: Config = { mode: 'observe', skills: {}, needs: {}, trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true }
+const config: Config = { mode: 'observe', skills: {}, needs: {}, trustProjects: [], rules: [], notes: [], learn: { skills: true }, notices: true, update: 'notify' }
 const off: Config = { ...config, learn: { skills: false } }
 const fresh = () => initSession(config, 's1', 0, 'clear')
 const rule = (command: string) => ({ kind: 'rule', after: { tools: ['Edit'], paths: ['src/**'] }, evidence: { tool: 'Bash', command } })
