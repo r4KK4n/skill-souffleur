@@ -4055,6 +4055,9 @@ for (const [name, over] of [
   ['a PGP signature (no SSH armor)', { 'cat-file': { exitCode: 0, stdout: `object a\ntype commit\ntag ${NEWER}\n\nx\n-----BEGIN PGP SIGNATURE-----\nzz\n-----END PGP SIGNATURE-----\n` } }],
   ['a tag object named for another release', { 'cat-file': { exitCode: 0, stdout: SSH_TAG('v9.9.9') } }],
   ['a lightweight tag (no tag object)', { 'cat-file': { exitCode: 128 } }],
+  ['SSH armor in the message with a PGP block last', { 'cat-file': { exitCode: 0, stdout: `object a\ntype commit\ntag ${NEWER}\n\n-----BEGIN SSH SIGNATURE-----\nx\n-----END SSH SIGNATURE-----\n-----BEGIN PGP SIGNATURE-----\nzz\n-----END PGP SIGNATURE-----\n` } }],
+  ['an SSH block that does not end the object', { 'cat-file': { exitCode: 0, stdout: `${SSH_TAG(NEWER)}trailing text\n` } }],
+  ['the good text in the middle of a gpg line', { 'verify-tag': { exitCode: 0, stderr: 'gpg: Good signature from "x Good "git" signature for souffleur with y"' } }],
   ['a verify that exits 0 without the Good line', { 'verify-tag': { exitCode: 0, stderr: 'something else' } }],
 ] as const) {
   test(`update auto: ${name} is not installed`, async ($, on) => {

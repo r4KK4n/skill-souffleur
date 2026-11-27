@@ -278,6 +278,13 @@ async function installBlocker($: Dollar): Promise<string | undefined> {
   return at.exitCode === 0 && RELEASE_TAG.test(at.stdout.trim()) ? undefined : 'the install is not on a release tag'
 }
 
+/** Git verifies the last signature block of a tag, so the last `-----BEGIN ` line must open an SSH signature that ends the object; armor quoted in the message does not count. */
+function endsInSshSignature(obj: string): boolean {
+  const lines = obj.replace(/\n$/, '').split('\n')
+  const begin = lines.map((l, i) => (l.startsWith('-----BEGIN ') ? i : -1)).filter((i) => i >= 0).pop()
+  return begin !== undefined && lines[begin] === '-----BEGIN SSH SIGNATURE-----' && lines[lines.length - 1] === '-----END SSH SIGNATURE-----' && !lines.slice(begin + 1, -1).some((l) => l.startsWith('-----'))
+}
+
 /**
  * True when the tag object `oid` (the object `refs/tags/<tag>` pointed to when it was resolved) is an SSH-signed tag named `tag`
  * whose signature is the `updateSigner` key's. Git picks the verifier from the signature armor, so a PGP-signed tag would pass
@@ -288,13 +295,13 @@ async function tagVerified($: Dollar, signer: string, tag: string, oid: string):
   const obj = await git($, ['cat-file', 'tag', oid])
   if (obj.exitCode !== 0) return false
   const header = obj.stdout.split('\n\n')[0] ?? ''
-  if (!header.split('\n').includes(`tag ${tag}`) || !obj.stdout.includes('-----BEGIN SSH SIGNATURE-----')) return false
+  if (!header.split('\n').includes(`tag ${tag}`) || !endsInSshSignature(obj.stdout)) return false
   const dir = (await $.process.hookEnv()).CLAUDE_PLUGIN_DATA
   if (dir === undefined || dir === '') throw new Error('no plugin data folder')
   const file = `${dir}/allowed_signers`
   await $.fs.write(file, `souffleur namespaces="git" ${signer}\n`)
   const r = await git($, ['-c', 'gpg.format=ssh', '-c', `gpg.ssh.allowedSignersFile=${file}`, 'verify-tag', oid])
-  return r.exitCode === 0 && r.stderr.includes('Good "git" signature for souffleur')
+  return r.exitCode === 0 && /^Good "git" signature for souffleur with /m.test(r.stderr)
 }
 
 type Install = { done: 'installed'; signed: boolean } | { done: 'refused'; reason: string } | { done: 'unverified' }
