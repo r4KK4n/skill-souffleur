@@ -2111,6 +2111,8 @@ export const register: Register = (on) => {
   on('command.run', async ($, e, next) => {
     if (e.command === 'souffleur') {
       const verb0 = (e.args ?? '').trim().split(/\s+/)[0]
+      // Only a read-only status is open to a plugin or the model; every other verb changes state or opens a dialog.
+      if (verb0 !== '' && verb0 !== 'status' && !isUserOrigin(e)) return { text: `Souffleur: only the user can run /souffleur ${verb0}; a plugin or the model cannot.` }
       if (verb0 === 'init' || verb0 === 'migrate') {
         const text = await safe($, `command.run.${verb0}`, undefined as string | undefined, async () => {
           loaded = undefined // read the files again: another session may have changed them
@@ -2122,7 +2124,6 @@ export const register: Register = (on) => {
         return next(e)
       }
       if (verb0 === 'block' || verb0 === 'unblock' || verb0 === 'project') {
-        if (!isUserOrigin(e)) return { text: `Souffleur: only the user can run /souffleur ${verb0}; a plugin or the model cannot.` }
         const rest = (e.args ?? '').trim().slice(verb0.length).trim()
         const text = await safe($, `command.run.${verb0}`, undefined as string | undefined, async () => {
           loaded = undefined
@@ -2133,7 +2134,6 @@ export const register: Register = (on) => {
         return next(e)
       }
       if (verb0 === 'update') {
-        if (!isUserOrigin(e)) return { text: 'Souffleur: only the user can run /souffleur update; a plugin or the model cannot.' }
         const text = await safe($, 'command.run.update', undefined as string | undefined, async () => {
           loaded = undefined
           const { l } = await current($)
@@ -2143,7 +2143,6 @@ export const register: Register = (on) => {
         return next(e)
       }
       if (verb0 === 'rule' || verb0 === 'review' || verb0 === 'accept' || verb0 === 'decline') {
-        if (!isUserOrigin(e)) return { text: `Souffleur: only the user can run /souffleur ${verb0}; a plugin or the model cannot.` }
         const rest = (e.args ?? '').trim().slice(verb0.length).trim()
         const text = await safe($, `command.run.${verb0}`, undefined as string | undefined, async () => {
           loaded = undefined

@@ -4220,3 +4220,53 @@ test('/souffleur update: only the user can run it', async ($, on) => {
   expect(ran(w, 'checkout').length).toBe(0)
   expect(ran(w, 'fetch').length).toBe(0)
 })
+
+test('every verb that changes state refuses a non-user origin, and nothing changes (#34)', async ($, on) => {
+  const w = world(on, { [USER_FILE]: UI, [SETTINGS_PATH]: SETTINGS }, { skills: SKILLS, proposals: PICKS, answers: ['When the task needs it'] })
+  await start($)
+  const before = await run($, 'status')
+  for (const origin of [{ kind: 'plugin', name: 'other' }, { kind: 'model' }]) {
+    for (const args of ['pause', 'need ui', 'drop ui', 'init', 'migrate']) {
+      const r = await $.command.run({ command: 'souffleur', args, origin } as never)
+      expect(String(r.text)).toBe(`Souffleur: only the user can run /souffleur ${args.split(' ')[0]}; a plugin or the model cannot.`)
+    }
+  }
+  expect(w.writes.length).toBe(0)
+  expect(w.asked.length).toBe(0)
+  expect(await run($, 'status')).toBe(before)
+  expect(await run($, 'resume')).toBe('Souffleur: not paused.')
+})
+
+test('status and a bare /souffleur still answer a non-user origin (#34)', async ($, on) => {
+  world(on, { [USER_FILE]: UI }, {})
+  await start($)
+  const origin = { kind: 'plugin', name: 'other' }
+  for (const args of ['', 'status']) {
+    const r = await $.command.run({ command: 'souffleur', args, origin } as never)
+    expect(String(r.text)).not.toMatch(/only the user can run/i)
+    expect(String(r.text)).toMatch(/Mode: enforce/)
+  }
+})
+
+test('a plugin cannot resume a user pause, and odd spellings of a verb are refused (#34)', async ($, on) => {
+  const w = world(on, { [USER_FILE]: UI }, {})
+  await start($)
+  const origin = { kind: 'plugin', name: 'other' }
+  const as = async (args: string) => String((await $.command.run({ command: 'souffleur', args, origin } as never)).text)
+  expect(await run($, 'pause')).toMatch(/paused for this session/)
+  expect(await as('resume')).toBe('Souffleur: only the user can run /souffleur resume; a plugin or the model cannot.')
+  expect(await run($, 'resume')).toBe('Souffleur: checks are on again.') // it was still paused
+  expect(await as(' pause')).toMatch(/only the user can run \/souffleur pause;/)
+  expect(await as('PAUSE')).toMatch(/only the user can run \/souffleur PAUSE;/)
+  expect(await as('frobnicate')).toMatch(/only the user can run \/souffleur frobnicate;/)
+  expect(await run($, 'resume')).toBe('Souffleur: not paused.') // none of them paused
+  expect(w.writes.length).toBe(0)
+})
+
+test('status with a trailing verb from a plugin answers status and does not pause (#34)', async ($, on) => {
+  world(on, { [USER_FILE]: UI }, {})
+  await start($)
+  const r = await $.command.run({ command: 'souffleur', args: 'status pause', origin: { kind: 'plugin', name: 'other' } } as never)
+  expect(String(r.text)).toMatch(/Mode: enforce/)
+  expect(await run($, 'resume')).toBe('Souffleur: not paused.')
+})
