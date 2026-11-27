@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- A gate that released after three denials no longer carries that state into the rest of the turn once its skill loads (#70). The denials and the load attempt of a skill that loads are forgotten, so a later stall of the same skill in the same turn counts from zero and needs its own load attempt before it is released.
+
 ## [0.2.4] - 2026-11-27
 
 - Souffleur tells you when a newer release exists and can install it (#68). The user file takes `"update": "notify" | "auto" | "off"` (default `notify`). Once a day it looks up the release tags on GitHub in the background and shows one line at the next session start. `/souffleur` has a new line with the version, the newest release, the time of the last check and the setting.

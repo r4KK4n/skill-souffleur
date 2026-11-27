@@ -253,7 +253,9 @@ function onSkill(config: Config, s: Session, e: Extract<CoreEvent, { type: 'skil
   if (i < 0 && s.subagentsRunning > 0) return s // a subagent's load
   const calls = i < 0 ? s.mainSkillCalls : s.mainSkillCalls.filter((_, k) => k !== i)
   const gone = `gate: ${e.skill} did not load`
-  return { ...s, errors: s.errors.filter((m) => !m.startsWith(gone)), mainSkillCalls: calls, ledger: skillLoaded(s.ledger, e.skill, e.now, 'skill.prompt'), ruleSkills: withRuleSkill(config, s, e.skill) }
+  // A load ends the stall: its denials and its load attempt must not carry into a later one in this turn.
+  const { [e.skill]: _d, ...denials } = s.turnDenials ?? {}
+  return { ...s, turnDenials: denials, turnTries: (s.turnTries ?? []).filter((n) => n !== e.skill), errors: s.errors.filter((m) => !m.startsWith(gone)), mainSkillCalls: calls, ledger: skillLoaded(s.ledger, e.skill, e.now, 'skill.prompt'), ruleSkills: withRuleSkill(config, s, e.skill) }
 }
 
 function onCompact(config: Config, s: Session, e: Extract<CoreEvent, { type: 'compact' }>): Session {
