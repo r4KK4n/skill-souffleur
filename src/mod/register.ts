@@ -989,6 +989,9 @@ async function askOwnSkills($: Dollar, dialog: boolean): Promise<void> {
   }
   if (!repo) return
   ownHandled = true
+  const token = ++ownToken
+  ownActed = false
+  pendingSetUp = undefined
   const home: string | undefined = await $.env.get('HOME')
   if (!home) return
   const st = await readState($, `${home}/.claude/souffleur.json`, home)
@@ -1017,7 +1020,7 @@ async function askOwnSkills($: Dollar, dialog: boolean): Promise<void> {
   } catch (err) {
     if (err instanceof TimedOut) {
       // The dialog stays open: a tap after the limit still counts while the root has no block.
-      asking.then((late) => lateOwnAnswer($, l, names, late), () => undefined)
+      asking.then((late) => lateOwnAnswer($, l, names, late, token), () => undefined)
       return
     }
     // Dismissed: ask again next session. Nobody can answer: say so once.
@@ -1029,8 +1032,12 @@ async function askOwnSkills($: Dollar, dialog: boolean): Promise<void> {
 
 /** The names line shows at most this many names. */
 const MAX_NAMES_LINE = 40
-/** Set once an answer to the project question was acted on, so a late one cannot act twice. */
+/** Counts the project questions of this process; a late answer belongs to the question it was asked for. */
+let ownToken = 0
+/** Set once the current question was acted on, so a second answer cannot act again. */
 let ownActed = false
+/** A late `Set up now`: the round runs at the next turn end, where a dialog may open. */
+let pendingSetUp: { token: number; names: string[] } | undefined
 
 /** `Set up now` runs init's round for the names, `Ignore all here` writes them to `ignored`; anything else does nothing. */
 async function actOnOwnAnswer($: Dollar, l: Loaded, names: string[], answer: unknown): Promise<void> {
@@ -1054,20 +1061,51 @@ async function actOnOwnAnswer($: Dollar, l: Loaded, names: string[], answer: unk
   }
 }
 
-/** An answer after the two-minute limit: acts only while the root still has no block and nothing acted on this question yet. */
-async function lateOwnAnswer($: Dollar, l: Loaded, names: string[], answer: unknown): Promise<void> {
-  if (ownActed || (answer !== OWN_NOW && answer !== OWN_IGNORE)) return
+/** An answer after the two-minute limit: acts only for the current question, once, while the root still has no block. */
+async function lateOwnAnswer($: Dollar, l: Loaded, names: string[], answer: unknown, token: number): Promise<void> {
+  if (token !== ownToken || ownActed || (answer !== OWN_NOW && answer !== OWN_IGNORE)) return
   try {
-    const home: string | undefined = await $.env.get('HOME')
-    if (!home) return
-    const st = await readState($, `${home}/.claude/souffleur.json`, home)
-    if (st.kind !== 'ok') return
-    const doc = parseJson(st.text)
-    if (configProblem(doc) || hasProjectKey(doc, l.root)) return
-    await actOnOwnAnswer($, l, names, answer)
-  } catch {
-    // a late answer that cannot be applied leaves everything as it was
+    if ((await current($)).session.paused) return
+    const left = await stillUnnamed($, l, names)
+    if (!left.length) return
+    if (answer === OWN_NOW) {
+      pendingSetUp = { token, names: left }
+      say($, l, 'Souffleur: set-up starts at the next turn end.')
+      return
+    }
+    await actOnOwnAnswer($, l, left, answer)
+  } catch (err) {
+    say($, l, `Souffleur: could not act on your answer (${message(err)}). /souffleur init asks again.`)
   }
+}
+
+/** The names that the freshly read user file still does not name, or none when the root has a block by now. */
+async function stillUnnamed($: Dollar, l: Loaded, names: string[]): Promise<string[]> {
+  const home: string | undefined = await $.env.get('HOME')
+  if (!home) return []
+  const st = await readState($, `${home}/.claude/souffleur.json`, home)
+  if (st.kind !== 'ok') return []
+  const doc = parseJson(st.text)
+  if (configProblem(doc) || hasProjectKey(doc, l.root)) return []
+  const skills = (doc as { skills?: Record<string, unknown> }).skills ?? {}
+  return names.filter((n) => !(n in skills))
+}
+
+/** At a turn end: runs the set-up a late `Set up now` asked for, if it still applies. True when it ran. */
+async function runPendingSetUp($: Dollar): Promise<boolean> {
+  const p = pendingSetUp
+  pendingSetUp = undefined
+  if (!p || p.token !== ownToken || ownActed) return false
+  const { l } = await current($)
+  try {
+    const left = await stillUnnamed($, l, p.names)
+    if (!left.length) return false
+    ownActed = true
+    say($, l, await runInit($, l, left))
+  } catch (err) {
+    say($, l, `Souffleur: could not act on your answer (${message(err)}). /souffleur init asks again.`)
+  }
+  return true
 }
 
 /**
@@ -1563,6 +1601,7 @@ export const register: Register = (on) => {
     await safe($, 'session.start', undefined, async () => {
       loaded = undefined
       ownHandled = false
+      pendingSetUp = undefined
       backedUp = false // a session start is a fresh run: the first change saves a new backup
       const l = await getLoaded($)
       const id: string = await $.session.id()
@@ -1758,6 +1797,7 @@ export const register: Register = (on) => {
         // dialog would add one more open question. The offer stays until a prompt of the person ends it.
         if (shownHash !== undefined) return
         askAtTurnEnd = false
+        if (pendingSetUp && !noDialog && (await runPendingSetUp($))) return
         if (noDialog) {
           // A dialog was tried and nobody can answer: no new attempt, only a notice for a proposal not shown yet.
           const { l, session } = await current($)
@@ -1786,6 +1826,7 @@ export const register: Register = (on) => {
       if (verb0 === 'init' || verb0 === 'migrate') {
         const text = await safe($, `command.run.${verb0}`, undefined as string | undefined, async () => {
           loaded = undefined // read the files again: another session may have changed them
+          if (verb0 === 'init') pendingSetUp = undefined // init asks about these names itself
           const { l } = await current($)
           return verb0 === 'init' ? runInit($, l) : runMigrate($, l)
         })

@@ -6,8 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
-- An answer to the project-skills question that comes after the two-minute limit now counts: `Set up now` and `Ignore all here` act as if given in time, unless the project got a block meanwhile. Before, the late answer was dropped without a word.
-
+- An answer to the project-skills question that comes after the two-minute limit now counts. A late `Ignore all here` writes at once; a late `Set up now` starts the set-up at the next turn end. Both do nothing when the project got a block meanwhile, when the answer belongs to an earlier question, or while Souffleur is paused. Before, the late answer was dropped without a word.
 - Before the question opens, one chat line names every skill (40 at most), because the app cuts the question text. `Ignore all here` now says how many skills it ignored.
 
 ## [0.2.0] - 2026-11-26

@@ -87,6 +87,8 @@ type Opts = {
   holdAsk?: boolean | Promise<string>
   /** Only the first dialog is held until this resolves; later dialogs take `answers`. */
   holdFirstAsk?: Promise<string>
+  /** The first dialogs are held, one promise each, in order; later dialogs take `answers`. */
+  holdQueue?: Promise<string>[]
 }
 
 /** Answers every call the mod makes on `$`; files maps an absolute path to its text, a missing path throws. */
@@ -219,6 +221,9 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
     asked.push(question)
     options.push(((e as unknown as { questions: { options?: ({ label: string } | string)[] }[] }).questions[0]!.options ?? []).map((o) => (typeof o === 'string' ? o : o.label)))
     opts.onAsk?.()
+    if (opts.holdQueue?.length) {
+      return opts.holdQueue.shift()!.then((l) => ({ result: { questions: [], answers: { [question]: l } } })) as never
+    }
     if (opts.holdFirstAsk && !firstHeld) {
       firstHeld = true
       return opts.holdFirstAsk.then((l) => ({ result: { questions: [], answers: { [question]: l } } })) as never
@@ -3176,16 +3181,102 @@ const ownTimedOut = async ($: any, w: World) => {
   await t
 }
 
-test('a late Set up now runs the round and writes into the block', async ($, on) => {
+test('a late Set up now opens no dialog; the round runs at the next turn end', async ($, on) => {
   const { tap, opts } = ownLate({ answers: ['When the task needs it', 'This project only', "Don't watch"] })
   const w = world(on, { [USER_FILE]: STD }, opts)
   await start($)
   await ownTimedOut($, w)
-  expect(w.writes.length).toBe(0)
   tap('Set up now')
   await idle()
-  expect(rootBlock(w).skills['a-skill'].need).toBeTruthy()
+  expect(w.asked.length).toBe(1)
+  expect(w.writes.length).toBe(0)
+  expect(w.logs.filter((l) => l === 'Souffleur: set-up starts at the next turn end.').length).toBe(1)
+  await turnEnd($)
   expect(w.asked.some((q) => /where/i.test(q) && /a-skill/.test(q))).toBe(true)
+  expect(rootBlock(w).skills['a-skill'].need).toBeTruthy()
+  const n = w.asked.length
+  await turnEnd($)
+  expect(w.asked.length).toBe(n)
+})
+
+test('a late Set up now when the key exists by the next turn end does nothing', async ($, on) => {
+  const { tap, opts } = ownLate({ answers: ['When the task needs it', 'This project only', "Don't watch"] })
+  const w = world(on, { [USER_FILE]: STD }, opts)
+  await start($)
+  await ownTimedOut($, w)
+  tap('Set up now')
+  await idle()
+  w.files[USER_FILE] = JSON.stringify({ mode: 'enforce', skills: { 'writing-guide': { always: true } }, projects: { [MAIN]: { ignored: ['a-skill'] } } })
+  await turnEnd($)
+  expect(w.asked.length).toBe(1)
+  expect(w.writes.length).toBe(0)
+})
+
+test('a late Set up now while paused starts nothing', async ($, on) => {
+  const { tap, opts } = ownLate({ answers: ['When the task needs it', 'This project only', "Don't watch"] })
+  const w = world(on, { [USER_FILE]: STD }, opts)
+  await start($)
+  await ownTimedOut($, w)
+  await run($, 'pause')
+  tap('Set up now')
+  await idle()
+  await turnEnd($)
+  expect(w.logs.some((l) => /set-up starts/.test(l))).toBe(false)
+  expect(w.asked.length).toBe(1)
+})
+
+test('a late Ignore all here while paused writes nothing', async ($, on) => {
+  const { tap, opts } = ownLate()
+  const w = world(on, { [USER_FILE]: STD }, opts)
+  await start($)
+  await ownTimedOut($, w)
+  await run($, 'pause')
+  tap('Ignore all here')
+  await idle()
+  expect(w.writes.filter((x) => x.path === USER_FILE).length).toBe(0)
+})
+
+test('/souffleur init typed meanwhile clears the pending set-up', async ($, on) => {
+  const { tap, opts } = ownLate({ answers: ['When the task needs it', 'This project only', "Don't watch", 'When the task needs it', 'This project only', "Don't watch"] })
+  const w = world(on, { [USER_FILE]: STD }, opts)
+  await start($)
+  await ownTimedOut($, w)
+  tap('Set up now')
+  await idle()
+  await run($, 'init')
+  const n = w.asked.length
+  await turnEnd($)
+  expect(w.asked.length).toBe(n)
+})
+
+test('a late answer to a question of an earlier session start is stale; the current one acts', async ($, on) => {
+  let t1!: (l: string) => void
+  let t2!: (l: string) => void
+  const p1 = new Promise<string>((r) => { t1 = r })
+  const p2 = new Promise<string>((r) => { t2 = r })
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['a-skill', 'b-skill'], holdQueue: [p1, p2] })
+  await start($)
+  await ownTimedOut($, w)
+  await start($)
+  await ownTimedOut($, w)
+  expect(w.asked.filter((q) => /not in your config/.test(q)).length).toBe(2)
+  t1('Ignore all here')
+  await idle()
+  expect(w.writes.length).toBe(0)
+  t2('Ignore all here')
+  await idle()
+  expect(rootBlock(w)).toEqual({ ignored: ['a-skill', 'b-skill'] })
+})
+
+test('a late Ignore all here drops names the standard names by now', async ($, on) => {
+  const { tap, opts } = ownLate()
+  const w = world(on, { [USER_FILE]: STD }, opts)
+  await start($)
+  await ownTimedOut($, w)
+  w.files[USER_FILE] = JSON.stringify({ mode: 'enforce', skills: { 'writing-guide': { always: true }, 'a-skill': { always: true } } })
+  tap('Ignore all here')
+  await idle()
+  expect(rootBlock(w)).toEqual({ ignored: ['b-skill'] })
 })
 
 test('a late Ignore all here writes ignored and one feedback line', async ($, on) => {
