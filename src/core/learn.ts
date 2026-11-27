@@ -44,9 +44,15 @@ export function originOf(o: SkillOrigin): { origin: string; project?: true } {
   return { origin: `skill ${name}` }
 }
 
-/** A project's or an MCP server's skill is read only for a root the user trusts. */
+/** Sources whose skills are read without a trusted root: the user's, the policy, a plugin, a built-in or a synced skill. */
+export const ALWAYS_TRUSTED_SOURCES: readonly string[] = ['userSettings', 'policySettings', 'plugin', 'built-in', 'syncedSkills']
+
+/**
+ * A skill is read without a trusted root only from a source in ALWAYS_TRUSTED_SOURCES.
+ * Any other source, including an unknown or missing one, is read only for a root the user trusts.
+ */
 export function trusted(source: string | undefined, root: string, config: Pick<Config, 'trustProjects'>): boolean {
-  return source === 'projectSettings' || source === 'mcp' ? isTrustedRoot(config, root) : true
+  return source !== undefined && ALWAYS_TRUSTED_SOURCES.includes(source) ? true : isTrustedRoot(config, root)
 }
 
 /** What the plugin store holds under a version's key: `{ done: true }`, `{ fails: n }` or `{ offers: n }` (proposals queued n times, none answered yet). */

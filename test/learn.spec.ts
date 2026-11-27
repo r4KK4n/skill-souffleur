@@ -62,7 +62,14 @@ test('project and mcp skills are read only for a trusted root', () => {
   assert.equal(trusted('mcp', '/work/proj', config), false)
   assert.equal(trusted('projectSettings', '/work/proj', trust), true)
   assert.equal(trusted('projectSettings', '/work/other', trust), false)
-  for (const source of ['userSettings', 'plugin', 'built-in', undefined]) assert.equal(trusted(source, '/work/proj', config), true)
+  for (const source of ['userSettings', 'policySettings', 'plugin', 'built-in', 'syncedSkills']) assert.equal(trusted(source, '/work/proj', config), true)
+})
+
+test('a skill from a source Souffleur does not know is read only for a trusted root', () => {
+  const trust = { ...config, trustProjects: ['/work/proj'] }
+  for (const source of ['userSettings', 'policySettings', 'plugin', 'built-in', 'syncedSkills']) assert.equal(trusted(source, '/work/proj', config), true, `${source} without trust`)
+  for (const source of ['projectSettings', 'mcp', 'weird', undefined]) assert.equal(trusted(source, '/work/proj', config), false, `${String(source)} without trust`)
+  for (const source of ['projectSettings', 'mcp', 'weird', undefined]) assert.equal(trusted(source, '/work/proj', trust), true, `${String(source)} with trust`)
 })
 
 test('the origin names a project skill or a plugin, and has no bidi or control characters', () => {
