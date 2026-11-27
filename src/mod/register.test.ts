@@ -85,6 +85,10 @@ type Opts = {
   holdAgent?: Promise<void>
   /** A dialog never answers and never rejects, as in a session whose client does not show it. */
   holdAsk?: boolean | Promise<string>
+  /** Only the first dialog is held until this resolves; later dialogs take `answers`. */
+  holdFirstAsk?: Promise<string>
+  /** The first dialogs are held, one promise each, in order; later dialogs take `answers`. */
+  holdQueue?: Promise<string>[]
 }
 
 /** Answers every call the mod makes on `$`; files maps an absolute path to its text, a missing path throws. */
@@ -96,6 +100,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   const seen: World['seen'] = { prompts: [] }
   const writes: World['writes'] = []
   const asked: string[] = []
+  let firstHeld = false
   const hidden = new Set<string>()
   const answers = opts.answers === 'reject' ? [] : [...(opts.answers ?? [])]
   const storeData: Record<string, unknown> = opts.stored ?? {}
@@ -216,6 +221,13 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
     asked.push(question)
     options.push(((e as unknown as { questions: { options?: ({ label: string } | string)[] }[] }).questions[0]!.options ?? []).map((o) => (typeof o === 'string' ? o : o.label)))
     opts.onAsk?.()
+    if (opts.holdQueue?.length) {
+      return opts.holdQueue.shift()!.then((l) => ({ result: { questions: [], answers: { [question]: l } } })) as never
+    }
+    if (opts.holdFirstAsk && !firstHeld) {
+      firstHeld = true
+      return opts.holdFirstAsk.then((l) => ({ result: { questions: [], answers: { [question]: l } } })) as never
+    }
     if (opts.holdAsk) return (opts.holdAsk === true ? new Promise(() => {}) : opts.holdAsk.then((l) => ({ result: { questions: [], answers: { [question]: l } } }))) as never
     const label = answers.shift()
     if (opts.answers === 'reject' || label === undefined) throw new Error('nobody to ask')
@@ -3157,19 +3169,248 @@ test('a dismissed own-skill dialog writes nothing and proposals are still asked'
   expect(userWrites(w).length).toBe(1)
 })
 
-test('a timed out own-skill dialog writes nothing, and a late tap is ignored', async ($, on) => {
-  let tap: (label: string) => void = () => {}
-  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['proj-skill'], holdAsk: new Promise<string>((r) => { tap = r }) })
-  await start($)
+const ownLate = (opts: Opts = {}) => {
+  let tap!: (label: string) => void
+  const held = new Promise<string>((r) => { tap = r })
+  return { tap, held, opts: { repoRoot: MAIN, projectSkills: ['a-skill', 'b-skill'], holdFirstAsk: held, ...opts } as Opts }
+}
+const PAUSED_LINE = 'Souffleur: Souffleur is paused; /souffleur init sets them up later.'
+const ownTimedOut = async ($: any, w: World) => {
   const t = turnEnd($)
   await new Promise((r) => setTimeout(r, 50))
   await w.clock.advance(120_000)
   await t
-  tap('Ignore all here')
-  await new Promise((r) => setTimeout(r, 50))
+}
+
+test('a late Set up now opens no dialog; the round runs at the next turn end', async ($, on) => {
+  const { tap, opts } = ownLate({ answers: ['When the task needs it', 'This project only', "Don't watch"] })
+  const w = world(on, { [USER_FILE]: STD }, opts)
+  await start($)
+  await ownTimedOut($, w)
+  tap('Set up now')
+  await idle()
+  expect(w.asked.length).toBe(1)
   expect(w.writes.length).toBe(0)
+  expect(w.logs.filter((l) => l === 'Souffleur: set-up starts at the next turn end.').length).toBe(1)
+  await turnEnd($)
+  expect(w.asked.some((q) => /where/i.test(q) && /a-skill/.test(q))).toBe(true)
+  expect(rootBlock(w).skills['a-skill'].need).toBeTruthy()
+  const n = w.asked.length
+  await turnEnd($)
+  expect(w.asked.length).toBe(n)
+})
+
+test('a late Set up now when the key exists by the next turn end does nothing', async ($, on) => {
+  const { tap, opts } = ownLate({ answers: ['When the task needs it', 'This project only', "Don't watch"] })
+  const w = world(on, { [USER_FILE]: STD }, opts)
+  await start($)
+  await ownTimedOut($, w)
+  tap('Set up now')
+  await idle()
+  w.files[USER_FILE] = JSON.stringify({ mode: 'enforce', skills: { 'writing-guide': { always: true } }, projects: { [MAIN]: { ignored: ['a-skill'] } } })
   await turnEnd($)
   expect(w.asked.length).toBe(1)
+  expect(w.writes.length).toBe(0)
+})
+
+test('a late Set up now while paused starts nothing', async ($, on) => {
+  const { tap, opts } = ownLate({ answers: ['When the task needs it', 'This project only', "Don't watch"] })
+  const w = world(on, { [USER_FILE]: STD }, opts)
+  await start($)
+  await ownTimedOut($, w)
+  await run($, 'pause')
+  tap('Set up now')
+  await idle()
+  await turnEnd($)
+  expect(w.logs.some((l) => /set-up starts/.test(l))).toBe(false)
+  expect(w.logs.filter((l) => l === PAUSED_LINE).length).toBe(1)
+  expect(w.asked.length).toBe(1)
+})
+
+test('a late Ignore all here while paused writes nothing', async ($, on) => {
+  const { tap, opts } = ownLate()
+  const w = world(on, { [USER_FILE]: STD }, opts)
+  await start($)
+  await ownTimedOut($, w)
+  await run($, 'pause')
+  tap('Ignore all here')
+  await idle()
+  expect(w.writes.filter((x) => x.path === USER_FILE).length).toBe(0)
+  expect(w.logs.filter((l) => l === PAUSED_LINE).length).toBe(1)
+})
+
+test('/souffleur init typed meanwhile clears the pending set-up', async ($, on) => {
+  // init names one skill in the standard, then stops: no key is written and b-skill stays unnamed
+  const { tap, opts } = ownLate({ answers: ['From the start', 'Everywhere', ''] })
+  const w = world(on, { [USER_FILE]: STD }, opts)
+  await start($)
+  await ownTimedOut($, w)
+  tap('Set up now')
+  await idle()
+  await run($, 'init')
+  expect(JSON.parse(w.files[USER_FILE]!).projects).toBeUndefined()
+  expect(JSON.parse(w.files[USER_FILE]!).skills['b-skill']).toBeUndefined()
+  const n = w.asked.length
+  await turnEnd($)
+  expect(w.asked.length).toBe(n)
+})
+
+test('a pending set-up is cleared at the next session start', async ($, on) => {
+  const { tap, opts } = ownLate({ answers: ['__undefined__'] })
+  const w = world(on, { [USER_FILE]: STD }, opts)
+  await start($)
+  await ownTimedOut($, w)
+  tap('Set up now')
+  await idle()
+  await start($)
+  await propose($, note('Reply in German.')) // a waiting proposal keeps the project question from asking again
+  await turnEnd($)
+  expect(w.asked.some((q) => /a-skill/.test(q) && !/not in your config/.test(q))).toBe(false)
+})
+
+test('a late Set up now where no dialog can open says what to type', async ($, on) => {
+  const { tap, opts } = ownLate({ answers: ['__undefined__'] })
+  const w = world(on, { [USER_FILE]: STD }, opts)
+  await start($)
+  await ownTimedOut($, w)
+  await propose($, note('Reply in German.'))
+  await turnEnd($) // the proposal dialog is dismissed: nothing more is asked at turn end
+  tap('Set up now')
+  await idle()
+  expect(w.logs.filter((l) => l === 'Souffleur: run /souffleur init in this project to set them up.').length).toBe(1)
+  expect(w.logs.some((l) => /set-up starts/.test(l))).toBe(false)
+  const n = w.asked.length
+  await turnEnd($)
+  expect(w.asked.length).toBe(n)
+})
+
+test('a late answer that cannot be applied says so in one line', async ($, on) => {
+  const { tap, opts } = ownLate()
+  const w = world(on, { [USER_FILE]: STD }, opts)
+  await start($)
+  await ownTimedOut($, w)
+  w.files[USER_FILE] = '{ not json' // the file was damaged meanwhile
+  tap('Ignore all here')
+  await idle()
+  expect(w.logs.filter((l) => /^Souffleur: could not act on your answer \(.+\)\. \/souffleur init asks again\.$/.test(l)).length).toBe(1)
+})
+
+test('a late answer counts names against the repository file too', async ($, on) => {
+  const user = JSON.stringify({ mode: 'enforce', trustProjects: ['/work/proj/'], skills: { 'writing-guide': { always: true } } })
+  const { tap, opts } = ownLate({ repoRoot: '/work/proj' })
+  const w = world(on, { [USER_FILE]: user }, opts)
+  await start($)
+  await ownTimedOut($, w)
+  w.files[PROJECT_FILE] = JSON.stringify({ skills: { 'a-skill': { always: true } } })
+  tap('Ignore all here')
+  await idle()
+  expect(JSON.parse(userWrites(w).at(-1)!.text).projects['/work/proj']).toEqual({ ignored: ['b-skill'] })
+})
+
+test('each question acts once: an earlier in-time set-up does not block a later late answer', async ($, on) => {
+  let t2!: (l: string) => void
+  const p2 = new Promise<string>((r) => { t2 = r })
+  const R = (l: string) => Promise.resolve(l)
+  // question 1 in time: Set up now, a-skill goes to the standard, then Stop; no key, b-skill stays unnamed
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['a-skill', 'b-skill'], holdQueue: [R('Set up now'), R('From the start'), R('Everywhere'), R(''), p2] })
+  await start($)
+  await turnEnd($)
+  expect(JSON.parse(w.files[USER_FILE]!).projects).toBeUndefined()
+  await start($)
+  await ownTimedOut($, w)
+  expect(w.asked.filter((q) => /not in your config/.test(q)).length).toBe(2)
+  t2('Ignore all here')
+  await idle()
+  expect(rootBlock(w)).toEqual({ ignored: ['b-skill'] })
+})
+
+test('a late answer to a question of an earlier session start is stale; the current one acts', async ($, on) => {
+  let t1!: (l: string) => void
+  let t2!: (l: string) => void
+  const p1 = new Promise<string>((r) => { t1 = r })
+  const p2 = new Promise<string>((r) => { t2 = r })
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['a-skill', 'b-skill'], holdQueue: [p1, p2] })
+  await start($)
+  await ownTimedOut($, w)
+  await start($)
+  await ownTimedOut($, w)
+  expect(w.asked.filter((q) => /not in your config/.test(q)).length).toBe(2)
+  t1('Ignore all here')
+  await idle()
+  expect(w.writes.length).toBe(0)
+  t2('Ignore all here')
+  await idle()
+  expect(rootBlock(w)).toEqual({ ignored: ['a-skill', 'b-skill'] })
+})
+
+test('a late Ignore all here drops names the standard names by now', async ($, on) => {
+  const { tap, opts } = ownLate()
+  const w = world(on, { [USER_FILE]: STD }, opts)
+  await start($)
+  await ownTimedOut($, w)
+  w.files[USER_FILE] = JSON.stringify({ mode: 'enforce', skills: { 'writing-guide': { always: true }, 'a-skill': { always: true } } })
+  tap('Ignore all here')
+  await idle()
+  expect(rootBlock(w)).toEqual({ ignored: ['b-skill'] })
+})
+
+test('a late Ignore all here writes ignored and one feedback line', async ($, on) => {
+  const { tap, opts } = ownLate()
+  const w = world(on, { [USER_FILE]: STD }, opts)
+  await start($)
+  await ownTimedOut($, w)
+  tap('Ignore all here')
+  await idle()
+  expect(rootBlock(w)).toEqual({ ignored: ['a-skill', 'b-skill'] })
+  expect(w.logs.filter((l) => l === 'Souffleur: 2 skills ignored in this project.').length).toBe(1)
+})
+
+test('an in-time Ignore all here also says how many were ignored', async ($, on) => {
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['a-skill', 'b-skill'], answers: ['Ignore all here'] })
+  await start($)
+  await turnEnd($)
+  expect(w.logs.filter((l) => l === 'Souffleur: 2 skills ignored in this project.').length).toBe(1)
+})
+
+test('a late Later does nothing', async ($, on) => {
+  const { tap, opts } = ownLate()
+  const w = world(on, { [USER_FILE]: STD }, opts)
+  await start($)
+  await ownTimedOut($, w)
+  tap('Later')
+  await idle()
+  expect(w.writes.length).toBe(0)
+  expect(w.logs.some((l) => /ignored in this project/.test(l))).toBe(false)
+})
+
+test('a late answer after the key was written meanwhile does nothing', async ($, on) => {
+  const { tap, opts } = ownLate()
+  const w = world(on, { [USER_FILE]: STD }, opts)
+  await start($)
+  await ownTimedOut($, w)
+  w.files[USER_FILE] = JSON.stringify({ mode: 'enforce', skills: { 'writing-guide': { always: true } }, projects: { [MAIN]: { ignored: ['a-skill'] } } })
+  const before = w.writes.length
+  tap('Ignore all here')
+  await idle()
+  expect(w.writes.length).toBe(before)
+  expect(w.logs.some((l) => /ignored in this project/.test(l))).toBe(false)
+})
+
+test('a line names every skill before the dialog opens', async ($, on) => {
+  const names = Array.from({ length: 7 }, (_, i) => `skill-${i}`)
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: names, answers: ['Later'] })
+  await start($)
+  await turnEnd($)
+  const line = `Souffleur: skills in this project not in your config: ${names.join(', ')}`
+  expect(w.logs.some((l) => l.startsWith(line))).toBe(true)
+})
+
+test('more than 40 names: the line shows 40 and counts the rest', async ($, on) => {
+  const names = Array.from({ length: 45 }, (_, i) => `s${String(i).padStart(2, '0')}`)
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: names, answers: ['Later'] })
+  await start($)
+  await turnEnd($)
+  expect(w.logs.some((l) => /not in your config: s00, .*s39 and 5 more/.test(l))).toBe(true)
 })
 
 test('where no dialog opens one notice names the count and nothing is written', async ($, on) => {

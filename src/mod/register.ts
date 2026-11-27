@@ -989,6 +989,9 @@ async function askOwnSkills($: Dollar, dialog: boolean): Promise<void> {
   }
   if (!repo) return
   ownHandled = true
+  const token = ++ownToken
+  ownActed = false
+  pendingSetUp = undefined
   const home: string | undefined = await $.env.get('HOME')
   if (!home) return
   const st = await readState($, `${home}/.claude/souffleur.json`, home)
@@ -1004,23 +1007,47 @@ async function askOwnSkills($: Dollar, dialog: boolean): Promise<void> {
   if (!names.length) return
   const notice = () => void say($, l, `Souffleur: this project has ${names.length} skills not in your config. /souffleur init asks about them.`)
   if (!dialog) return notice()
+  // The app cuts a long question, so the full list goes to the chat first.
+  const listed = names.slice(0, MAX_NAMES_LINE).join(', ') + (names.length > MAX_NAMES_LINE ? ` and ${names.length - MAX_NAMES_LINE} more` : '')
+  say($, l, `Souffleur: skills in this project not in your config: ${listed}`)
   const shown = names.slice(0, 5).join(', ') + (names.length > 5 ? ', …' : '')
   const question = `This project has ${names.length} skill${names.length === 1 ? '' : 's'} not in your config: ${shown}. Set ${names.length === 1 ? 'it' : 'them'} up now?`
   let answer: unknown
+  const asking = Promise.resolve().then(() => $.ui.ask(question, { options: [OWN_NOW, OWN_IGNORE, OWN_LATER], header: 'Souffleur' }))
   try {
-    const asking = Promise.resolve().then(() => $.ui.ask(question, { options: [OWN_NOW, OWN_IGNORE, OWN_LATER], header: 'Souffleur' }))
     asking.catch(() => undefined) // a late rejection after a timeout is nobody's business
     answer = await Promise.race([asking, $.clock.sleep(ASK_WAIT_MS).then(() => Promise.reject(new TimedOut()))])
   } catch (err) {
-    // Dismissed or timed out: ask again next session. Nobody can answer: say so once.
-    if (!(err instanceof TimedOut) && !DISMISSED.test(message(err))) notice()
+    if (err instanceof TimedOut) {
+      // The dialog stays open: a tap after the limit still counts while the root has no block.
+      asking.then((late) => lateOwnAnswer($, l, names, late, token), () => undefined)
+      return
+    }
+    // Dismissed: ask again next session. Nobody can answer: say so once.
+    if (!DISMISSED.test(message(err))) notice()
     return
   }
+  await actOnOwnAnswer($, l, names, answer)
+}
+
+/** The names line shows at most this many names. */
+const MAX_NAMES_LINE = 40
+/** Counts the project questions of this process; a late answer belongs to the question it was asked for. */
+let ownToken = 0
+/** Set once the current question was acted on, so a second answer cannot act again. */
+let ownActed = false
+/** A late `Set up now`: the round runs at the next turn end, where a dialog may open. */
+let pendingSetUp: { token: number; names: string[] } | undefined
+
+/** `Set up now` runs init's round for the names, `Ignore all here` writes them to `ignored`; anything else does nothing. */
+async function actOnOwnAnswer($: Dollar, l: Loaded, names: string[], answer: unknown): Promise<void> {
   if (answer === OWN_NOW) {
+    ownActed = true
     say($, l, await runInit($, l, names))
     return
   }
   if (answer !== OWN_IGNORE) return
+  ownActed = true
   const kept = names.slice(0, MAX_LIST)
   const r = await editUserFile($, (d) => {
     let config: unknown = d
@@ -1028,7 +1055,66 @@ async function askOwnSkills($: Dollar, dialog: boolean): Promise<void> {
     return { config }
   })
   if (!r.ok) say($, l, `Souffleur: ${r.text}.`)
-  else if (names.length > kept.length) say($, l, `Souffleur: the ignored list of this project holds ${MAX_LIST} names; ${names.length - kept.length} skills stay unasked. /souffleur init asks about them.`)
+  else {
+    say($, l, `Souffleur: ${kept.length} skill${kept.length === 1 ? '' : 's'} ignored in this project.`)
+    if (names.length > kept.length) say($, l, `Souffleur: the ignored list of this project holds ${MAX_LIST} names; ${names.length - kept.length} skills stay unasked. /souffleur init asks about them.`)
+  }
+}
+
+/** An answer after the two-minute limit: acts only for the current question, once, while the root still has no block. */
+async function lateOwnAnswer($: Dollar, l: Loaded, names: string[], answer: unknown, token: number): Promise<void> {
+  if (token !== ownToken || ownActed || (answer !== OWN_NOW && answer !== OWN_IGNORE)) return
+  try {
+    if ((await current($)).session.paused) {
+      say($, l, 'Souffleur: Souffleur is paused; /souffleur init sets them up later.')
+      return
+    }
+    const left = await stillUnnamed($, l, names)
+    if (!left.length) return
+    if (answer === OWN_NOW) {
+      if (askStopped || noDialog) {
+        say($, l, 'Souffleur: run /souffleur init in this project to set them up.')
+        return
+      }
+      pendingSetUp = { token, names: left }
+      say($, l, 'Souffleur: set-up starts at the next turn end.')
+      return
+    }
+    await actOnOwnAnswer($, l, left, answer)
+  } catch (err) {
+    say($, l, `Souffleur: could not act on your answer (${message(err)}). /souffleur init asks again.`)
+  }
+}
+
+/** The names that the freshly read user file still does not name, or none when the root has a block by now. */
+async function stillUnnamed($: Dollar, l: Loaded, names: string[]): Promise<string[]> {
+  const home: string | undefined = await $.env.get('HOME')
+  if (!home) return []
+  const st = await readState($, `${home}/.claude/souffleur.json`, home)
+  if (st.kind !== 'ok') return []
+  const doc = parseJson(st.text)
+  if (configProblem(doc) || hasProjectKey(doc, l.root)) return []
+  // The effective config (user file and trusted repository file), read fresh like the in-time path.
+  loaded = undefined
+  const fresh = (await current($)).l
+  return names.filter((n) => !(n in fresh.config.skills))
+}
+
+/** At a turn end: runs the set-up a late `Set up now` asked for, if it still applies. True when it ran. */
+async function runPendingSetUp($: Dollar): Promise<boolean> {
+  const p = pendingSetUp
+  pendingSetUp = undefined
+  if (!p) return false
+  const { l } = await current($)
+  try {
+    const left = await stillUnnamed($, l, p.names)
+    if (!left.length) return false
+    ownActed = true
+    say($, l, await runInit($, l, left))
+  } catch (err) {
+    say($, l, `Souffleur: could not act on your answer (${message(err)}). /souffleur init asks again.`)
+  }
+  return true
 }
 
 /**
@@ -1524,6 +1610,7 @@ export const register: Register = (on) => {
     await safe($, 'session.start', undefined, async () => {
       loaded = undefined
       ownHandled = false
+      pendingSetUp = undefined
       backedUp = false // a session start is a fresh run: the first change saves a new backup
       const l = await getLoaded($)
       const id: string = await $.session.id()
@@ -1719,6 +1806,7 @@ export const register: Register = (on) => {
         // dialog would add one more open question. The offer stays until a prompt of the person ends it.
         if (shownHash !== undefined) return
         askAtTurnEnd = false
+        if (pendingSetUp && !noDialog && (await runPendingSetUp($))) return
         if (noDialog) {
           // A dialog was tried and nobody can answer: no new attempt, only a notice for a proposal not shown yet.
           const { l, session } = await current($)
@@ -1747,6 +1835,7 @@ export const register: Register = (on) => {
       if (verb0 === 'init' || verb0 === 'migrate') {
         const text = await safe($, `command.run.${verb0}`, undefined as string | undefined, async () => {
           loaded = undefined // read the files again: another session may have changed them
+          if (verb0 === 'init') pendingSetUp = undefined // init asks about these names itself
           const { l } = await current($)
           return verb0 === 'init' ? runInit($, l) : runMigrate($, l)
         })
