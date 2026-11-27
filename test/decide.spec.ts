@@ -1590,3 +1590,25 @@ test('observe mode: an always-on skill brief check only records', () => {
   assert.deepEqual(r.out.flatMap(denies), [])
   assert.match(r.s.observed.at(-1)!.reason, /Always-on: big-test/)
 })
+
+test('always-on work skill in state unavailable: Agent brief is not checked', () => {
+  const c = cfg({ skills: { 'big-test': { always: true, from: 'user' } } })
+  const s0 = initSession(c, 's', 0, 'clear')
+  const gone = { ...s0, ledger: { ...s0.ledger, 'big-test': { ...s0.ledger['big-test']!, state: 'unavailable' as const } } }
+  assert.deepEqual(decide(c, gone, tool('Agent', { brief: 'do it' })).actions, [])
+})
+
+test('always-on work skill: the brief check skips blocked, subagent, paused and untrusted-project cases', () => {
+  const user = cfg({ skills: { 'big-test': { always: true, from: 'user' } } })
+  // A project block removes the skill from the config it names.
+  const blocked = cfg({ skills: {}, project: { root: '/work/p', blocked: ['big-test'], blockedSkills: ['big-test'] } as unknown as Config['project'] })
+  assert.deepEqual(denies(run(blocked, [withRoot(tool('Agent', { brief: 'do it' }))]).out.at(-1)!), [])
+  // A call made inside a subagent is not checked.
+  assert.deepEqual(one(user, [tool('Agent', { brief: 'do it', agentId: 'a1' })]), [])
+  // A paused session is not checked.
+  assert.deepEqual(denies(run(user, [command('pause'), tool('Agent', { brief: 'do it' })]).out.at(-1)!), [])
+  // A skill from an untrusted project file does not count; with a trusted root it does.
+  const proj = cfg({ skills: { 'proj-always': { always: true, from: 'project' } } })
+  assert.deepEqual(denies(run(proj, [withRoot(tool('Agent', { brief: 'do it' }))]).out.at(-1)!), [])
+  assert.equal(denies(run({ ...proj, trustProjects: ['/work/p'] }, [withRoot(tool('Agent', { brief: 'do it' }))]).out.at(-1)!).length, 1)
+})
