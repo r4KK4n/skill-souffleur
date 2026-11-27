@@ -451,22 +451,46 @@ async function withInstallLock<T>($: Dollar, fn: () => Promise<T>): Promise<{ va
       return undefined
     }
   }
-  const stale = async () => {
-    let at = (await readOwner())?.at
-    if (typeof at !== 'number') {
-      try {
-        at = (await $.fs.stat(lock))?.mtimeMs
-      } catch {
-        return true
-      }
+  const exists = async (path: string) => {
+    try {
+      return (await $.fs.stat(path)) !== undefined
+    } catch {
+      return false
     }
-    return typeof at !== 'number' || at > now() || now() - at >= LOCK_STALE_MS
+  }
+  const mtime = async (path: string) => {
+    try {
+      const m = (await $.fs.stat(path))?.mtimeMs
+      return typeof m === 'number' ? m : undefined
+    } catch {
+      return undefined
+    }
+  }
+  /** Stale only when an age is known: an owner stamp or the folder's time. No age at all counts as fresh. */
+  const stale = async () => {
+    const at = (await readOwner())?.at
+    const t = typeof at === 'number' ? at : await mtime(lock)
+    return t !== undefined && (t > now() || now() - t >= LOCK_STALE_MS)
   }
   await ok($, ['mkdir', '-p', data])
   let made = await ok($, ['mkdir', lock])
-  if (!made && (await stale())) {
-    await ok($, ['rm', '-rf', lock])
-    made = await ok($, ['mkdir', lock])
+  if (!made) {
+    // A lock that cannot be made and is not there is a host problem (no mkdir, a data folder that cannot be created), not another session.
+    if (!(await exists(lock))) throw new Error('could not create the update lock')
+    if (!(await stale())) return undefined
+    // One session removes a stale lock: the one that makes the takeover folder.
+    const take = `${lock}.takeover`
+    if (!(await ok($, ['mkdir', take]))) {
+      const t = await mtime(take)
+      if (t !== undefined && now() - t >= LOCK_STALE_MS) await ok($, ['rm', '-rf', take])
+      return undefined
+    }
+    try {
+      await ok($, ['rm', '-rf', lock])
+      made = await ok($, ['mkdir', lock])
+    } finally {
+      await ok($, ['rm', '-rf', take])
+    }
   }
   if (!made) return undefined
   const token = `${now()}-${Math.random().toString(36).slice(2)}`

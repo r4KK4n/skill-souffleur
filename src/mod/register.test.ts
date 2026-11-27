@@ -65,6 +65,8 @@ type Opts = {
   failWrite?: RegExp
   /** `mkdir` of the update lock folder always fails, as when another session wins the race. */
   holdLock?: boolean
+  /** Modification times `$.fs.stat` reports for folders. */
+  dirMtime?: Record<string, number>
   /** `$.env.get('HOME')` answers nothing. */
   noHome?: boolean
   /** `mv -f` exits 1 and moves nothing. */
@@ -276,6 +278,10 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   on('fs.stat', (_, e) => {
     const text = files[e.path]
     if (opts.failStat?.includes(e.path)) throw new Error('EIO: i/o error')
+    if (text === undefined && (dirs.has(e.path) || Object.keys(files).some((f) => f.startsWith(`${e.path}/`)))) {
+      const m = opts.dirMtime?.[e.path]
+      return { value: { kind: 'dir', size: 0, ...(m === undefined ? {} : { mtimeMs: m }), isLink: false } } as never
+    }
     if (text === undefined || hidden.has(e.path)) throw new Error(`stat ${e.path} failed: ENOENT`)
     const real = opts.linkTo?.[e.path]
     return { value: { kind: 'file', size: text.length, mtimeMs: mtimes[e.path] ?? 0, isLink: real !== undefined, ...(real === undefined ? {} : { realPath: real }) } } as never
@@ -5213,13 +5219,69 @@ test('/souffleur update: a lost race (mkdir fails, a fresh owner is there) runs 
   expect(ran(w, 'fetch').length).toBe(0)
 })
 
-test('/souffleur update: a failing mkdir with no readable owner is stale once, then the install is skipped', async ($, on) => {
+test('/souffleur update: a lock that cannot be made and is not there is reported, not called busy, and runs no git', async ($, on) => {
   const w = world(on, { ...SETUP }, { stored: QUIET, run: gitRun(), holdLock: true })
+  own(w)
+  await start($)
+  const text = await runUser($, 'update')
+  expect(text).toMatch(/^Souffleur: could not install /)
+  expect(text).toContain('could not create the update lock')
+  expect(ran(w, 'fetch').length).toBe(0)
+})
+
+test('update auto: a lock that cannot be made logs the reason to debug and runs no git', async ($, on) => {
+  const w = world(on, { ...AUTO_FILE }, { stored: STORED_NEWER, run: gitRun(), holdLock: true })
+  own(w)
+  await start($)
+  await settleUpdate(w)
+  expect(w.debugLogs.some((l) => l.includes('could not create the update lock'))).toBe(true)
+  expect(ran(w, 'fetch').length).toBe(0)
+})
+
+test('/souffleur update: a stale lock whose takeover another session holds runs no git and stays', async ($, on) => {
+  const w = world(on, { ...SETUP, ...heldBy(Date.now() - 180_000), [`${LOCK_DIR}.takeover/x`]: '' }, { stored: QUIET, run: gitRun(), dirMtime: { [`${LOCK_DIR}.takeover`]: Date.now() } })
   own(w)
   await start($)
   expect(await runUser($, 'update')).toMatch(/another session is installing/)
   expect(ran(w, 'fetch').length).toBe(0)
-  expect(w.runs.filter((r) => r.argv[0] === 'mkdir' && r.argv[1] !== '-p').length).toBe(2)
+  expect(JSON.parse(w.files[OWNER]!).token).toBe('other')
+  expect(w.files[`${LOCK_DIR}.takeover/x`]).toBe('')
+})
+
+test('/souffleur update: an old takeover folder is removed, without a retry this time', async ($, on) => {
+  const w = world(on, { ...SETUP, ...heldBy(Date.now() - 180_000), [`${LOCK_DIR}.takeover/x`]: '' }, { stored: QUIET, run: gitRun(), dirMtime: { [`${LOCK_DIR}.takeover`]: Date.now() - 180_000 } })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toMatch(/another session is installing/)
+  expect(ran(w, 'fetch').length).toBe(0)
+  expect(w.files[`${LOCK_DIR}.takeover/x`]).toBeUndefined()
+})
+
+test('update auto: a stale takeover removes its takeover folder after the install', async ($, on) => {
+  const w = world(on, { ...AUTO_FILE, ...heldBy(Date.now() - 180_000) }, { stored: STORED_NEWER, run: gitRun() })
+  own(w)
+  await start($)
+  await settleUpdate(w)
+  expect(ran(w, 'checkout').length).toBe(1)
+  expect(w.runs.some((r) => r.argv[0] === 'mkdir' && r.argv[1] === `${LOCK_DIR}.takeover`)).toBe(true)
+  expect(w.runs.some((r) => r.argv[0] === 'rm' && r.argv[2] === `${LOCK_DIR}.takeover`)).toBe(true)
+})
+
+test('/souffleur update: a lock with no owner and no known age is fresh: busy, no git', async ($, on) => {
+  const w = world(on, { ...SETUP, [`${LOCK_DIR}/junk`]: 'x' }, { stored: QUIET, run: gitRun() })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toMatch(/another session is installing/)
+  expect(ran(w, 'fetch').length).toBe(0)
+  expect(w.files[`${LOCK_DIR}/junk`]).toBe('x')
+})
+
+test('/souffleur update: a lock with no owner and an old folder time is stale and taken over', async ($, on) => {
+  const w = world(on, { ...SETUP, [`${LOCK_DIR}/junk`]: 'x' }, { stored: QUIET, run: gitRun(), dirMtime: { [LOCK_DIR]: Date.now() - 180_000 } })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toMatch(/updated to/)
+  expect(w.files[OWNER]).toBeUndefined()
 })
 
 test('update auto: a lock held by another session skips the install, says nothing and logs to debug', async ($, on) => {
