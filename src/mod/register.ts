@@ -219,9 +219,11 @@ async function cachedKind($: Dollar): Promise<'folder' | 'market' | undefined> {
 }
 
 /** Remembers that the notify line for `tag` was said, so this session does not repeat it (also over reload and resume). */
-async function markShown($: Dollar, l: Loaded, tag: string): Promise<void> {
-  const cur = latest
-  if (cur && cur.id === (await $.session.id())) await persist($, l, { ...cur, updateShown: tag }, true)
+/** `session id + tag` of the last update line said, set at the moment it is said (the stored mark follows after an await). */
+let toldKey = ''
+
+async function markShown($: Dollar, tag: string): Promise<void> {
+  await update($, (_l, s) => ({ ...s, updateShown: tag }))
 }
 
 /** Looks for a newer release tag and stores the result. Never throws; a failure stores the time so one try happens per day. */
@@ -1766,14 +1768,20 @@ export const register: Register = (on) => {
       let said = false
       if (tell !== undefined && kind !== undefined) {
         said = say($, l, updateLine(kind === 'folder' ? 'notify' : 'notify-market', tell, PLUGIN_VERSION))
-        if (said) await markShown($, l, tell)
+        if (said) toldKey = `${s.id}:${tell}`
+        if (said) await markShown($, tell)
       }
       // Neither the first-run line nor the check may hold the session start: both run detached.
       updateWork = (async () => {
         if (l.config.update === 'off') return
         const k = await installKind($)
         await $.store.set(KIND_KEY, k)
-        if (tell !== undefined && !said && say($, l, updateLine(k === 'folder' ? 'notify' : 'notify-market', tell, PLUGIN_VERSION))) await markShown($, l, tell)
+        if (tell !== undefined && !said && latest?.updateShown !== tell && toldKey !== `${s.id}:${tell}`) {
+          if (say($, l, updateLine(k === 'folder' ? 'notify' : 'notify-market', tell, PLUGIN_VERSION))) {
+            toldKey = `${s.id}:${tell}`
+            await markShown($, tell)
+          }
+        }
         await checkForUpdate($, l, now())
       })().catch(() => {})
     })

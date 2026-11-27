@@ -3898,3 +3898,15 @@ test('update: a plugin folder inside a work tree (non-empty prefix) is a marketp
   expect(w.stored.installKind).toBe('market')
   expect(w.runs.find((r) => r.argv.includes('rev-parse'))!.argv).toContain('--show-prefix')
 })
+
+test('update: a second start before the first detached work finishes does not say the line twice', async ($, on) => {
+  let release: (v: { exitCode: number; stdout: string; stderr: string }) => void = () => {}
+  const held = new Promise<{ exitCode: number; stdout: string; stderr: string }>((r) => { release = r })
+  const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: (argv) => (argv.includes('rev-parse') ? held : { exitCode: 0, stdout: '', stderr: '' }) })
+  await start($)
+  await start($)
+  release({ exitCode: 0, stdout: '\n', stderr: '' })
+  await updateSettled()
+  await new Promise((r) => setTimeout(r, 20))
+  expect(w.logs.filter((l) => l.includes('is out')).length).toBe(1)
+})
