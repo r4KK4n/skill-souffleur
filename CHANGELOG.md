@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-11-27
+
 - The desktop and mobile apps show Souffleur's status in a one-row band above the prompt while something needs attention: a skill restoring or missing, degraded, not set up, or a newer release (#21).
 
 ## [0.2.6] - 2026-11-27
