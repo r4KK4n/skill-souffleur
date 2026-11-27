@@ -330,6 +330,122 @@ test('observe mode: gate, duty and Agent-brief checks deny nothing and record wo
   assert.match(r.s.observed[2]!.reason, /skills:/)
 })
 
+/**
+ * Runs the same prelude and calls in `enforce` (a denied call is repeated once, as the model retries) and in `observe` (each call once).
+ * Returns the reasons enforce denied per call, and the reasons observe recorded per call.
+ */
+function parity(patch: Partial<Config>, prelude: CoreEvent[], calls: CoreEvent[]): { denied: string[][]; recorded: string[][]; retried: string[][] } {
+  const denied: string[][] = []
+  const retried: string[][] = []
+  const enforce = cfg({ ...patch, mode: 'enforce' })
+  let s = run(enforce, prelude).s
+  for (const e of calls) {
+    const r = decide(enforce, s, e)
+    s = r.session
+    const d = denies(r.actions) as { reason: string }[]
+    denied.push(d.map((x) => x.reason))
+    if (d.length) {
+      const again = decide(enforce, s, { ...e, now: at() }) // the retry
+      s = again.session
+      retried.push((denies(again.actions) as { reason: string }[]).map((x) => x.reason))
+    } else retried.push([])
+  }
+  const observe = cfg({ ...patch, mode: 'observe' })
+  const recorded: string[][] = []
+  s = run(observe, prelude).s
+  for (const e of calls) {
+    const before = s.observed.length
+    const r = decide(observe, s, e)
+    s = r.session
+    assert.deepEqual(denies(r.actions), [])
+    recorded.push(s.observed.slice(before).map((o) => o.reason))
+  }
+  return { denied, recorded, retried }
+}
+const assertParity = (patch: Partial<Config>, prelude: CoreEvent[], calls: CoreEvent[], expectDenied: number) => {
+  const { denied, recorded } = parity(patch, prelude, calls)
+  assert.deepEqual(recorded, denied)
+  assert.equal(denied.filter((d) => d.length).length, expectDenied)
+}
+/** Each line of a reason is one check; counts how often each check spoke over all calls. */
+const perCheck = (reasons: string[][]) => {
+  const n: Record<string, number> = {}
+  for (const line of reasons.flat().flatMap((r) => r.split('\n'))) n[line] = (n[line] ?? 0) + 1
+  return n
+}
+
+test('observe records what enforce denies: after rule repeats', () => {
+  const rules = [{ id: 'r1', source: 'user', after: { tools: ['Write'], paths: ['**/*.md'] }, evidence: { tool: 'Bash', command: '*check*' } }]
+  const calls = [
+    tool('Write', { path: 'a.md' }), // opens
+    tool('Write', { path: 'b.md' }), // denied once
+    tool('Write', { path: 'c.md' }), // retry state used up
+    tool('Write', { path: 'd.md' }),
+    tool('Bash', { command: 'run check' }), // evidence closes
+    tool('Write', { path: 'e.md' }), // opens again
+    tool('Write', { path: 'f.md' }), // denied again
+  ]
+  assertParity({ rules }, [prompt()], calls, 2)
+})
+
+test('observe records what enforce denies: field rule', () => {
+  const rules = [{ id: 'f1', source: 'user', before: { tools: ['Bash'] }, field: 'description' }]
+  const calls = [tool('Bash'), tool('Bash'), tool('Bash', { present: ['description'] }), tool('Bash')]
+  assertParity({ rules }, [prompt()], calls, 3)
+})
+
+test('observe records what enforce denies: duty', () => {
+  const pre = [prompt('screen', ['ui']), loadSkill('ui-checklist')]
+  const calls = [
+    tool('Write', { path: 'a.html' }), // opens the duty
+    tool('Write', { path: 'b.html' }), // denied once
+    tool('Write', { path: 'c.html' }),
+    tool('Bash', { command: 'ui-checklist detect' }), // evidence closes
+    tool('Write', { path: 'd.html' }),
+    tool('Write', { path: 'e.html' }),
+  ]
+  assertParity({}, pre, calls, 2)
+})
+
+test('observe records what enforce denies: brief check on every unmarked brief', () => {
+  const pre = [prompt('screen', ['ui'])]
+  const calls = [tool('Agent', { brief: 'one' }), tool('Agent', { brief: 'two' }), tool('Agent', { brief: 'three' }), tool('Agent', { brief: 'ok\nskills: none' }), tool('Agent', { brief: 'four' })]
+  assertParity({}, pre, calls, 4)
+})
+
+test('observe records what enforce denies: gate until the skill loads', () => {
+  const skills = { ...base.skills, 'ui-checklist': { need: 'ui', from: 'user' as const, gate: { tools: ['Write', 'Edit'], paths: ['**/*.html'] } } }
+  const calls = [tool('Write', { path: 'a.html' }), tool('Write', { path: 'b.html' }), tool('Skill', { skill: 'ui-checklist' }), loadSkill('ui-checklist'), tool('Write', { path: 'c.html' })]
+  assertParity({ skills }, [prompt('screen', ['ui'])], calls, 2)
+  // enforce denies the retry of a gated call too, because the skill is still not loaded
+  assert.ok(parity({ skills }, [prompt('screen', ['ui'])], calls).retried[0]!.length > 0)
+})
+
+test('observe counts the same denials as enforce when one call breaks a gate and an after rule', () => {
+  const skills = { ...base.skills, 'ui-checklist': { need: 'ui', from: 'user' as const, gate: { tools: ['Write'], paths: ['**/*.html'] } } }
+  const rules = [{ id: 'r1', source: 'user', after: { tools: ['Write'], paths: ['**/*.html'] }, evidence: { tool: 'Bash', command: '*check*' } }]
+  const calls = [tool('Write', { path: 'a.html' }), tool('Write', { path: 'b.html' }), tool('Skill', { skill: 'ui-checklist' }), loadSkill('ui-checklist'), tool('Write', { path: 'c.html' }), tool('Write', { path: 'd.html' })]
+  const { denied, recorded } = parity({ skills, rules }, [prompt('screen', ['ui'])], calls)
+  // the rule may land on another call in observe, but each check is counted as often
+  assert.deepEqual(perCheck(recorded), perCheck(denied))
+  assert.ok(Object.keys(perCheck(denied)).some((l) => l.includes('rule r1')))
+})
+
+test('observe records what enforce denies: evidence starts a need', () => {
+  const calls = [tool('Bash', { command: 'gh issue create --title x' }), tool('Bash', { command: 'gh issue create --title y' })]
+  assertParity({}, [prompt()], calls, 1)
+})
+
+test('observe and the retry together open the rules and count the subagent once', () => {
+  const rules = [{ id: 'r1', source: 'user', after: { tools: ['Write'], paths: ['**/*.md'] }, evidence: { tool: 'Bash', command: '*check*' } }]
+  const config = cfg({ mode: 'observe', rules })
+  const pre = run(config, [prompt('screen', ['ui'])]).s
+  const r = run(config, [tool('Agent', { brief: 'no line' }), tool('Write', { path: 'a.md' })], pre)
+  assert.equal(r.s.subagentsRunning, 1)
+  assert.deepEqual(r.s.openRules.map((o) => o.id), ['r1'])
+  assert.equal(r.s.agentDenied, false)
+})
+
 test('observe mode still sends the restore context', () => {
   const a = one(cfg({ mode: 'observe', skills: withAlways.skills }), [prompt()])
   assert.match(ctx(a), /terse:terse-mode/)

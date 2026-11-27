@@ -106,7 +106,7 @@ Paths in `gate`, `duty` and rules are globs with `*`, `**` and `?` only; other g
 
 A skill with `always` is needed from the first turn. A skill with `need` is needed once the classifier has matched that need in the session. `gate` and `duty` are optional.
 
-The top-level `mode` key decides whether Souffleur may block anything. In `observe`, the default, Souffleur keeps the ledger, asks for restores and reports through `/souffleur`, but denies no tool call; `/souffleur` lists each call it would have denied. In `enforce`, gates and duties deny as described below. Only the user file sets `mode`. A project file that sets it gets an error and the mode stays as the user file has it, so a cloned repository can neither switch gates on nor off.
+The top-level `mode` key decides whether Souffleur may block anything. In `observe`, the default, Souffleur keeps the ledger, asks for restores and reports through `/souffleur`, but denies no tool call; `/souffleur` lists each call it would have denied. That list holds the same denials `enforce` would give, assuming the model retries after each denial, counted per rule and per skill. When one call breaks several checks, a later check can land on another call than in `enforce`. A call is treated as the denial and its retry in one, so an `after` rule or a duty that `enforce` denies once is listed once, while a gate, a field rule or a brief without a `skills:` line is listed on every call that breaks it, as `enforce` denies each of them. The gate release is the one exception, because it exists only in `enforce`. In `enforce`, gates and duties deny as described below. Only the user file sets `mode`. A project file that sets it gets an error and the mode stays as the user file has it, so a cloned repository can neither switch gates on nor off.
 
 ### Project blocks
 
@@ -206,7 +206,7 @@ Souffleur keeps both in its config, next to the skills:
 }
 ```
 
-A rule has a trace Souffleur can see, in one of three kinds (`source` is `user`, `slip` or `skill:<name>`): a skill that must be loaded before a matching call (`skill`), a field the call must carry (`field`), or evidence that must follow a matching call (`after` with `evidence`, the same as a duty). Rules follow `mode`: in `observe` a broken rule is listed, in `enforce` the call is denied with the rule named. How each kind enforces:
+A rule has a trace Souffleur can see, in one of three kinds (`source` is `user`, `slip` or `skill:<name>`): a skill that must be loaded before a matching call (`skill`), a field the call must carry (`field`), or evidence that must follow a matching call (`after` with `evidence`, the same as a duty). Rules follow `mode`: in `observe` a broken rule is listed, in `enforce` the call is denied with the rule named. An `after` rule is listed once per open rule in `observe`, like its one denial in `enforce`; the subagent brief check is listed for every brief without a `skills:` line, as `enforce` denies each of them once. How each kind enforces:
 
 - `skill`: a matching call is denied until the skill is `loaded`, like a gate. Once a rule has fired or its skill was loaded in a session, the skill counts as needed for the rest of that session, so it is restored after compaction like any needed skill. A skill named only in a rule gets a ledger entry too.
 - `field`: a matching call without that field is denied once; the retry passes, so a wrong rule cannot trap the session.

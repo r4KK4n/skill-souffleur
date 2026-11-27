@@ -570,7 +570,8 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
       if ((active.length === 0 && always.length === 0) || BRIEF_SKILLS.test(e.brief ?? '')) next.agentDenied = false
       else if (next.agentDenied) next.agentDenied = false
       else {
-        next.agentDenied = true
+        // Observe records the break and leaves no retry state: the call stands for the denial and its retry, so the next brief is checked afresh.
+        next.agentDenied = config.mode === 'enforce'
         found.push({
           text: `Souffleur: add a line "skills: <names>" (or "skills: none" for mechanical work) to the brief, then retry. Configured skills: ${listed.join(', ') || 'none'}. Active needs: ${active.join(', ') || 'none'}.${always.length ? ` Always-on: ${always.join(', ')}.` : ''} ${PAUSE_HINT}`,
           trusted: true,
@@ -639,9 +640,11 @@ function onTool(config: Config, s: Session, e: Extract<CoreEvent, { type: 'tool'
   if (untrustedText) next.observed = lastN(next.observed, { at: e.now, reason: untrustedText })
 
   // Retry state moves only with the outcome of the whole call: a denial marks the rules that spoke, a pass uses up their retry
-  // and lets evidence close a rule. In observe nothing is denied, so every break is recorded and no retry state is kept.
+  // and lets evidence close a rule. In observe a call that enforce would deny is the denial and its retry in one: the rules that
+  // spoke are marked denied, and the call counts as passed (it ran), so the next repeat is not recorded again.
+  const wouldDeny = !denied && config.mode !== 'enforce' && trustedText !== ''
+  if (denied || wouldDeny) next.openRules = next.openRules.map((o) => (rr.denied.includes(o.id) ? { ...o, denied: true } : o))
   if (denied) {
-    next.openRules = next.openRules.map((o) => (rr.denied.includes(o.id) ? { ...o, denied: true } : o))
     next.fieldDenied = [...next.fieldDenied, ...rr.denied.filter((id) => !next.fieldDenied.includes(id) && config.rules.some((r) => r.id === id && ruleKind(r) === 'field'))]
   } else {
     next.openRules = next.openRules.filter((o) => !rr.closed.includes(o.id))
