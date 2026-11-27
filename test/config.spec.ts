@@ -368,6 +368,19 @@ test('a gate cannot name the Skill tool: the entry is dropped like a skill rule'
   assert.ok(errors.some((e) => /gate/.test(e) && /Skill/.test(e)), errors.join('\n'))
 })
 
+test('trustProjects: the same length and control-character rules as the other lists', () => {
+  const tooMany = parseConfig(json({ trustProjects: Array.from({ length: 21 }, (_, i) => `/work/p${i}`) }), undefined)
+  assert.deepEqual(tooMany.config.trustProjects, [])
+  assert.ok(tooMany.errors.some((e) => /trustProjects/.test(e)))
+  const control = parseConfig(json({ trustProjects: ['/work/a\nb'] }), undefined)
+  assert.deepEqual(control.config.trustProjects, [])
+  assert.ok(control.errors.some((e) => /trustProjects/.test(e)))
+  const long = parseConfig(json({ trustProjects: [`/${'a'.repeat(300)}`] }), undefined)
+  assert.deepEqual(long.config.trustProjects, [])
+  const twenty = parseConfig(json({ trustProjects: Array.from({ length: 20 }, (_, i) => `/work/p${i}`) }), undefined)
+  assert.equal(twenty.config.trustProjects.length, 20)
+})
+
 test('trustProjects compares with the same root normalisation as where', async () => {
   const { isTrustedRoot } = await import('../src/core/config.ts')
   const { config } = parseConfig(json({ trustProjects: ['/work/a/', '/work/b'] }), undefined)

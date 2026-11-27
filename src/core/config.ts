@@ -322,10 +322,10 @@ function parseFile(text: string, source: Origin, errors: string[], extraNeeds: r
   }
   if (source === 'user' && obj.trustProjects !== undefined) {
     const list = obj.trustProjects
-    if (Array.isArray(list) && list.every((p) => typeof p === 'string' && /^(\/|[A-Za-z]:[\\/])/.test(p))) {
+    if (Array.isArray(list) && list.length <= MAX_LIST && list.every((p) => isAbsolutePath(p, MAX_GLOB))) {
       file.trustProjects = (list as string[]).map(normRoot)
     } else {
-      fail('trustProjects: must be a list of absolute paths; ignored')
+      fail(`trustProjects: must be a list of at most ${MAX_LIST} one-line absolute paths of at most ${MAX_GLOB} characters; ignored`)
     }
   }
 

@@ -104,6 +104,10 @@ type Opts = {
   classifyRejected?: boolean
   /** `$.store.set` of this key throws. */
   failStoreKey?: string
+  /** `$.store.keys` answers only after this resolves, as a slow store does. */
+  holdKeys?: Promise<void>
+  /** `$.store.keys` rejects. */
+  failKeys?: boolean
   /** `$.store.set` of the total waits for this. */
   holdTotal?: Promise<void>
   /** An Agent tool call stays open until this resolves, as a running subagent keeps it open. */
@@ -223,7 +227,11 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
     return { value: text }
   })
   let classifyCalls = 0
-  on('store.keys', () => ({ value: Object.keys(storeData) }) as never)
+  on('store.keys', () => {
+    if (opts.failKeys) throw new Error('store gone')
+    const keys = () => ({ value: Object.keys(storeData) }) as never
+    return opts.holdKeys ? opts.holdKeys.then(keys) : keys()
+  })
   on('ui.status', (_, e) => {
     statuses.push(e.text)
     return { value: undefined }
@@ -2082,7 +2090,7 @@ test('the version is marked offered after the proposals were queued, and not at 
   })
   await start($)
   await mainLoad($, 'skill-0', texts[0]!)
-  expect(stored[hashKey(hashOf('skill-0', texts[0]!))]).toEqual({ offers: 1 })
+  expect(stored[hashKey(hashOf('skill-0', texts[0]!))]).toMatchObject({ offers: 1 })
   await mainLoad($, 'skill-1', texts[1]!)
   await mainLoad($, 'skill-2', texts[2]!)
   expect(calls.length).toBe(3)
@@ -2127,7 +2135,7 @@ test('the model call has a 30 second limit; an unanswered call is released and g
   for (let i = 0; i < 5; i++) await mainLoad($, 'writing-guide')
   expect(calls.length).toBe(3)
   expect(requests[0]!.timeoutMs).toBe(30000)
-  expect(stored[hashKey(hashOf('writing-guide'))]).toEqual({ fails: 3 })
+  expect(stored[hashKey(hashOf('writing-guide'))]).toMatchObject({ fails: 3 })
   await mainLoad($, 'other', 'Always run `npm test`.')
   expect(calls.length).toBe(4)
 })
@@ -2138,7 +2146,7 @@ test('an answer that does not parse counts as a failure; a failed read gives its
   world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', stored, skillCalls: calls, skillAnswer: () => 'I cannot do that.' })
   await start($)
   await mainLoad($, 'writing-guide')
-  expect(stored[hashKey(hashOf('writing-guide'))]).toEqual({ fails: 1 })
+  expect(stored[hashKey(hashOf('writing-guide'))]).toMatchObject({ fails: 1 })
   for (let i = 0; i < 4; i++) await mainLoad($, `skill-${i}`, `Always do ${i}.`)
   expect(calls.length).toBe(5)
   await mainLoad($, 'skill-last', 'Always do the last thing.')
@@ -2311,10 +2319,11 @@ test('a session stores its timestamp, and session entries older than 14 days are
   const unstamped = { id: 'unstamped', ledger: {} }
   const w = world(on, { [USER_FILE]: ALWAYS }, { stored: { 'session:old': old, 'session:recent': recent, 'session:unstamped': unstamped, 'souffleur:declined': ['h'], 'souffleur:skill-hash:abc': { done: true } } })
   await start($)
+  await settle()
   expect(w.stored['session:old']).toBe(undefined)
   expect(w.stored['session:recent']).toBeDefined()
   expect(w.stored['souffleur:declined']).toEqual(['h'])
-  expect(w.stored['souffleur:skill-hash:abc']).toEqual({ done: true })
+  expect(w.stored['souffleur:skill-hash:abc']).toMatchObject({ done: true })
   expect(typeof (w.stored['session:s1'] as { touched: number }).touched).toBe('number')
   expect(typeof (w.stored['session:unstamped'] as { touched?: number }).touched, 'a legacy copy gets a stamp and goes after 14 days').toBe('number')
 })
@@ -2326,7 +2335,7 @@ test('a skill version is done only when its proposals were answered; a dropped q
   const key = hashKey(hashOf('writing-guide'))
   await start($)
   await mainLoad($, 'writing-guide')
-  expect(stored[key]).toEqual({ offers: 1 })
+  expect(stored[key]).toMatchObject({ offers: 1 })
   await mainLoad($, 'writing-guide')
   expect(calls.length, 'its proposals still wait in this session').toBe(1)
   for (const id of ['s2', 's3']) {
@@ -2335,7 +2344,7 @@ test('a skill version is done only when its proposals were answered; a dropped q
     await mainLoad($, 'writing-guide')
   }
   expect(calls.length).toBe(3)
-  expect(stored[key]).toEqual({ offers: 3 })
+  expect(stored[key]).toMatchObject({ offers: 3 })
   w.setId('s4')
   await start($)
   await mainLoad($, 'writing-guide')
@@ -2351,10 +2360,10 @@ test('answering the proposals of a skill version marks it done', async ($, on) =
   await mainLoad($, 'writing-guide')
   await turnEnd($)
   expect(w.asked.length).toBe(1)
-  expect(stored[key], 'one of two answered').toEqual({ offers: 1 })
+  expect(stored[key], 'one of two answered').toMatchObject({ offers: 1 })
   w.answers.push('Yes, everywhere')
   await turnEnd($)
-  expect(stored[key]).toEqual({ done: true })
+  expect(stored[key]).toMatchObject({ done: true })
   w.setId('s2')
   await start($)
   await mainLoad($, 'writing-guide')
@@ -2368,10 +2377,10 @@ test('a dismissed dialog leaves the version offered, a declined proposal counts 
   await start($)
   await mainLoad($, 'writing-guide')
   await turnEnd($)
-  expect(stored[key]).toEqual({ offers: 1 })
+  expect(stored[key]).toMatchObject({ offers: 1 })
   const id = (await table($)).match(/- (rule-[0-9a-f]{8})/)![1]
   expect(await run($, `decline ${id}`)).toMatch(/not added/)
-  expect(stored[key]).toEqual({ done: true })
+  expect(stored[key]).toMatchObject({ done: true })
   expect(w.asked.length).toBe(1)
 })
 
@@ -2380,7 +2389,7 @@ test('proposals that are all known already mark the version done at once', async
   world(on, { [USER_FILE]: JSON.stringify({ mode: 'enforce', rules: [{ id: 'have', after: TEST_RULE.after, evidence: TEST_RULE.evidence, source: 'user' }] }) }, { answers: 'reject', stored, skillAnswer: answerWith(TEST_RULE) })
   await start($)
   await mainLoad($, 'writing-guide')
-  expect(stored[hashKey(hashOf('writing-guide'))]).toEqual({ done: true })
+  expect(stored[hashKey(hashOf('writing-guide'))]).toMatchObject({ done: true })
 })
 
 test('start writes one summary line with the plugin version', async ($, on) => {
@@ -4933,11 +4942,58 @@ test('session start keeps at most 50 stored sessions and drops copies older than
   stored['session:ancient'] = { ...initSession(config, 'ancient', 1, 'startup', '2.1.331'), touched: Date.now() - 15 * 86_400_000 }
   world(on, { [USER_FILE]: ALWAYS }, { stored })
   await start($)
+  await settle()
   const keys = Object.keys(stored).filter((k) => k.startsWith('session:'))
   expect(keys.length).toBeLessThanOrEqual(50)
   expect(keys).not.toContain('session:ancient')
   expect(keys).toContain('session:old0')
   expect(keys).not.toContain('session:old59')
+})
+
+test('session start does not wait for the store pruning', async ($, on) => {
+  let release!: () => void
+  const holdKeys = new Promise<void>((r) => { release = r })
+  const day = 86_400_000
+  const w = world(on, { [USER_FILE]: ALWAYS }, { holdKeys, stored: { 'session:old': { id: 'old', ledger: {}, touched: Date.now() - 15 * day } } })
+  await start($)
+  expect(w.stored['session:old'], 'start came back while the key list was still pending').toBeDefined()
+  release()
+  await settle()
+  expect(w.stored['session:old']).toBe(undefined)
+})
+
+test('a failing store at pruning is logged to debug and does not fail the session', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ALWAYS }, { failKeys: true })
+  await start($)
+  await settle()
+  expect(w.debugLogs.some((l) => /pruning/.test(l))).toBe(true)
+  expect(await table($)).toMatch(/writing-guide/)
+})
+
+test('skill-hash keys older than 14 days are pruned, newer ones kept, unstamped ones stamped', async ($, on) => {
+  const day = 86_400_000
+  const w = world(on, { [USER_FILE]: ALWAYS }, {
+    stored: {
+      'souffleur:skill-hash:old': { done: true, touched: Date.now() - 15 * day },
+      'souffleur:skill-hash:recent': { offers: 1, touched: Date.now() - 2 * day },
+      'souffleur:skill-hash:legacy': { done: true },
+      'souffleur:declined': ['h'],
+    },
+  })
+  await start($)
+  await settle()
+  expect(w.stored['souffleur:skill-hash:old']).toBe(undefined)
+  expect(w.stored['souffleur:skill-hash:recent']).toMatchObject({ offers: 1 })
+  expect(typeof (w.stored['souffleur:skill-hash:legacy'] as { touched?: number }).touched).toBe('number')
+  expect(w.stored['souffleur:declined']).toEqual(['h'])
+})
+
+test('a stored skill-hash record carries a timestamp', async ($, on) => {
+  const stored: Record<string, unknown> = {}
+  world(on, { [USER_FILE]: ENFORCE }, { answers: ['No'], stored, skillAnswer: answerWith(TEST_RULE) })
+  await start($)
+  await mainLoad($, 'writing-guide')
+  expect(typeof (stored[hashKey(hashOf('writing-guide'))] as { touched?: number }).touched).toBe('number')
 })
 
 // One careful path for every write of the user file (issue #91).

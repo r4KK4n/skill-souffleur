@@ -454,32 +454,32 @@ const SESSION_TTL_MS = 14 * 86_400_000
 /** Stored session copies kept, the one in use included. */
 const SESSION_KEEP = 50
 
+/** Plugin store prefix of the per-skill-version read records; they follow the same age rule as the session copies. */
+const HASH_PREFIX = hashKey('')
+
 /**
- * Housekeeping at session start: removes `session:*` entries of the plugin store whose copy was stored more than 14 days
- * ago, then the oldest ones beyond 50. A copy without a timestamp (stored before this existed) gets one now and goes after 14 days. Never touches the
- * session in use or other keys. A failure here is not an error of the session: the next start tries again.
+ * Housekeeping at session start, run in the background: removes `session:*` and `souffleur:skill-hash:*` entries of the plugin store whose copy was stored more than 14 days
+ * ago, then the oldest session copies beyond 50. A copy without a timestamp (stored before this existed) gets one now and goes after 14 days. Never touches the
+ * session in use or other keys. The caller logs a failure to debug: it is not an error of the session, and the next start tries again.
  */
 async function pruneStore($: Dollar, currentId: string): Promise<void> {
-  try {
-    const keys: string[] = await $.store.keys()
-    const kept: { key: string; touched: number }[] = []
-    for (const key of keys) {
-      if (!key.startsWith('session:') || key === `session:${currentId}`) continue
-      const copy: unknown = await $.store.get(key)
-      const touched = typeof copy === 'object' && copy !== null ? (copy as { touched?: unknown }).touched : undefined
-      if (typeof touched === 'number') {
-        if (now() - touched > SESSION_TTL_MS) await $.store.delete(key)
-        else kept.push({ key, touched })
-      } else if (typeof copy === 'object' && copy !== null) {
-        await $.store.set(key, { ...copy, touched: now() })
-        kept.push({ key, touched: now() })
-      }
+  const keys: string[] = await $.store.keys()
+  const kept: { key: string; touched: number }[] = []
+  for (const key of keys) {
+    const isSession = key.startsWith('session:')
+    if (!(isSession || key.startsWith(HASH_PREFIX)) || key === `session:${currentId}`) continue
+    const copy: unknown = await $.store.get(key)
+    const touched = typeof copy === 'object' && copy !== null ? (copy as { touched?: unknown }).touched : undefined
+    if (typeof touched === 'number') {
+      if (now() - touched > SESSION_TTL_MS) await $.store.delete(key)
+      else if (isSession) kept.push({ key, touched })
+    } else if (typeof copy === 'object' && copy !== null) {
+      await $.store.set(key, { ...copy, touched: now() })
+      if (isSession) kept.push({ key, touched: now() })
     }
-    kept.sort((a, b) => b.touched - a.touched)
-    for (const { key } of kept.slice(SESSION_KEEP - 1)) await $.store.delete(key)
-  } catch {
-    // housekeeping only
   }
+  kept.sort((a, b) => b.touched - a.touched)
+  for (const { key } of kept.slice(SESSION_KEEP - 1)) await $.store.delete(key)
 }
 
 /** The fixed instruction of both classifier calls; the labels and the text go in the prompt. */
@@ -1900,7 +1900,7 @@ async function learnFrom($: Dollar, a: LearnAction): Promise<void> {
       })
     }
     // Done when nothing is left to ask; otherwise the version counts as offered, and done only once its proposals are answered.
-    if (!full) await $.store.set(key, queued.length === 0 ? { done: true } : { offers: offers + 1 })
+    if (!full) await $.store.set(key, queued.length === 0 ? { done: true, touched: now() } : { offers: offers + 1, touched: now() })
   } catch {
     if (claimed && hash !== undefined) {
       try {
@@ -1908,7 +1908,7 @@ async function learnFrom($: Dollar, a: LearnAction): Promise<void> {
         await serial(async () => {
           const { l, session } = await current($)
           await persist($, l, { ...session, skillReads: Math.max(0, (session.skillReads ?? 0) - 1) })
-          await $.store.set(hashKey(hash!), { fails: fails + 1 })
+          await $.store.set(hashKey(hash!), { fails: fails + 1, touched: now() })
         })
       } catch {
         // the version stays as it was
@@ -1926,7 +1926,7 @@ async function markVersionDone($: Dollar, before: Session, after: Session, hash:
   const version = before.proposals.find((q) => q.hash === hash)?.skillHash
   if (version === undefined || after.proposals.some((q) => q.skillHash === version)) return
   try {
-    await $.store.set(hashKey(version), { done: true })
+    await $.store.set(hashKey(version), { done: true, touched: now() })
   } catch {
     // the version stays offered and is read again next time, within the cap
   }
@@ -2160,7 +2160,15 @@ export const register: Register = (on) => {
         }
       })().catch(() => {})
     })
-    await pruneStore($, await $.session.id())
+    const pruneId = await $.session.id()
+    // Not awaited: a store with thousands of keys must not hold the session start.
+    void pruneStore($, pruneId).catch((err) => {
+      try {
+        $.ui.log(`store pruning failed: ${message(err)}`, { to: 'debug' })
+      } catch {
+        // a log line is a courtesy
+      }
+    })
     await safe($, 'installed', undefined, () => refreshInstalled($))
     await safe($, 'command.register', undefined, async () => {
       await $.command.register({ name: 'souffleur', description: 'Show which skills Souffleur keeps loaded', argumentHint: '[status | need <name> | drop <name> | pause | resume | init | migrate | rule <text> | review | accept <id> | decline <id> | block <name> | unblock <name> | project | update]' })
