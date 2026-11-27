@@ -4428,5 +4428,29 @@ test('on the desktop a newer release shows the status line', async ($, on) => {
   world(on, { [USER_FILE]: ALWAYS }, { stored: { updateCheck: { at: Date.now(), latest: 'v99.0.0' } } })
   await start($)
   await skillLoaded($, 'writing-guide')
-  expect(await bandText($, 'desktop')).toMatch(/1 loaded/)
+  expect(await bandText($, 'desktop')).toMatch(/1 loaded · 99\.0\.0 is out, see \/souffleur$/)
+})
+
+test('on the desktop a newer release shows even with no skills configured', async ($, on) => {
+  world(on, { [USER_FILE]: '{}' }, { stored: { updateCheck: { at: Date.now(), latest: 'v99.0.0' } } })
+  await start($)
+  expect(await bandText($, 'desktop')).toBe('99.0.0 is out, see /souffleur')
+})
+
+test('update off hides the band for a newer release left in the store', async ($, on) => {
+  world(on, { [USER_FILE]: JSON.stringify({ update: 'off', skills: { 'writing-guide': { always: true } } }) }, { stored: { updateCheck: { at: Date.now(), latest: 'v99.0.0' } } })
+  await start($)
+  await skillLoaded($, 'writing-guide')
+  expect(await bandText($, 'desktop')).toBeUndefined()
+})
+
+test('a mounted band goes away when the restoring skill loads, with no new prompt', async ($, on) => {
+  world(on, { [USER_FILE]: ALWAYS })
+  await start($)
+  await $.prompt.submit({ text: 'hello' })
+  const ui = await $.ui.mount(BAND('desktop'))
+  expect((await ui.find({ type: 'Text' }))?.text).toMatch(/1 restoring/)
+  await skillLoaded($, 'writing-guide')
+  expect(await ui.find({ type: 'Text' })).toBeUndefined()
+  await ui.unmount()
 })

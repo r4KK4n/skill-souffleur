@@ -182,8 +182,11 @@ async function persist($: Dollar, l: Loaded, s0: Session, quiet = false): Promis
   const text = notSetUp ? NOT_SET_UP : statusLine(s, l.config.mode, sectionNotes(l.config, l.root).leftOut.length, l.config, l.root)
   $.ui.status(text)
   // The apps draw no status line: a band stands in for it, but only while something needs attention.
-  const newer = compareVersions((await readCheck($))?.latest?.replace(/^v/, '') ?? '', PLUGIN_VERSION) === 1
-  await updateAtom($, band, () => (text !== undefined && (notSetUp || needsAttention(s, l.config, l.root, newer)) ? { text } : null))
+  const tag = l.config.update === 'off' ? undefined : (await readCheck($))?.latest
+  const newer = tag !== undefined && compareVersions(shown(tag), PLUGIN_VERSION) === 1
+  const attention = notSetUp || needsAttention(s, l.config, l.root)
+  const bandText = newer ? [text, `${shown(tag)} is out, see /souffleur`].filter(Boolean).join(' · ') : attention ? text : undefined
+  await updateAtom($, band, () => (bandText === undefined ? null : { text: bandText }))
   await $.state.set(REF, s)
   await $.store.set(`session:${s.id}`, s)
 }

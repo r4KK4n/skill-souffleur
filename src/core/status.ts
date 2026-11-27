@@ -116,9 +116,9 @@ function baseLine(s: Session, mode: Mode, notesLeftOut: number, config?: Config,
   return prefix ? `${prefix} ${parts.join(', ')}` : parts.join(', ')
 }
 
-/** True when the band above the prompt has something to say: a skill restoring, stale or missing, a degraded mod, or a newer release. */
-export function needsAttention(s: Session, config: Config, root?: string, newerRelease = false): boolean {
-  if (newerRelease || s.errors.length) return true
+/** True when the band above the prompt has something to say: a skill restoring, stale or missing, or a degraded mod. */
+export function needsAttention(s: Session, config: Config, root?: string): boolean {
+  if (s.errors.length) return true
   return Object.entries(s.ledger).some(([name, e]) => {
     if (config.skills[name] !== undefined && excludedIn(config.skills[name]!, root)) return false
     return e.state === 'restoring' || e.state === 'stale' || e.state === 'unavailable' || e.state === 'not installed here'
