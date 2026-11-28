@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "jsx": "react", "jsxFactory": "h", "jsxFragmentFactory": "Fragment" },
+  "include": ["src", ".mod-types/claude-code.d.ts", "types/index.d.ts"],
+  "exclude": []
+}

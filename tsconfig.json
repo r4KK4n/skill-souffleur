@@ -13,6 +13,6 @@
     "resolveJsonModule": true,
     "skipLibCheck": true
   },
-  "include": ["src", "test"],
+  "include": ["src", "test", "types/index.d.ts"],
   "exclude": ["src/mod/register.ts", "src/mod/register.test.ts"]
 }
