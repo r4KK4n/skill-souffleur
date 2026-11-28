@@ -5666,7 +5666,7 @@ test('a host clock that throws falls back to the system time and logs once to de
   await start($)
   await settleUpdate(w)
   broken = true
-  // An hour old in system time, a year and a half old by the last good reading: only the system time says "not due".
+  // An hour old in system time, weeks off by the last good reading (T0 lies ahead of the system time): only the system time says "not due".
   w.stored['updateCheck'] = { at: Date.now() - 3_600_000, latest: 'v0.0.1' }
   const before = lsRemoteCalls(w).length
   own(w)

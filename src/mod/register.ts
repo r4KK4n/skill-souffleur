@@ -705,12 +705,13 @@ const HASH_PREFIX = hashKey('')
 async function pruneStore($: Dollar, currentId: string): Promise<void> {
   const keys: string[] = await $.store.keys()
   const kept: { key: string; touched: number }[] = []
+  // One fresh reading for the whole pass: stamps were written by other processes.
+  const wall = await wallNow($)
   for (const key of keys) {
     const isSession = key.startsWith('session:')
     if (!(isSession || key.startsWith(HASH_PREFIX)) || key === `session:${currentId}`) continue
     const copy: unknown = await $.store.get(key)
     const touched = typeof copy === 'object' && copy !== null ? (copy as { touched?: unknown }).touched : undefined
-    const wall = await wallNow($)
     if (typeof touched === 'number') {
       if (wall - touched > SESSION_TTL_MS) await $.store.delete(key)
       else if (isSession) kept.push({ key, touched })
