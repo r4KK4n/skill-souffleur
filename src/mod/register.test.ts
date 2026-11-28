@@ -69,6 +69,8 @@ type Opts = {
   failWrite?: RegExp
   /** `mkdir` of the update lock folder always fails, as when another session wins the race. */
   holdLock?: boolean
+  /** Every `mkdir` fails and makes nothing, as on a host without it. */
+  noMkdir?: boolean
   /** Modification times `$.fs.stat` reports for folders. */
   dirMtime?: Record<string, number>
   /** `$.env.get('HOME')` answers nothing. */
@@ -232,6 +234,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
     }
     if (e.argv[0] === 'mkdir') {
       const dir = e.argv[e.argv.length - 1]!
+      if (opts.noMkdir) return { value: { exitCode: 127, stdout: '', stderr: 'mkdir: not found' } } as never
       if (e.argv[1] === '-p') { dirs.add(dir); return { value: { exitCode: 0, stdout: '', stderr: '' } } as never }
       if (opts.holdLock && dir.endsWith('/update.lock')) return { value: { exitCode: 1, stdout: '', stderr: 'mkdir: File exists' } } as never
       if (dirs.has(dir) || Object.keys(files).some((f) => f.startsWith(`${dir}/`))) return { value: { exitCode: 1, stdout: '', stderr: 'mkdir: File exists' } } as never
@@ -289,7 +292,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   on('fs.write', (_, e) => {
     if (opts.failWrite?.test(e.path)) throw new Error('ENOSPC: no space left')
     if (/\.tmp-/.test(e.path)) tmpWrites.push({ path: e.path, text: e.text })
-    else writes.push({ path: e.path, text: e.text })
+    else if (!e.path.endsWith('/user-file.lock/owner')) writes.push({ path: e.path, text: e.text }) // the lock stamp is not a config write
     put(e.path, e.text)
     opts.onWrite?.(e.path)
     return { value: undefined }
@@ -5675,4 +5678,80 @@ test('a host clock that throws falls back to the system time and logs once to de
   await settleUpdate(w, 3)
   expect(lsRemoteCalls(w).length).toBe(before)
   expect(w.debugLogs.filter((l) => l.startsWith('clock unavailable')).length).toBe(1)
+})
+
+// ---- user file: one edit at a time, one lock across sessions ----
+
+const USER_LOCK = '/data/souffleur/user-file.lock'
+const USER_LOCK_OWNER = `${USER_LOCK}/owner`
+const lockedBy = (at: number, token = 'other') => ({ [USER_LOCK_OWNER]: JSON.stringify({ at, token }) })
+const blockedIn = (w: World) => (JSON.parse(w.files[USER_FILE]!).projects['/work/proj']?.block ?? []) as string[]
+
+test('two writers of the user file at once: both changes are in the file and no temp file stays', async ($, on) => {
+  const w = world(on, { [USER_FILE]: BLOCKABLE })
+  await start($)
+  const [a, b] = await Promise.all([run($, 'block writing-guide'), run($, 'block terse:terse-mode')])
+  expect(a).not.toMatch(/kept changing|could not/)
+  expect(b).not.toMatch(/kept changing|could not/)
+  expect([...blockedIn(w)].sort()).toEqual(['terse:terse-mode', 'writing-guide'])
+  expect(Object.keys(w.files).filter((f) => f.includes('.tmp-'))).toEqual([])
+  expect(Object.keys(w.files).filter((f) => f.startsWith(USER_LOCK))).toEqual([])
+})
+
+test('a user file lock held by another session delays the edit; it writes once the lock is gone', async ($, on) => {
+  const w = world(on, { [USER_FILE]: BLOCKABLE, ...lockedBy(T0 - 1000) })
+  await start($)
+  const pending = run($, 'block writing-guide')
+  await w.clock.advance(500)
+  expect(userWrites(w).length).toBe(0)
+  delete w.files[USER_LOCK_OWNER]
+  const dirs = w.runs.filter((r) => r.argv[0] === 'mkdir' && r.argv[1] === USER_LOCK).length
+  expect(dirs).toBeGreaterThan(1)
+  await w.clock.advance(200)
+  expect(await pending).toMatch(/writing-guide blocked/)
+  expect(blockedIn(w)).toEqual(['writing-guide'])
+})
+
+test('a user file lock held past 3 seconds: writing failed, nothing written, the lock stays', async ($, on) => {
+  const w = world(on, { [USER_FILE]: BLOCKABLE, ...lockedBy(T0 - 1000) })
+  await start($)
+  const pending = run($, 'block writing-guide')
+  await w.clock.advance(3500)
+  expect(await pending).toMatch(/could not write .*souffleur\.json.*holds the lock.*nothing was written/)
+  expect(w.files[USER_FILE]).toBe(BLOCKABLE)
+  expect(userWrites(w).length).toBe(0)
+  expect(JSON.parse(w.files[USER_LOCK_OWNER]!).token).toBe('other')
+})
+
+test('a stale user file lock (older than 30 seconds) is taken over and the edit goes through', async ($, on) => {
+  const w = world(on, { [USER_FILE]: BLOCKABLE, ...lockedBy(T0 - 31_000) })
+  await start($)
+  expect(await run($, 'block writing-guide')).toMatch(/writing-guide blocked/)
+  expect(blockedIn(w)).toEqual(['writing-guide'])
+  expect(w.files[USER_LOCK_OWNER]).toBeUndefined()
+})
+
+test('a user file lock of 20 seconds is still held', async ($, on) => {
+  const w = world(on, { [USER_FILE]: BLOCKABLE, ...lockedBy(T0 - 20_000) })
+  await start($)
+  const pending = run($, 'block writing-guide')
+  await w.clock.advance(3500)
+  expect(await pending).toMatch(/could not write/)
+  expect(userWrites(w).length).toBe(0)
+})
+
+test('a host where mkdir does not work still writes the user file, with one debug line', async ($, on) => {
+  const w = world(on, { [USER_FILE]: BLOCKABLE }, { noMkdir: true })
+  await start($)
+  expect(await run($, 'block writing-guide')).toMatch(/writing-guide blocked/)
+  expect(await run($, 'block terse:terse-mode')).toMatch(/terse:terse-mode blocked/)
+  expect([...blockedIn(w)].sort()).toEqual(['terse:terse-mode', 'writing-guide'])
+  expect(w.debugLogs.filter((l) => l.includes('user file lock')).length).toBeGreaterThan(0)
+})
+
+test('an edit that fails inside the lock still releases it and the next edit runs', async ($, on) => {
+  const w = world(on, { [USER_FILE]: BLOCKABLE }, { failWrite: /\.tmp-/ })
+  await start($)
+  expect(await run($, 'block writing-guide')).toMatch(/could not write/)
+  expect(Object.keys(w.files).filter((f) => f.startsWith(USER_LOCK))).toEqual([])
 })
