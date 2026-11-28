@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-28
+
 ### Removed
 
 - The reply-length check and the turn-end hold are gone: Souffleur keeps skills loaded and no longer measures or corrects what a skill produces. A `reply` key in a skill entry is ignored with the notice `<skill>.reply is no longer supported; ignored`.
@@ -251,7 +253,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - A project file is report only unless its root is in `trustProjects`: Souffleur no longer asks the model to load its skills, names them in the system prompt or lets its needs deny an `Agent` brief. A project file may define 20 skills and 10 needs; more get an error that names the cap. Duty evidence gets the same length and control character checks as rule evidence, and `trustProjects` ignores trailing slashes.
 
-[Unreleased]: https://github.com/r4KK4n/skill-souffleur/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/r4KK4n/skill-souffleur/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/r4KK4n/skill-souffleur/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/r4KK4n/skill-souffleur/compare/v0.2.9...v0.3.0
 [0.2.9]: https://github.com/r4KK4n/skill-souffleur/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/r4KK4n/skill-souffleur/compare/v0.2.7...v0.2.8
