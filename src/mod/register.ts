@@ -1559,7 +1559,8 @@ async function editUserFileLocked($: Dollar, change: (doc: unknown) => unknown, 
     return editUserFileOnce($, change, opts)
   }
   const start = await wallNow($)
-  for (let first = true; ; first = false) {
+  // The attempt cap bounds the loop even when the clock does not move.
+  for (let first = true, tries = 0; tries <= USER_LOCK_WAIT_MS / USER_LOCK_RETRY_MS; first = false, tries++) {
     try {
       const got = await withLock($, 'user-file.lock', 'user file lock', USER_LOCK_STALE_MS, edit)
       if (got) return got.value
