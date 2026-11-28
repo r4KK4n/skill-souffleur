@@ -6,21 +6,26 @@ const USER_ORIGINS = ['composer', 'bridge', 'sdk']
  * This differs from `isUserOrigin` on purpose: a prompt without an origin cannot change state (it only
  * feeds the model), while a command can, so a command without an origin fails closed.
  */
+export function isFromUser(e: { isMeta?: unknown; command?: unknown; origin?: { kind: string } }): boolean {
+  return e.command === undefined && !e.isMeta && (e.origin === undefined || USER_ORIGINS.includes(e.origin.kind))
+}
+
 /**
- * Origins whose prompt starts a model turn of the main session without being the person's: another session's message, a
- * background task's notification, a schedule, a channel, a coordinator's hand-off. Left out: `observer` and `observer-activity`
- * (an agent's loop), `plugin` (a mod's own submission, which may be ours) and `unclassified` (idle notices and receipts that
- * start no turn).
+ * Origins whose prompt starts a model turn of the main session without being the person's: another session's message
+ * (a subagent's hand-back arrives as `peer`), a background task's notification, a schedule, a channel, a coordinator's
+ * hand-off. Left out: `observer` and `observer-activity` (an agent's loop); `plugin` (a mod's own `$.prompt.submit`; it
+ * does start a turn, but none is seen yet, and the tool-call path still covers it); `unclassified` (idle notices and
+ * delivery receipts, which start no turn, share it with turns the engine could not classify, and the two cannot be told apart).
  */
 const TURN_ORIGINS = ['peer', 'peer-send-message', 'task-notification', 'scheduled-trigger', 'projects-relay', 'channel', 'coordinator', 'slack-ping', 'auto-continuation']
 
-/** True for a prompt that is not the person's but starts a main-session turn: it takes the reload request after a compaction. A prompt delivered into a running turn (`turnId`), a command or a meta prompt starts none. */
+/**
+ * True for a prompt that is not the person's but starts a main-session turn: it takes the reload request after a compaction.
+ * `isMeta` does not matter (the recorded hand-back is meta); `turnId` marks a prompt delivered into a running turn, which
+ * starts none, and a command is the person's own business.
+ */
 export function startsTurn(e: { isMeta?: unknown; command?: unknown; turnId?: unknown; origin?: { kind: string } }): boolean {
-  return e.command === undefined && !e.isMeta && e.turnId === undefined && e.origin !== undefined && TURN_ORIGINS.includes(e.origin.kind)
-}
-
-export function isFromUser(e: { isMeta?: unknown; command?: unknown; origin?: { kind: string } }): boolean {
-  return e.command === undefined && !e.isMeta && (e.origin === undefined || USER_ORIGINS.includes(e.origin.kind))
+  return e.command === undefined && e.turnId === undefined && e.origin !== undefined && TURN_ORIGINS.includes(e.origin.kind)
 }
 
 /**

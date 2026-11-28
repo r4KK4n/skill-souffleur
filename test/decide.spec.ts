@@ -1954,3 +1954,16 @@ test('a non-user prompt that starts no turn leaves the restore pending', () => {
   assert.deepEqual(r.out[0], [])
   assert.equal(r.s.compactedSincePrompt, true)
 })
+
+test('the recorded subagent hand-back after a compaction carries the restore, the tool call none (spliced replay)', () => {
+  const config = cfg({ skills: { bigtest: { always: true, from: 'user' } } })
+  const events = toCoreEvents(loadFixture('subagent'))
+  const handBack = events.findIndex((e) => e.type === 'prompt' && !e.fromUser)
+  assert.ok(handBack > 0)
+  // Splice: the recording has no compaction, so one goes right before the hand-back, as in the live session.
+  const r = run(config, [...events.slice(0, handBack), compact(), events[handBack]!, tool('Read', { path: 'a.ts' })])
+  const asked = (i: number) => r.out[i]!.filter((a) => a.kind === 'context' || a.kind === 'toolContext')
+  const k = handBack + 1
+  assert.match(ctx(r.out[k]!), /bigtest/)
+  assert.deepEqual(asked(k + 1), [])
+})

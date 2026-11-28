@@ -6038,11 +6038,11 @@ test('the same block rule is active in its own root', async ($, on) => {
 
 const CHAT_INJECTED = JSON.stringify({ skills: { 'chat:chat': { always: true, startup: 'injected', for: 'chat' } } })
 
-test('a peer message after a compaction carries the reload request; the tool call carries none', async ($, on) => {
+test('a subagent hand-back (isMeta, peer, as recorded) after a compaction carries the reload request; the tool call carries none', async ($, on) => {
   world(on, { [USER_FILE]: CHAT_INJECTED })
   await start($)
   await compact($, { trigger: 'manual' })
-  const r = await submit($, { text: 'agent report', origin: { kind: 'peer' } } as never)
+  const r = await submit($, { text: '<agent-message from="agent-1">\n[Subagent hand-back] done', isMeta: true, origin: { kind: 'peer' } } as never)
   expect(r.context?.join('\n')).toMatch(/chat:chat/)
   expect(JSON.stringify(await $.tool.call({ tool: 'Read', file_path: '/work/proj/a.ts' } as never))).not.toMatch(/chat:chat/)
 })
