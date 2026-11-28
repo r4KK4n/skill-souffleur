@@ -22,6 +22,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- After a compaction, the request to reload the always-on skills now also arrives with a first turn that another session's message or a task notification starts, not only with the next tool call. An answer without a tool call no longer runs without the skills (#140).
 - The published state types (`types/index.d.ts`) now match the stored session: `subagentsRunning` is gone, and `liveAgents` and the other session and need fields are added (#89).
 - Two edits of the user file at the same moment no longer lose one of them. Edits in one session now run one at a time, and across sessions the write holds a short lock folder (`user-file.lock` in the plugin data folder, taken over after 30 seconds). A lock held by another session is retried for up to 3 seconds, then the edit says it could not write and changes nothing. If the lock cannot be made at all, the edit goes ahead without it as before (#134).
 - Souffleur now builds every path under your Claude folder from `CLAUDE_CONFIG_DIR` (or `~/.claude`, or `%USERPROFILE%\.claude` where `HOME` is unset): the user file, `settings.json`, CLAUDE.md, the memory index, backups and the plugin ownership check. If `CLAUDE_CONFIG_DIR` is set and has no `souffleur.json` yet, an existing `~/.claude/souffleur.json` is still used and `/souffleur` says once per session how to move it. Souffleur never moves the file itself (#97).

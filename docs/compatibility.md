@@ -19,6 +19,7 @@ Where the second column names a method, it says how the row was checked: `observ
 | A hooks module outside `hooks/` can import sibling `.ts` files (no fixture) | 2.1.332 |
 | After `/compact` in the same process, the engine re-attaches the skill with the note "Do NOT re-execute these skills". A plain request to load them again is ignored; a request that names that note and says it does not apply is followed | 2.1.332 |
 | A `prompt.submit` `context` entry reaches the model as a hook note on the user's turn, also on the first prompt after `/compact` | 2.1.332 |
+| The first turn after a manual `/compact` can start with a prompt that is not the person's: a subagent hand-back delivered as another session's message (origin `peer`), followed by a background task's notification (`task-notification`). Seen in the maintainer's live session; the origin kinds come from the 2.1.332 typings (`PromptOrigin`). Pinned by an adapter test that sends a `peer` prompt after a compaction (the test kit sets an origin on a call, as the adapter tests do, so the test stands in for the live event) | 2.1.332 (observed, no fixture) |
 | `$.ui.log(text, { to: 'debug' })` goes to the debug log and not to the transcript | per the 2.1.332 types, not verified live; the adapter test only checks that the mod asks for the debug target |
 | `$.ui.status(text)` shows in headless stream-json output as a `ui_status` system message | 2.1.332 |
 | `$.command.register` makes `/souffleur` reach a `command.run` hook with `command: "souffleur"` | 2.1.332 |

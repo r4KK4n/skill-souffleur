@@ -1939,3 +1939,18 @@ test('skipped call B prompts count no miss: an active work need survives two rou
   assert.ok(s.needs.debug)
   assert.equal(s.needs.debug!.misses ?? 0, 0)
 })
+
+test('a non-user prompt that starts a turn after a compaction carries the restore once; the tool call adds none', () => {
+  const { s } = run(withAlways, [prompt('x', ['prose']), loadSkill('terse:terse-mode'), compact()])
+  const peer = { ...prompt('report', [], false), startsTurn: true } as CoreEvent
+  const r = run(withAlways, [peer, tool('Read')], s)
+  assert.match(ctx(r.out[0]!), /terse:terse-mode/)
+  assert.deepEqual(r.out[1], [])
+})
+
+test('a non-user prompt that starts no turn leaves the restore pending', () => {
+  const { s } = run(withAlways, [prompt('x', ['prose']), loadSkill('terse:terse-mode'), compact()])
+  const r = run(withAlways, [prompt('meta', [], false)], s)
+  assert.deepEqual(r.out[0], [])
+  assert.equal(r.s.compactedSincePrompt, true)
+})
