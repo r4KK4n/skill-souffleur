@@ -2473,13 +2473,14 @@ export const register: Register = (on) => {
 
   on('session.start', async ($, e, next) => {
     await syncClock($)
+    resetSessionState() // before anything that can throw: a failed start must not leave the last session's state behind
     await safe($, 'session.start', undefined, async () => {
       loaded = undefined
       lastBand = undefined
       backedUp = false // a session start is a fresh run: the first change saves a new backup
       const l = await getLoaded($)
       const id: string = await $.session.id()
-      resetSessionState(id)
+      sessFor = id
       const version = (await $.session.version()).version
       const held: Session | undefined = (await $.state.get(REF)).value
       const stored = held?.id === id ? undefined : await $.store.get(`session:${id}`)

@@ -3415,6 +3415,17 @@ test('a reload keeps the stop and the dismissed dialog', async ($, on) => {
   expect(String((await propose($, note('Answer in German.'))).result)).toBe(STOPPED)
 })
 
+test('an in-process resume keeps the dismissed dialog of the stored session', async ($, on) => {
+  const { config } = parseConfig(ENFORCE, undefined)
+  const other = { ...initSession(config, 's2', 1, 'startup', '2.1.331'), askStopped: true }
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: ['No'], stored: { 'session:s2': other } })
+  await start($)
+  w.setId('s2')
+  await propose($, note('Reply in German.'))
+  await turnEnd($)
+  expect(w.asked.length).toBe(0)
+})
+
 test('a new session starts without the stop', async ($, on) => {
   const w = world(on, { [USER_FILE]: ENFORCE }, { answers: ['__undefined__'] })
   await start($)
