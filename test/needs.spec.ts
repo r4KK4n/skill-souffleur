@@ -180,3 +180,95 @@ test('clip keeps surrogate pairs whole at both cuts', () => {
   assert.equal(wf(clip(tailCut)), true)
   assert.equal(wf(clip(`${'e'.repeat(2400)}😀`.repeat(3))), true)
 })
+
+// --- workCheck: "after" starts call B only after A said code work (#126) ---
+
+test('with workCheck after, A=chat-reply makes no call B at all', async () => {
+  const seen: string[] = []
+  const got = await classifyDeliverable('x', needs, async (text) => { seen.push(text); return 'chat-reply' }, never, 2500, 4000, { workCheck: 'after' })
+  assert.deepEqual(got, { matched: [], failed: false, kind: 'chat-reply' })
+  assert.equal(seen.length, 1)
+})
+
+test('with workCheck after, text-for-others and screen make no call B either', async () => {
+  for (const a of ['text-for-others', 'screen']) {
+    const seen: string[] = []
+    await classifyDeliverable('x', needs, async (text) => { seen.push(text); return a }, never, 2500, 4000, { workCheck: 'after' })
+    assert.equal(seen.length, 1, a)
+  }
+})
+
+test('with workCheck after, A=code makes exactly one call B and it starts after A resolved', async () => {
+  const log: string[] = []
+  const got = await classifyDeliverable(
+    'x',
+    needs,
+    async (text) => {
+      if (text.startsWith('What will')) {
+        log.push('A start')
+        await Promise.resolve()
+        log.push('A end')
+        return 'code-or-repo-work'
+      }
+      log.push('B start')
+      return 'plan'
+    },
+    never,
+    2500,
+    4000,
+    { workCheck: 'after' },
+  )
+  assert.deepEqual(log, ['A start', 'A end', 'B start'])
+  assert.deepEqual(got, { matched: ['plan'], failed: false, kind: 'code-or-repo-work' })
+})
+
+test('in parallel mode both calls start before A resolves', async () => {
+  const log: string[] = []
+  await classifyDeliverable('x', needs, async (text) => { log.push(text.startsWith('What will') ? 'A start' : 'B start'); await Promise.resolve(); return text.startsWith('What will') ? 'chat-reply' : 'none' }, never)
+  assert.deepEqual(log, ['A start', 'B start'])
+})
+
+test('with workCheck after, B gets its own budget counted from its own start', async () => {
+  const sleeps: { ms: number; at: string[] }[] = []
+  const events: string[] = []
+  const sleep = (ms: number) => { events.push(`sleep ${ms}`); return new Promise<void>(() => {}) }
+  await classifyDeliverable(
+    'x',
+    needs,
+    async (text, _l, t) => { events.push(`${text.startsWith('What will') ? 'A' : 'B'} ${t}`); return text.startsWith('What will') ? 'code-or-repo-work' : 'none' },
+    sleep,
+    2500,
+    4000,
+    { workCheck: 'after' },
+  )
+  void sleeps
+  // B's timer is created after A's call started and answered, not together with A's timer.
+  assert.deepEqual(events, ['sleep 2500', 'A 2500', 'sleep 4000', 'B 4000'])
+})
+
+test('with workCheck after, a slow B times out on its own budget and fails nothing else', async () => {
+  let release: () => void = () => {}
+  const gate = new Promise<void>((r) => (release = r))
+  let n = 0
+  const sleep = () => (++n === 1 ? new Promise<void>(() => {}) : gate)
+  const run = classifyDeliverable('x', needs, (text) => (text.startsWith('What will') ? Promise.resolve('code-or-repo-work') : new Promise<string>(() => {})), sleep, 2500, 4000, { workCheck: 'after' })
+  await Promise.resolve()
+  release()
+  assert.deepEqual(await run, { matched: [], failed: false, kind: 'code-or-repo-work', bFailure: 'timeout' })
+})
+
+test('with workCheck after, a failed A makes no call B', async () => {
+  const seen: string[] = []
+  const got = await classifyDeliverable('x', needs, async (text) => { seen.push(text); return 'banana' }, never, 2500, 4000, { workCheck: 'after' })
+  assert.deepEqual(got, { matched: [], failed: true, failure: 'unknown-label' })
+  assert.equal(seen.length, 1)
+})
+
+test('skipWork makes no call B in either mode and picks no work need', async () => {
+  for (const workCheck of ['parallel', 'after'] as const) {
+    const seen: string[] = []
+    const got = await classifyDeliverable('x', needs, async (text) => { seen.push(text); return 'code-or-repo-work' }, never, 2500, 4000, { workCheck, skipWork: true })
+    assert.deepEqual(got, { matched: [], failed: false, kind: 'code-or-repo-work' }, workCheck)
+    assert.equal(seen.length, 1, workCheck)
+  }
+})

@@ -11,6 +11,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `/souffleur init` and `migrate` follow an `@path` import in a project's CLAUDE.md only when the real path of the file lies inside the project root or the user's Claude folder (`~/.claude` or `CLAUDE_CONFIG_DIR`). An absolute path, a `../` path or a symlink that leads elsewhere is skipped (#101).
 - A command without an `origin` is no longer treated as the person's: `/souffleur update`, `accept`, `pause` and the other state-changing verbs now refuse it. Only `composer`, `bridge` and `sdk` count (#93).
 
+### Added
+
+- A user-file key `"workCheck": "after"` starts the work-need call (call B) only after call A answered code or repo work, which saves one small-model call on most prompts and detects work about 0.7 s later on code prompts; the default `"parallel"` keeps today's behaviour. After three failed call B runs in a row, B is skipped on the next 10 code prompts and then tried once, and `/souffleur` and the degraded notice say while work detection is paused (#126).
+
 ### Changed
 
 - Accepting a proposal with "Yes, this project only" (or `/souffleur accept <id> here`) now writes the rule or note into the project's block in `~/.claude/souffleur.json`, where `/souffleur init` and `block` keep project settings, and no longer writes a top-level entry with `where`. `/souffleur project` lists it as this project's own. If the standard already has the same id, nothing is written and the proposal stays queued. Old `where` entries keep working (#120).

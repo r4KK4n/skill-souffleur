@@ -69,6 +69,12 @@ If you edit a config file by hand, new entries apply after `/souffleur` (it read
 
 `enforce` lets gates and duties deny a tool call until the skill it names is loaded. Only your user file `~/.claude/souffleur.json` can set it, with `"mode": "enforce"`. A project file that sets a mode gets an error and is ignored, so a cloned repository can neither switch gates on nor off.
 
+## Work detection timing
+
+`"workCheck": "parallel" | "after"` in `~/.claude/souffleur.json` decides when call B, the small-model call that picks a `work` need, starts. The default `parallel` starts it together with call A, as before. `after` starts it only once call A has answered `code-or-repo-work`, with its own 4 s budget counted from its own start. The trade-off: `after` saves one small-model call on most prompts (a chat reply, a text or a screen never needs B), and work detection on a code prompt comes about 0.7 s later. Only the user file sets it. A project file that sets it, or a value other than `"parallel"` or `"after"`, gets an error and is ignored.
+
+Call B has its own breaker. After three failed runs in a row (a timeout, a rejected call or an unknown label; a run that never started does not count), B is skipped on the next 10 prompts that call A classifies as code or repo work, then tried once. A good answer ends the pause, a failure starts another. While B is paused no `work` need starts from the classifier; the `readers` and `users` needs are not affected. `/souffleur` shows `work detection paused (call B failed 3 times); next try in 10 prompts`, and a resume clears the pause.
+
 ### What enforce does not cover
 
 `enforce` is advisory. A gate sees only the tool calls it names, so these writes pass a `Write` gate:

@@ -27,6 +27,8 @@ export type SkillRule = {
 export type Mode = 'observe' | 'enforce'
 export type Config = {
   mode: Mode
+  /** When call B starts: with call A (default) or only after A said code work. Only the user file sets it. */
+  workCheck?: 'parallel' | 'after'
   skills: Record<SkillName, SkillRule>
   needs: Record<NeedName, Need>
   /** Absolute project roots whose gates and duties may deny. Only the user file sets it. */

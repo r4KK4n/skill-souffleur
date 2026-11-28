@@ -775,3 +775,28 @@ test('updateSigner in project file → only allowed in the user config', () => {
   assert.equal(r.config.updateSigner, undefined)
   assert.equal(r.errors.filter((e) => /updateSigner is only allowed in the user config; ignored/.test(e)).length, 1)
 })
+
+test('workCheck defaults to parallel and takes parallel or after from the user file', () => {
+  assert.equal(parseConfig(undefined, undefined).config.workCheck ?? 'parallel', 'parallel')
+  for (const v of ['parallel', 'after']) {
+    const r = parseConfig(JSON.stringify({ workCheck: v }), undefined)
+    assert.deepEqual(r.errors, [])
+    assert.equal(r.config.workCheck, v)
+  }
+})
+
+test('workCheck with another value is an error and stays parallel', () => {
+  for (const v of ['later', 1, true, null]) {
+    const r = parseConfig(JSON.stringify({ workCheck: v }), undefined)
+    assert.deepEqual(r.errors.filter((e) => /workCheck/.test(e)), ['user config: workCheck: must be "parallel" or "after"; ignored'], String(v))
+    assert.equal(r.config.workCheck ?? 'parallel', 'parallel')
+  }
+})
+
+test('workCheck in the project file is only allowed in the user config', () => {
+  const r = parseConfig(undefined, JSON.stringify({ workCheck: 'after' }))
+  assert.equal(r.config.workCheck ?? 'parallel', 'parallel')
+  assert.equal(r.errors.filter((e) => /workCheck is only allowed in the user config; ignored/.test(e)).length, 1)
+  const both = parseConfig(JSON.stringify({ workCheck: 'after' }), JSON.stringify({ workCheck: 'parallel' }))
+  assert.equal(both.config.workCheck, 'after')
+})

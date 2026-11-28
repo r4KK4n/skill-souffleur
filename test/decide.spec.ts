@@ -1862,3 +1862,66 @@ test('while the pause is open the table and the degraded notice say so', () => {
   assert.match(problemKeys(cfg(), s).get('degraded:classifier') ?? '', /Need detection is paused and will retry in 10 prompts\. Details: \/souffleur\.$/)
   assert.doesNotMatch(renderTable(cfg(), { ...s, classifyPause: 0 }, at()), /paused/)
 })
+
+// --- call B breaker (#126) ---
+
+const bEvent = (workFailed?: boolean, extra: Record<string, unknown> = {}): CoreEvent =>
+  ({ type: 'prompt', now: at(), text: 'x', fromUser: true, matched: [], classifierFailed: false, deliverable: 'code-or-repo-work', ...(workFailed === undefined ? {} : { workFailed }), ...extra }) as CoreEvent
+const bSkipped = (): CoreEvent => bEvent(undefined, { workSkipped: true })
+
+test('the third failed call B in a row pauses B for 10 prompts; a skipped prompt uses one up', () => {
+  let s = run(cfg(), [bEvent(true), bEvent(true)]).s
+  assert.equal(s.workPause ?? 0, 0)
+  s = decide(cfg(), s, bEvent(true)).session
+  assert.equal(s.workPause, 10)
+  for (let i = 9; i >= 0; i--) {
+    s = decide(cfg(), s, bSkipped()).session
+    assert.equal(s.workPause, i)
+  }
+  // skipped prompts neither count as failures nor clear the error
+  assert.equal(s.workFails, 3)
+  assert.ok(s.errors.some((m) => m.startsWith('classifier B: ')))
+})
+
+test('a failed probe starts another B pause, a good answer ends it and clears the count', () => {
+  let s = run(cfg(), [bEvent(true), bEvent(true), bEvent(true)]).s
+  for (let i = 0; i < 10; i++) s = decide(cfg(), s, bSkipped()).session
+  s = decide(cfg(), s, bEvent(true)).session
+  assert.equal(s.workPause, 10)
+  for (let i = 0; i < 10; i++) s = decide(cfg(), s, bSkipped()).session
+  s = decide(cfg(), s, bEvent(false)).session
+  assert.equal(s.workPause, 0)
+  assert.equal(s.workFails, 0)
+})
+
+test('prompts where B never started leave the B pause and count alone', () => {
+  const s0 = { ...run(cfg(), []).s, workPause: 4, workFails: 3 }
+  const chat = decide(cfg(), s0, bEvent(undefined, { deliverable: 'chat-reply' })).session
+  assert.equal(chat.workPause, 4)
+  assert.equal(chat.workFails, 3)
+  const aFailed = decide(cfg(), s0, { type: 'prompt', now: at(), text: 'x', fromUser: true, matched: [], classifierFailed: true } as CoreEvent).session
+  assert.equal(aFailed.workPause, 4)
+})
+
+test('B pause never counts below zero and is independent of the pause of call A', () => {
+  const s0 = { ...run(cfg(), []).s, workPause: 1, classifyPause: 5 }
+  const skipOnly = { type: 'prompt', now: at(), text: 'x', fromUser: true, matched: [], deliverable: 'code-or-repo-work', workSkipped: true } as CoreEvent
+  const s1 = decide(cfg(), decide(cfg(), s0, skipOnly).session, skipOnly).session
+  assert.equal(s1.workPause, 0)
+  assert.equal(s1.classifyPause, 5)
+  const s2 = run(cfg(), [bEvent(true), bEvent(true), bEvent(true)]).s
+  assert.equal(s2.classifyPause ?? 0, 0)
+})
+
+test('a resume clears the B pause, a reload keeps it', () => {
+  const s0 = { ...run(cfg(), []).s, workPause: 7 }
+  assert.equal(decide(cfg(), s0, { type: 'start', now: at(), start: 'resume' }).session.workPause, 0)
+  assert.equal(decide(cfg(), s0, { type: 'start', now: at(), start: 'reload' }).session.workPause, 7)
+})
+
+test('while the B pause is open the table and the degraded notice say so', () => {
+  const s = run(cfg(), [bEvent(true), bEvent(true), bEvent(true)]).s
+  assert.match(renderTable(cfg(), s, at()), /work detection paused \(call B failed 3 times\); next try in 10 prompts/)
+  assert.match(problemKeys(cfg(), s).get('degraded:classifier B') ?? '', /Work detection is paused and will retry in 10 prompts\. Details: \/souffleur\.$/)
+  assert.doesNotMatch(renderTable(cfg(), { ...s, workPause: 0 }, at()), /work detection paused/)
+})
