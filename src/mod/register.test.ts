@@ -4527,7 +4527,7 @@ test('a resume shows a time in the status line at once', async ($, on) => {
 // ---- update notice ----
 
 const LS = (...tags: string[]) => tags.map((t, i) => `${String(i + 1).padStart(40, 'a')}\trefs/tags/${t}`).join('\n')
-const NEWER = 'v0.2.99'
+const NEWER = 'v99.0.0'
 const NEWER_V = NEWER.slice(1)
 const lsRemoteCalls = (w: World) => w.runs.filter((r) => r.argv.includes('ls-remote'))
 const FOLDER_ROOT = (argv: readonly string[]) => (argv.includes('rev-parse') ? { exitCode: 0, stdout: '\n', stderr: '' } : undefined)
@@ -4875,7 +4875,7 @@ test('/souffleur update: a rejected git call answers with the reason too', async
   const w = world(on, SETUP, { stored: QUIET, run: gitRun({ fetch: new Error('timed out') }) })
   own(w)
   await start($)
-  expect(await runUser($, 'update')).toMatch(/^Souffleur: could not install 0\.2\.99: /)
+  expect(await runUser($, 'update')).toMatch(/^Souffleur: could not install 99\.0\.0: /)
 })
 
 test('/souffleur update: a failing ls-remote answers with the git message', async ($, on) => {
