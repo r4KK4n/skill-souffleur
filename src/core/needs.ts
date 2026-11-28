@@ -28,9 +28,10 @@ export function clip(text: string, head = 1500, tail = 500): string {
 }
 
 /**
- * Two classifier calls in parallel, each under its own budget (A 2.5 s, B 4 s, both from the start). Call A asks what the agent will produce; `text-for-others` starts every
- * `readers` need, `screen` every `users` need, `chat-reply` nothing. Call B picks one `work` need (or `none`) and counts only
- * when A says `code-or-repo-work`; A is awaited first and B only then. A late, rejected, empty or unknown answer of A fails the prompt; a failed B is reported as `bFailure` and fails nothing.
+ * Call A always runs: it asks what the agent will produce; `text-for-others` starts every `readers` need, `screen` every `users` need, `chat-reply` nothing.
+ * Call B (pick one `work` need or `none`) runs only when work needs exist and `skipWork` is not set. In parallel mode it starts with A and is awaited only when A says
+ * `code-or-repo-work`; with `workCheck: 'after'` it starts only then, and its 4 s budget counts from its own start. A gets 2.5 s. A late, rejected, empty or unknown answer of A
+ * fails the prompt; a failed B is reported as `bFailure` and fails nothing.
  */
 export async function classifyDeliverable(
   prompt: string,
@@ -39,12 +40,14 @@ export async function classifyDeliverable(
   sleep: (ms: number) => Promise<void>,
   budgetMs = 2500,
   budgetBMs = 4000,
+  opts: { workCheck?: 'parallel' | 'after'; skipWork?: boolean } = {},
 ): Promise<{ matched: NeedName[]; failed: boolean; kind?: Deliverable; failure?: ClassifyFailure; bFailure?: ClassifyFailure }> {
-  // Both budgets run from the start: A gets budgetMs, B gets budgetBMs and is awaited only after code work.
+  // In parallel mode both budgets run from the start; in `after` mode B's budget starts with B.
   const timerA = sleep(budgetMs).then(() => LATE)
   const entries = Object.entries(needs)
   const work = entries.filter(([, n]) => n.for === 'work')
-  const timerB = work.length === 0 ? undefined : sleep(budgetBMs).then(() => LATE)
+  const runB = work.length > 0 && opts.skipWork !== true
+  const after = opts.workCheck === 'after'
   // The label is the bare need name: the classifier returns no label at all for a long label with a colon (verified on 2.1.332).
   const labels = [...work.map(([name]) => name), 'none']
   const options = work.map(([name, n]) => `${name}: ${n.what}`).join('\n')
@@ -65,8 +68,9 @@ export async function classifyDeliverable(
   // A pasted log must not go to the small model whole: only its head and tail are sent.
   const text = clip(prompt)
   const callA = call(`${A_TEXT}\n\nPrompt:\n${text}`, DELIVERABLES, timerA, budgetMs)
-  // B starts at once so the two calls overlap; it is awaited only when A says code work.
-  const callB = work.length === 0 ? Promise.resolve({ answer: 'none' }) : call(`Which kind of work does this prompt start? Answer none if it starts no work.\n${options}\n\n${text}`, labels, timerB!, budgetBMs)
+  const startB = () => call(`Which kind of work does this prompt start? Answer none if it starts no work.\n${options}\n\n${text}`, labels, sleep(budgetBMs).then(() => LATE), budgetBMs)
+  // In parallel mode B starts at once so the two calls overlap; it is awaited only when A says code work.
+  const callB = runB && !after ? startB() : undefined
   const a = await callA
   if ('failure' in a) return { matched: [], failed: true, failure: a.failure }
   const kind = a.answer as Deliverable
@@ -74,7 +78,8 @@ export async function classifyDeliverable(
   if (kind === 'text-for-others') return { matched: of('readers'), failed: false, kind }
   if (kind === 'screen') return { matched: of('users'), failed: false, kind }
   if (kind === 'chat-reply') return { matched: [], failed: false, kind }
-  const b = await callB
+  if (!runB) return { matched: [], failed: false, kind }
+  const b = await (callB ?? startB())
   if ('failure' in b) return { matched: [], failed: false, kind, bFailure: b.failure }
   const pick = work[labels.indexOf(b.answer)]
   return { matched: pick ? [pick[0]] : [], failed: false, kind }

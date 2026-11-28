@@ -3,6 +3,7 @@ import type { Audience, Config, Need, Match, Mode, NeedName, Note, Origin, Reply
 
 type FileConfig = {
   mode?: Mode
+  workCheck?: 'parallel' | 'after'
   trustProjects?: string[]
   skills: Record<SkillName, SkillRule>
   needs: Record<NeedName, Need>
@@ -309,7 +310,7 @@ function parseFile(text: string, source: Origin, errors: string[], extraNeeds: r
 
   for (const key of Object.keys(obj)) {
     if (key === 'skills' || key === 'needs') continue
-    if (key === 'mode' || key === 'trustProjects' || key === 'rules' || key === 'notes' || key === 'learn' || key === 'notices' || key === 'update' || key === 'updateSigner' || key === 'projects') {
+    if (key === 'mode' || key === 'workCheck' || key === 'trustProjects' || key === 'rules' || key === 'notes' || key === 'learn' || key === 'notices' || key === 'update' || key === 'updateSigner' || key === 'projects') {
       if (source === 'project') fail(`${key} is only allowed in the user config; ignored`)
       continue
     }
@@ -319,6 +320,10 @@ function parseFile(text: string, source: Origin, errors: string[], extraNeeds: r
   if (source === 'user' && obj.mode !== undefined) {
     if (obj.mode === 'observe' || obj.mode === 'enforce') file.mode = obj.mode
     else fail('mode: must be "observe" or "enforce"; ignored')
+  }
+  if (source === 'user' && obj.workCheck !== undefined) {
+    if (obj.workCheck === 'parallel' || obj.workCheck === 'after') file.workCheck = obj.workCheck
+    else fail('workCheck: must be "parallel" or "after"; ignored')
   }
   if (source === 'user' && obj.trustProjects !== undefined) {
     const list = obj.trustProjects
@@ -555,6 +560,7 @@ export function parseConfig(
   if (user && root !== undefined) block = applyBlock(user, normRoot(root), errors)
   if (user) {
     if (user.mode !== undefined) config.mode = user.mode
+    if (user.workCheck !== undefined) config.workCheck = user.workCheck
     if (user.trustProjects) config.trustProjects = user.trustProjects
     if (user.learn) config.learn = user.learn
     if (user.notices !== undefined) config.notices = user.notices

@@ -2648,6 +2648,8 @@ export const register: Register = (on) => {
       // After repeated failures of call A the classifier pauses for a number of prompts.
       const breaker = wanted && (session.classifyPause ?? 0) > 0
       const classify = wanted && !breaker
+      // After repeated failures of call B alone, B is skipped for a number of the prompts A calls code work.
+      const workBreaker = (session.workPause ?? 0) > 0
       // The skill listing runs beside the classification and gives up after its own short budget.
       const listing = fromUser ? safe($, 'installed', undefined, () => refreshInstalled($)) : undefined
       const verdict = classify
@@ -2659,10 +2661,13 @@ export const register: Register = (on) => {
               return r.isAnswered ? r.text : ''
             },
             (ms) => $.clock.sleep(ms),
+            undefined,
+            undefined,
+            { workCheck: config.workCheck ?? 'parallel', skipWork: workBreaker },
           )
         : undefined
       await listing
-      const { actions } = await apply($, (l2) => ({ type: 'prompt', now: now(), text: e.text, fromUser, matched: verdict?.matched ?? [], root: l2.root, ...(breaker ? { classifierSkipped: true } : {}), ...(verdict === undefined ? {} : { classifierFailed: verdict.failed }), ...(verdict?.kind === undefined ? {} : { deliverable: verdict.kind }), ...(verdict?.bFailure !== undefined ? { workFailed: true } : verdict?.kind === 'code-or-repo-work' ? { workFailed: false } : {}) }))
+      const { actions } = await apply($, (l2) => ({ type: 'prompt', now: now(), text: e.text, fromUser, matched: verdict?.matched ?? [], root: l2.root, ...(breaker ? { classifierSkipped: true } : {}), ...(verdict === undefined ? {} : { classifierFailed: verdict.failed }), ...(verdict?.kind === undefined ? {} : { deliverable: verdict.kind }), ...(verdict?.kind === 'code-or-repo-work' && workBreaker && Object.values(needs).some((n) => n.for === 'work') ? { workSkipped: true } : verdict?.bFailure !== undefined ? { workFailed: true } : verdict?.kind === 'code-or-repo-work' ? { workFailed: false } : {}) }))
       const classifierLine = verdict?.failure !== undefined ? `classifier: ${verdict.failure}` : verdict?.bFailure !== undefined ? `classifier B: ${verdict.bFailure}` : undefined
       if (classifierLine !== undefined) {
         try {

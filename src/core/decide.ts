@@ -62,6 +62,8 @@ export type Session = {
   workFails?: number
   /** Prompts left that skip the classifier after call A failed `FAIL_LIMIT` times in a row; the first prompt after it probes once (kept over reload, cleared by a resume). */
   classifyPause?: number
+  /** The same for call B: prompts left that skip B (prompts A called code work) after B failed `FAIL_LIMIT` times in a row; kept over reload, cleared by a resume. */
+  workPause?: number
   learnFails?: number
   /** When this copy was stored last, so old copies in the plugin store can be removed. */
   touched?: number
@@ -88,7 +90,7 @@ export type CoreEvent =
   | { type: 'skill'; now: number; skill: string; text?: string; source?: string; pluginName?: string; path?: string }
   | { type: 'compact'; now: number; phase: 'before' | 'after'; trigger: string; skipped?: boolean; agentId?: string }
   /** `classifierFailed`: call A failed (true) or answered (false); absent when the classifier did not run. `workFailed`: call B failed (true) or answered (false) after A said code work; absent when B did not run. `deliverable`: A's answer. */
-  | { type: 'prompt'; now: number; text: string; fromUser: boolean; matched: NeedName[]; root?: string; classifierFailed?: boolean; /** The breaker skipped the classifier on this prompt. */ classifierSkipped?: boolean; workFailed?: boolean; deliverable?: Deliverable }
+  | { type: 'prompt'; now: number; text: string; fromUser: boolean; matched: NeedName[]; root?: string; classifierFailed?: boolean; /** The breaker skipped the classifier on this prompt. */ classifierSkipped?: boolean; workFailed?: boolean; /** The breaker skipped call B on this prompt, which A called code work. */ workSkipped?: boolean; deliverable?: Deliverable }
   /** `present` names the arguments the call carries, for field rules. */
   | { type: 'tool'; now: number; tool: string; path?: string; command?: string; brief?: string; skill?: string; model?: string; present?: string[]; agentId?: string; root?: string; tree?: string }
   | { type: 'command'; now: number; args: string; root?: string; /** The small-model count over all sessions, from the plugin store. */ total?: ModelUse; /** What the stored release check says. */ update?: UpdateInfo }
@@ -201,7 +203,7 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
       // a resume (a new process) restarts them.
       if (e.start === 'resume' || e.start === 'reload') {
         const counters = e.start === 'resume'
-          ? { liveAgents: [], mainSkillCalls: [], agentDenied: false, learnCalls: [], fieldDenied: [], classifyPause: 0 }
+          ? { liveAgents: [], mainSkillCalls: [], agentDenied: false, learnCalls: [], fieldDenied: [], classifyPause: 0, workPause: 0 }
           : {}
         return {
           session: { ...s, paused: false, lastSeen: e.now, ...counters, ...(e.version === undefined ? {} : { version: e.version }) },
@@ -415,7 +417,7 @@ function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'pro
       for (const [name, n] of Object.entries(needs)) {
         // A readers/users need is hit by its own deliverable only; A answering anything else is a miss.
         if (e.matched.includes(name) || n.reason === 'command' || (e.deliverable !== undefined && ownDeliverable(config, name) === e.deliverable)) continue
-        if (e.workFailed && config.needs[name]?.for === 'work') continue
+        if ((e.workFailed || e.workSkipped) && config.needs[name]?.for === 'work') continue
         const misses = (n.misses ?? 0) + 1
         if (misses >= NEED_MISSES) {
           delete needs[name]
@@ -434,7 +436,10 @@ function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'pro
   const tracked2: Session = track(tracked, 'workFails', 'classifier B: ', e.workFailed, 'the small model failed to pick a work need 3 prompts in a row, so work needs are not detected')
   // The breaker: a skipped prompt uses one up; a failed call A at the limit (the third, or a failed probe) starts a new pause, a good one ends it.
   const left = e.classifierSkipped ? Math.max(0, (s.classifyPause ?? 0) - 1) : e.classifierFailed === true && (tracked2.classifyFails ?? 0) >= FAIL_LIMIT ? CLASSIFY_PAUSE : e.classifierFailed === false ? 0 : (s.classifyPause ?? 0)
-  const next: Session = left === (tracked2.classifyPause ?? 0) ? tracked2 : { ...tracked2, classifyPause: left }
+  // The same for call B: a skipped prompt uses one up; a failed B at the limit starts a pause, a good one ends it.
+  const leftB = e.workSkipped === true ? Math.max(0, (s.workPause ?? 0) - 1) : e.workFailed === true && (tracked2.workFails ?? 0) >= FAIL_LIMIT ? CLASSIFY_PAUSE : e.workFailed === false ? 0 : (s.workPause ?? 0)
+  const tracked3: Session = leftB === (tracked2.workPause ?? 0) ? tracked2 : { ...tracked2, workPause: leftB }
+  const next: Session = left === (tracked3.classifyPause ?? 0) ? tracked3 : { ...tracked3, classifyPause: left }
   // Needs that evidence started stay quiet on a prompt that is not their deliverable (a chat reply, a failed classification).
   const quiet = new Set(Object.entries(config.skills).filter(([, rule]) => rule.need !== undefined && needs[rule.need]?.evidence === true).map(([name]) => name))
   const r = s.paused ? undefined : restore(config, next, e.now, trusted, e.root, { skip: quiet })

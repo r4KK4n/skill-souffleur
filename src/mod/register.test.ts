@@ -3190,10 +3190,64 @@ test('three failing call B runs then a good one (A says code work): status clear
   await start($)
   for (let i = 0; i < 3; i++) await $.prompt.submit({ text: 'one two three four' })
   expect(w.statuses.at(-1)).toMatch(/degraded/)
+  // B is paused now: the next 10 code prompts skip it, the one after probes it
+  for (let i = 0; i < 10; i++) await $.prompt.submit({ text: 'one two three four' })
+  expect(w.statuses.at(-1)).toMatch(/degraded/)
   bGood = true
   await $.prompt.submit({ text: 'one two three four' })
   expect(w.statuses.at(-1)).not.toMatch(/degraded/)
   expect(await table($)).toMatch(/^Failures this session: classifier B 1$/m)
+})
+
+const B_CFG = (extra: Record<string, unknown> = {}) => JSON.stringify({ ...extra, skills: { g: { need: 'n' } }, needs: { n: { for: 'work', what: 'Something.' } } })
+
+test('after three failed call B runs the status lists the B pause and B is no longer called (#126)', async ($, on) => {
+  const requests: Record<string, unknown>[] = []
+  world(on, { [USER_FILE]: B_CFG() }, { classify: (labels) => (labels?.includes('chat-reply') ? 'code-or-repo-work' : 'banana'), classifyRequests: requests })
+  await start($)
+  for (let i = 0; i < 3; i++) await $.prompt.submit({ text: 'one two three four' })
+  expect(await table($)).toMatch(/work detection paused \(call B failed 3 times\); next try in 10 prompts/)
+  const before = requests.length
+  await $.prompt.submit({ text: 'one two three four' })
+  // only call A ran on the skipped prompt
+  expect(requests.length - before).toBe(1)
+  expect(await table($)).toMatch(/next try in 9 prompts/)
+})
+
+test('an in-process resume clears a stored B pause (#126)', async ($, on) => {
+  const cfgText = B_CFG()
+  const { config } = parseConfig(cfgText, undefined)
+  const other = { ...initSession(config, 's2', 1, 'startup', '2.1.331'), workPause: 6, workFails: 3 }
+  const w = world(on, { [USER_FILE]: cfgText }, { stored: { 'session:s2': other } })
+  await start($)
+  w.setId('s2')
+  expect(await table($)).not.toMatch(/work detection paused/)
+})
+
+test('only code prompts use up the B pause; a chat reply leaves it alone (#126)', async ($, on) => {
+  let a = 'code-or-repo-work'
+  world(on, { [USER_FILE]: B_CFG() }, { classify: (labels) => (labels?.includes('chat-reply') ? a : 'banana') })
+  await start($)
+  for (let i = 0; i < 3; i++) await $.prompt.submit({ text: 'one two three four' })
+  expect(await table($)).toMatch(/next try in 10 prompts/)
+  a = 'chat-reply'
+  await $.prompt.submit({ text: 'one two three four' })
+  expect(await table($)).toMatch(/next try in 10 prompts/)
+  a = 'code-or-repo-work'
+  await $.prompt.submit({ text: 'one two three four' })
+  expect(await table($)).toMatch(/next try in 9 prompts/)
+})
+
+test('workCheck after: a chat reply makes one classifier call, code work two (#126)', async ($, on) => {
+  const requests: Record<string, unknown>[] = []
+  let a = 'chat-reply'
+  world(on, { [USER_FILE]: B_CFG({ workCheck: 'after' }) }, { classify: (labels) => (labels?.includes('chat-reply') ? a : 'n'), classifyRequests: requests })
+  await start($)
+  await $.prompt.submit({ text: 'one two three four' })
+  expect(requests.length).toBe(1)
+  a = 'code-or-repo-work'
+  await $.prompt.submit({ text: 'one two three four' })
+  expect(requests.length).toBe(3)
 })
 
 // --- Reply check ---

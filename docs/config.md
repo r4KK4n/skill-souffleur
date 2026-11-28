@@ -79,6 +79,12 @@ If you edit a config file by hand, new entries apply after `/souffleur` (it read
 
 Gates and duties also release a stuck skill after three denials in a turn, and a field rule or an `after` rule denies once and lets the retry pass. If a rule has to hold against all of these, `enforce` is the wrong tool for it. See [design.md](design.md#gates-and-duties) for how denials work.
 
+## Work detection timing
+
+`"workCheck": "parallel" | "after"` in `~/.claude/souffleur.json` decides when call B, the small-model call that picks a `work` need, starts. The default `parallel` starts it together with call A, as before. `after` starts it only once call A has answered `code-or-repo-work`, with its own 4 s budget counted from its own start. The trade-off: `after` saves one small-model call on most prompts (a chat reply, a text or a screen never needs B), and work detection on a code prompt comes about 0.7 s later; in the worst case a code prompt waits the two budgets one after the other, 2.5 s plus 4 s, against 4 s in parallel mode. Only the user file sets it. A project file that sets it, or a value other than `"parallel"` or `"after"`, gets an error and is ignored.
+
+Call B has its own breaker. After three failed runs in a row (a timeout, a rejected call or an unknown label; a run that never started does not count), B is skipped on the next 10 prompts that call A classifies as code or repo work, then tried once. A good answer ends the pause, a failure starts another. While B is paused no `work` need starts from the classifier; the `readers` and `users` needs are not affected. `/souffleur` shows `work detection paused (call B failed 3 times); next try in 10 prompts`, and a resume clears the pause.
+
 ## Notices
 
 Souffleur writes short lines that start with `Souffleur:` into the transcript, so you see what it did in the desktop and mobile apps too: a summary at session start, what a compaction cut and when the skills are back, and a problem once until it clears. The model does not see them. `"notices": false` in your user file turns them off; a project file cannot change it.
