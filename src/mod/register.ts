@@ -539,15 +539,15 @@ async function ok($: Dollar, argv: string[]): Promise<boolean> {
 }
 
 /**
- * Takes the install lock, runs `fn`, releases it. The lock is the folder `<plugin data>/update.lock`, made with `mkdir`, which fails when
- * it exists, so one session wins. An `owner` file inside holds `{ at, token }`. A lock older than 2 minutes, dated in the future or with no
- * readable owner and an old folder is stale: it is removed and taken once. The release removes the folder only while the token is ours.
- * `undefined` when another session holds the lock.
+ * Takes the lock `<plugin data>/<name>`, runs `fn`, releases it. The lock is a folder made with `mkdir`, which fails when it exists, so one
+ * session wins. An `owner` file inside holds `{ at, token }`. A lock older than `staleMs`, dated in the future or with no readable owner and
+ * an old folder is stale: it is removed and taken once. The release removes the folder only while the token is ours. `undefined` when another
+ * session holds the lock. Throws when the lock cannot be made at all (no data folder, no `mkdir`); `label` names it in that error.
  */
-async function withInstallLock<T>($: Dollar, fn: () => Promise<T>): Promise<{ value: T } | undefined> {
+async function withLock<T>($: Dollar, name: string, label: string, staleMs: number, fn: () => Promise<T>): Promise<{ value: T } | undefined> {
   const data = (await $.process.hookEnv()).CLAUDE_PLUGIN_DATA
   if (data === undefined || data === '') throw new Error('no plugin data folder')
-  const lock = `${data}/update.lock`
+  const lock = `${data}/${name}`
   const owner = `${lock}/owner`
   const readOwner = async (): Promise<{ at?: unknown; token?: unknown } | undefined> => {
     try {
@@ -577,19 +577,25 @@ async function withInstallLock<T>($: Dollar, fn: () => Promise<T>): Promise<{ va
     const at = (await readOwner())?.at
     const t = typeof at === 'number' ? at : await mtime(lock)
     const wall = await wallNow($)
-    return t !== undefined && (t > wall || wall - t >= LOCK_STALE_MS)
+    return t !== undefined && (t > wall || wall - t >= staleMs)
   }
   await ok($, ['mkdir', '-p', data])
   let made = await ok($, ['mkdir', lock])
   if (!made) {
     // A lock that cannot be made and is not there is a host problem (no mkdir, a data folder that cannot be created), not another session.
-    if (!(await exists(lock))) throw new Error('could not create the update lock')
-    if (!(await stale())) return undefined
+    if (!(await exists(lock))) {
+      // The holder may have released between our mkdir and this check: try once more before calling it a host problem.
+      made = await ok($, ['mkdir', lock])
+      if (!made && !(await exists(lock))) throw new Error(`could not create the ${label}`)
+      if (!made) return undefined
+    } else if (!(await stale())) return undefined
+  }
+  if (!made) {
     // One session removes a stale lock: the one that makes the takeover folder.
     const take = `${lock}.takeover`
     if (!(await ok($, ['mkdir', take]))) {
       const t = await mtime(take)
-      if (t !== undefined && (await wallNow($)) - t >= LOCK_STALE_MS) await ok($, ['rm', '-rf', take])
+      if (t !== undefined && (await wallNow($)) - t >= staleMs) await ok($, ['rm', '-rf', take])
       return undefined
     }
     try {
@@ -616,6 +622,9 @@ async function withInstallLock<T>($: Dollar, fn: () => Promise<T>): Promise<{ va
     if ((await readOwner())?.token === token) await ok($, ['rm', '-rf', lock])
   }
 }
+
+/** The install lock: `update.lock`, stale after 2 minutes. */
+const withInstallLock = <T>($: Dollar, fn: () => Promise<T>) => withLock($, 'update.lock', 'update lock', LOCK_STALE_MS, fn)
 
 /** Under the install lock: fetches, resolves `tag` once to an object id, verifies that object when a signer is set (or `needSigner`), and checks out its commit. Throws on a git failure. */
 async function installTag($: Dollar, l: Loaded, tag: string, needSigner: boolean): Promise<Install> {
@@ -1519,11 +1528,67 @@ const EDIT_TRIES = 3
 const BACKUPS_KEPT = 3
 const same = (a: unknown, b: unknown) => Object.is(a, b) || JSON.stringify(a) === JSON.stringify(b)
 
-/** The one way the user file is written: `<file>.tmp-<time>-<random>` (its own name per write), parsed back, then moved over the file. */
-async function editUserFile(
+const USER_LOCK_STALE_MS = 30_000
+const USER_LOCK_WAIT_MS = 3000
+const USER_LOCK_RETRY_MS = 100
+/** Edits of the user file in this process run one after the other: each waits for the one before it. */
+let editQueue: Promise<unknown> = Promise.resolve()
+
+/**
+ * The one way the user file is written. Edits in this process run one at a time, and across sessions the read-modify-move holds the lock
+ * `<plugin data>/user-file.lock`. `change` is synchronous and must not call `editUserFile` itself: it would wait for its own edit.
+ */
+function editUserFile(
   $: Dollar,
   change: (doc: unknown) => unknown,
   opts: { missing?: 'allow' | 'refuse' } = {},
+): Promise<Edited> {
+  const run = editQueue.then(() => editUserFileLocked($, change, opts))
+  editQueue = run.catch(() => undefined)
+  return run
+}
+
+/**
+ * Takes the user file lock, retrying every 100 ms until 3 s have passed on the wall clock, and edits under it. Only when the very first try finds
+ * that no lock can be made at all (no `mkdir`, no data folder) does it edit without one; on a later try the same error counts as a held lock.
+ */
+async function editUserFileLocked($: Dollar, change: (doc: unknown) => unknown, opts: { missing?: 'allow' | 'refuse' }): Promise<Edited> {
+  let entered = false
+  const edit = () => {
+    entered = true
+    return editUserFileOnce($, change, opts)
+  }
+  const start = await wallNow($)
+  // The attempt cap bounds the loop even when the clock does not move.
+  for (let first = true, tries = 0; tries <= USER_LOCK_WAIT_MS / USER_LOCK_RETRY_MS; first = false, tries++) {
+    try {
+      const got = await withLock($, 'user-file.lock', 'user file lock', USER_LOCK_STALE_MS, edit)
+      if (got) return got.value
+    } catch (err) {
+      if (entered) throw err
+      if (first) {
+        $.ui.log(`user file lock unavailable, editing without it: ${message(err)}`, { to: 'debug' })
+        return editUserFileOnce($, change, opts)
+      }
+    }
+    if ((await wallNow($)) - start >= USER_LOCK_WAIT_MS) break
+    try {
+      await $.clock.sleep(USER_LOCK_RETRY_MS)
+    } catch {
+      break
+    }
+  }
+  const home: string | undefined = await homeOf($)
+  const uc = await userConfig($)
+  const shown = home && uc ? shownPath(home, uc.path) : 'the user file'
+  return { ok: false, kind: 'write', detail: 'locked', text: `could not write ${shown} (another session holds the lock on it), so nothing was written` }
+}
+
+/** The write itself: `<file>.tmp-<time>-<random>` (its own name per write), parsed back, then moved over the file. */
+async function editUserFileOnce(
+  $: Dollar,
+  change: (doc: unknown) => unknown,
+  opts: { missing?: 'allow' | 'refuse' },
 ): Promise<Edited> {
   const home: string | undefined = await homeOf($)
   const uc = await userConfig($)

@@ -16,6 +16,8 @@ Stores, in Claude Code's plugin store on your machine:
 - `souffleur:declined`: the hashes of the last 200 proposals you declined, so they are not proposed again.
 - `souffleur:skill-hash:<hash>`: one small entry per skill version that was read, with its state (done, offered or failed) and the time it was last stored or read (refreshed at most once a day). At session start Souffleur removes the ones not stored or read for 14 days, so a version you no longer use is read again if it comes back.
 
+Plugin data folder (`CLAUDE_PLUGIN_DATA`): `allowed_signers` while a signed update is checked, `update.lock` while an update installs, and `user-file.lock` for a moment while Souffleur writes your user file. A lock folder holds one small `owner` file with a time and a random token. A lock older than its limit (30 seconds for `user-file.lock`, 2 minutes for `update.lock`) is treated as left behind and taken over.
+
 Network:
 
 - Once a day Souffleur runs `git ls-remote --tags --refs` against `https://github.com/r4KK4n/skill-souffleur` to find a newer release. This is the default (`update: "notify"`). Set `"update": "off"` in your user file and the look-up stops. `auto` and `/souffleur update` also fetch from that URL. See [updates.md](updates.md#update-notice-and-automatic-update).
