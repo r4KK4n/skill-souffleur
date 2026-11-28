@@ -7,6 +7,10 @@ import { clip } from '../core/needs.ts'
 import { makeProposal } from '../core/proposals.ts'
 import { hashKey, skillHash } from '../core/learn.ts'
 
+/** The fake clock of the world the running test built; `settle` flushes work the mod left detached. */
+let fakeClock: { settle: () => Promise<void>; advance: (ms: number) => Promise<void> }
+/** The fake clock starts here: stored times in the tests are relative to it, never to the system clock. */
+const T0 = 1_800_000_000_000
 const HOME = '/users/test'
 const USER_FILE = `${HOME}/.claude/souffleur.json`
 const PROJECT_FILE = '/work/proj/.claude/souffleur.json'
@@ -114,6 +118,8 @@ type Opts = {
   classifyRejected?: boolean
   /** `$.store.set` of this key throws. */
   failStoreKey?: string
+  /** True while `$.clock.now()` should throw. */
+  clockDown?: () => boolean
   /** The working directory `$.session.cwd` answers. */
   cwd?: string
   /** `$.fs.stat` of these paths throws something other than not-found. */
@@ -162,7 +168,13 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
     delete storeData[e.key]
     return { value: undefined } as never
   })
-  const clock = mock.clock(on)
+  // `opts.clockDown()` true makes `$.clock.now()` throw, as an older or broken host would.
+  const clock = mock.clock(((event: string, ...rest: unknown[]) => (event === 'clock.now' ? undefined : (on as any)(event, ...rest))) as typeof on, { now: T0 })
+  on('clock.now', () => {
+    if (opts.clockDown?.()) throw new Error('clock gone')
+    return { value: clock.now() } as never
+  })
+  fakeClock = clock
   mock.session(on)
   const options: string[][] = []
   on('session.id', () => ({ value: id }))
@@ -652,7 +664,7 @@ test('a skill preloaded while the agent spawns does not count for main', async (
   await start($)
   await $.prompt.submit({ text: 'build me a login screen' })
   const spawn = $.agent.spawn({ prompt: 'x' } as never)
-  await new Promise((r) => setTimeout(r, 20))
+  await settle()
   await skillLoaded($, 'ui-checklist')
   expect(await table($)).not.toMatch(/ui-checklist \| loaded/)
   release()
@@ -2001,7 +2013,7 @@ const OBLIGATION = 'Always run `npm test` after editing files under src/.'
 const TEST_RULE = { kind: 'rule', after: { tools: ['Edit'], paths: ['src/**'] }, evidence: { tool: 'Bash', command: 'npm test' } }
 const answerWith = (...items: unknown[]) => () => JSON.stringify(items)
 /** Lets the background read finish: the mod does not hand it back to the hook. */
-const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 30))
+const settle = () => fakeClock.settle()
 const loadSkill = ($: any, skill: string, text = OBLIGATION, extra: Record<string, unknown> = {}) => $.skill.prompt({ skill, text, len: text.length, head: text, tail: text, ...extra })
 const mainLoad = async ($: any, skill: string, text = OBLIGATION, extra: Record<string, unknown> = {}) => {
   await $.tool.call({ tool: 'Skill', skill } as never)
@@ -2101,8 +2113,8 @@ test('a slow or failing model call never delays or breaks skill.prompt', async (
   let mode: 'hang' | 'fail' = 'hang'
   world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', skillAnswer: () => (mode === 'hang' ? new Promise<string>(() => {}) : Promise.reject(new Error('model down'))) })
   await start($)
-  const first = await Promise.race([loadSkill($, 'writing-guide'), new Promise((resolve) => setTimeout(() => resolve('timeout'), 1000))])
-  expect(first).not.toBe('timeout')
+  // The model call never answers: the hook must still return (a hang fails the test by its own timeout).
+  await loadSkill($, 'writing-guide')
   mode = 'fail'
   const second = await loadSkill($, 'other-skill', 'Always do the other thing.')
   expect(second).toBeDefined()
@@ -2392,8 +2404,8 @@ test('a hand edit of the user file shows in /souffleur at once and at the next s
 
 test('a session stores its timestamp, and session entries older than 14 days are removed at session start', async ($, on) => {
   const day = 86_400_000
-  const old = { id: 'old', ledger: {}, touched: Date.now() - 15 * day }
-  const recent = { id: 'recent', ledger: {}, touched: Date.now() - 13 * day }
+  const old = { id: 'old', ledger: {}, touched: T0 - 15 * day }
+  const recent = { id: 'recent', ledger: {}, touched: T0 - 13 * day }
   const unstamped = { id: 'unstamped', ledger: {} }
   const w = world(on, { [USER_FILE]: ALWAYS }, { stored: { 'session:old': old, 'session:recent': recent, 'session:unstamped': unstamped, 'souffleur:declined': ['h'], 'souffleur:skill-hash:abc': { done: true } } })
   await start($)
@@ -2911,7 +2923,7 @@ test('a dialog nobody answers gives up after two minutes and shows the notice', 
   await start($)
   const id = idOf(await propose($, note('Reply in German.')))
   const t = turnEnd($)
-  await new Promise((r) => setTimeout(r, 50)) // let the turn end reach its dialog
+  await settle() // let the turn end reach its dialog
   await w.clock.advance(120_000)
   await t
   expect(w.logs.filter((l) => l.includes(`proposal ${id}`)).length).toBe(1)
@@ -2991,11 +3003,11 @@ const lateWorld = (on: any) => {
 }
 const timedOut = async ($: any, w: World) => {
   const t = turnEnd($)
-  await new Promise((r) => setTimeout(r, 50))
+  await settle()
   await w.clock.advance(120_000)
   await t
 }
-const idle = () => new Promise((r) => setTimeout(r, 50))
+const idle = settle
 
 test('a dialog tapped after the timeout still writes once and disarms the reply', async ($, on) => {
   const { w, tap } = lateWorld(on)
@@ -3254,7 +3266,7 @@ test('declining by reply word stops proposals', async ($, on) => {
   await start($)
   await propose($, note('Reply in German.'))
   const t = turnEnd($)
-  await new Promise((r) => setTimeout(r, 50))
+  await settle()
   await w.clock.advance(120_000)
   await t
   expect(String((await propose($, note('Answer in French, always.'))).result)).toMatch(/Queued as note-/)
@@ -3341,7 +3353,7 @@ test('a timed-out dialog that the person accepts by command does not stop propos
   await start($)
   const id = idOf(await propose($, note('Reply in German.')))
   const t = turnEnd($)
-  await new Promise((r) => setTimeout(r, 50))
+  await settle()
   await w.clock.advance(120_000)
   await t
   await $.prompt.submit({ text: `/souffleur accept ${id}`, command: { name: 'souffleur', args: `accept ${id}` }, origin: COMPOSER } as never)
@@ -3353,7 +3365,7 @@ test('a timed-out dialog and a person who just continues work do not stop propos
   await start($)
   await propose($, note('Reply in German.'))
   const t = turnEnd($)
-  await new Promise((r) => setTimeout(r, 50))
+  await settle()
   await w.clock.advance(120_000)
   await t
   await reply($, 'ok, now fix the second test', COMPOSER)
@@ -3389,7 +3401,7 @@ test('an accepted reply does not stop proposals', async ($, on) => {
   await start($)
   await propose($, note('Reply in German.'))
   const t = turnEnd($)
-  await new Promise((r) => setTimeout(r, 50))
+  await settle()
   await w.clock.advance(120_000)
   await t
   await reply($, 'accept', COMPOSER)
@@ -3725,7 +3737,7 @@ const ownLate = (opts: Opts = {}) => {
 const PAUSED_LINE = 'Souffleur: Souffleur is paused; /souffleur init sets them up later.'
 const ownTimedOut = async ($: any, w: World) => {
   const t = turnEnd($)
-  await new Promise((r) => setTimeout(r, 50))
+  await settle()
   await w.clock.advance(120_000)
   await t
 }
@@ -4282,8 +4294,8 @@ test('counting never delays the answer: a held total write does not hold the pro
   const hold = new Promise<void>((r) => { release = r })
   const w = world(on, { [USER_FILE]: COST_CFG }, { classify: 'match', usage: USAGE, holdTotal: hold })
   await start($)
-  const first = await Promise.race([$.prompt.submit({ text: 'fix the build' }), new Promise((resolve) => setTimeout(() => resolve('timeout'), 1000))])
-  expect(first).not.toBe('timeout')
+  // The total write is held: the prompt must still return (a hang fails the test by its own timeout).
+  await $.prompt.submit({ text: 'fix the build' })
   release()
   await settle()
   expect(w.stored['modelUseTotal']).toMatchObject({ calls: 2 })
@@ -4366,14 +4378,14 @@ test('update: unparsable ls-remote output logs a debug line and stores at only',
 })
 
 test('update: a fresh check does not run', async ($, on) => {
-  const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now() - 3_600_000 } }, run: runWith({ exitCode: 0, stdout: LS(NEWER) }) })
+  const w = world(on, SETUP, { stored: { updateCheck: { at: T0 - 3_600_000 } }, run: runWith({ exitCode: 0, stdout: LS(NEWER) }) })
   await start($)
   await settleUpdate(w)
   expect(lsRemoteCalls(w).length).toBe(0)
 })
 
 test('update: an old check runs again', async ($, on) => {
-  const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now() - 90_000_000 } }, run: runWith({ exitCode: 0, stdout: LS(NEWER) }) })
+  const w = world(on, SETUP, { stored: { updateCheck: { at: T0 - 90_000_000 } }, run: runWith({ exitCode: 0, stdout: LS(NEWER) }) })
   await start($)
   await settleUpdate(w)
   expect(lsRemoteCalls(w).length).toBe(1)
@@ -4405,7 +4417,7 @@ test('update: a rejected run (timeout) is stored too and keeps the earlier lates
 })
 
 test('update: a stored newer latest says the notify line once; a reload does not repeat it', async ($, on) => {
-  const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: runWith({ exitCode: 0, stdout: '' }) })
+  const w = world(on, SETUP, { stored: { updateCheck: { at: T0, latest: NEWER } }, run: runWith({ exitCode: 0, stdout: '' }) })
   await start($)
   await settleUpdate(w)
   const line = `Souffleur ${NEWER_V} is out (you run ${PLUGIN_VERSION}). /souffleur update installs it.`
@@ -4416,14 +4428,14 @@ test('update: a stored newer latest says the notify line once; a reload does not
 })
 
 test('update: the marketplace install is pointed to /plugin update', async ($, on) => {
-  const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: runWith({ exitCode: 0, stdout: '' }, MARKET_ROOT) })
+  const w = world(on, SETUP, { stored: { updateCheck: { at: T0, latest: NEWER } }, run: runWith({ exitCode: 0, stdout: '' }, MARKET_ROOT) })
   await start($)
   await settleUpdate(w)
   expect(w.logs).toContain(`Souffleur ${NEWER_V} is out (you run ${PLUGIN_VERSION}). /plugin update installs it.`)
 })
 
 test('update: a stored latest that is not newer says nothing', async ($, on) => {
-  const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now(), latest: `v${PLUGIN_VERSION}` } }, run: runWith({ exitCode: 0, stdout: '' }) })
+  const w = world(on, SETUP, { stored: { updateCheck: { at: T0, latest: `v${PLUGIN_VERSION}` } }, run: runWith({ exitCode: 0, stdout: '' }) })
   await start($)
   await settleUpdate(w)
   expect(w.logs.some((l) => l.includes('is out'))).toBe(false)
@@ -4435,20 +4447,20 @@ test('update: a never-resolving process.run does not hold session.start', async 
 })
 
 test('update: /souffleur shows the version line from the stored check', async ($, on) => {
-  const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: runWith({ exitCode: 0, stdout: '' }) })
+  const w = world(on, SETUP, { stored: { updateCheck: { at: T0, latest: NEWER } }, run: runWith({ exitCode: 0, stdout: '' }) })
   await start($)
   await settleUpdate(w)
   expect(await table($)).toContain(`Version ${PLUGIN_VERSION} · latest ${NEWER_V} ·`)
 })
 
 test('update: a cached install kind shows the line at start although rev-parse never answers', async ($, on) => {
-  const w = world(on, SETUP, { stored: { installKind: 'folder', updateCheck: { at: Date.now(), latest: NEWER } }, run: (argv) => (argv.includes('rev-parse') ? new Promise(() => {}) : { exitCode: 0, stdout: '', stderr: '' }) })
+  const w = world(on, SETUP, { stored: { installKind: 'folder', updateCheck: { at: T0, latest: NEWER } }, run: (argv) => (argv.includes('rev-parse') ? new Promise(() => {}) : { exitCode: 0, stdout: '', stderr: '' }) })
   await start($)
   expect(w.logs).toContain(`Souffleur ${NEWER_V} is out (you run ${PLUGIN_VERSION}). /souffleur update installs it.`)
 })
 
 test('update: the first run learns the install kind, stores it and says the line once', async ($, on) => {
-  const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: runWith({ exitCode: 0, stdout: '' }, MARKET_ROOT) })
+  const w = world(on, SETUP, { stored: { updateCheck: { at: T0, latest: NEWER } }, run: runWith({ exitCode: 0, stdout: '' }, MARKET_ROOT) })
   await start($)
   await settleUpdate(w)
   expect(w.stored.installKind).toBe('market')
@@ -4459,7 +4471,7 @@ test('update: the first run learns the install kind, stores it and says the line
 })
 
 test('update: a plugin folder inside a work tree (non-empty prefix) is a marketplace install', async ($, on) => {
-  const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: (argv) => (argv.includes('rev-parse') ? { exitCode: 0, stdout: 'plugins/x/\n', stderr: '' } : { exitCode: 0, stdout: '', stderr: '' }) })
+  const w = world(on, SETUP, { stored: { updateCheck: { at: T0, latest: NEWER } }, run: (argv) => (argv.includes('rev-parse') ? { exitCode: 0, stdout: 'plugins/x/\n', stderr: '' } : { exitCode: 0, stdout: '', stderr: '' }) })
   await start($)
   await settleUpdate(w)
   expect(w.stored.installKind).toBe('market')
@@ -4469,12 +4481,12 @@ test('update: a plugin folder inside a work tree (non-empty prefix) is a marketp
 test('update: a second start before the first detached work finishes does not say the line twice', async ($, on) => {
   let release: (v: { exitCode: number; stdout: string; stderr: string }) => void = () => {}
   const held = new Promise<{ exitCode: number; stdout: string; stderr: string }>((r) => { release = r })
-  const w = world(on, SETUP, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: (argv) => (argv.includes('rev-parse') ? held : { exitCode: 0, stdout: '', stderr: '' }) })
+  const w = world(on, SETUP, { stored: { updateCheck: { at: T0, latest: NEWER } }, run: (argv) => (argv.includes('rev-parse') ? held : { exitCode: 0, stdout: '', stderr: '' }) })
   await start($)
   await start($)
   release({ exitCode: 0, stdout: '\n', stderr: '' })
   await settleUpdate(w, 2)
-  await new Promise((r) => setTimeout(r, 20))
+  await settle()
   expect(w.logs.filter((l) => l.includes('is out')).length).toBe(1)
 })
 
@@ -4485,7 +4497,7 @@ test('update: a second start before the first detached work finishes does not sa
  * The engine runs its own copy of the mod, so the test cannot read a promise from it; the debug line is the signal.
  */
 const settleUpdate = async (w: World, starts = 1) => {
-  for (let i = 0; i < 200 && w.debugLogs.filter((l) => l === 'update work done').length < starts; i++) await new Promise((r) => setTimeout(r, 15))
+  for (let i = 0; i < 200 && w.debugLogs.filter((l) => l === 'update work done').length < starts; i++) await settle()
   expect(w.debugLogs.filter((l) => l === 'update work done').length).toBeGreaterThanOrEqual(starts)
 }
 
@@ -4497,9 +4509,9 @@ const SIGNER = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAA
 const AUTO_FILE = { [USER_FILE]: JSON.stringify({ update: 'auto', updateSigner: SIGNER }) }
 const AUTO_NO_SIGNER = { [USER_FILE]: JSON.stringify({ update: 'auto' }) }
 const OK = { exitCode: 0, stdout: '', stderr: '' }
-const STORED_NEWER = { installKind: 'folder', updateCheck: { at: Date.now(), latest: NEWER } }
+const STORED_NEWER = { installKind: 'folder', updateCheck: { at: T0, latest: NEWER } }
 /** Nothing newer is known, so the session start does no install of its own. */
-const QUIET = { installKind: 'folder', updateCheck: { at: Date.now(), latest: 'v0.0.1' } }
+const QUIET = { installKind: 'folder', updateCheck: { at: T0, latest: 'v0.0.1' } }
 const OID = 'f'.repeat(40)
 const SSH_TAG = (name: string) => `object ${'a'.repeat(40)}\ntype commit\ntag ${name}\ntagger t <t@t> 1 +0000\n\nrelease\n-----BEGIN SSH SIGNATURE-----\nU1NIU0lH\n-----END SSH SIGNATURE-----\n`
 const GOOD = 'Good "git" signature for souffleur with ED25519 key SHA256:abc'
@@ -4902,20 +4914,20 @@ test('on the desktop a session that is not set up shows the not-set-up text', as
 })
 
 test('on the desktop a newer release shows the status line', async ($, on) => {
-  world(on, { [USER_FILE]: ALWAYS }, { stored: { updateCheck: { at: Date.now(), latest: 'v99.0.0' } } })
+  world(on, { [USER_FILE]: ALWAYS }, { stored: { updateCheck: { at: T0, latest: 'v99.0.0' } } })
   await start($)
   await skillLoaded($, 'writing-guide')
   expect(await bandText($, 'desktop')).toMatch(/1 loaded · 99\.0\.0 is out, see \/souffleur$/)
 })
 
 test('on the desktop a newer release shows even with no skills configured', async ($, on) => {
-  world(on, { [USER_FILE]: '{}' }, { stored: { updateCheck: { at: Date.now(), latest: 'v99.0.0' } } })
+  world(on, { [USER_FILE]: '{}' }, { stored: { updateCheck: { at: T0, latest: 'v99.0.0' } } })
   await start($)
   expect(await bandText($, 'desktop')).toBe('99.0.0 is out, see /souffleur')
 })
 
 test('update off hides the band for a newer release left in the store', async ($, on) => {
-  world(on, { [USER_FILE]: JSON.stringify({ update: 'off', skills: { 'writing-guide': { always: true } } }) }, { stored: { updateCheck: { at: Date.now(), latest: 'v99.0.0' } } })
+  world(on, { [USER_FILE]: JSON.stringify({ update: 'off', skills: { 'writing-guide': { always: true } } }) }, { stored: { updateCheck: { at: T0, latest: 'v99.0.0' } } })
   await start($)
   await skillLoaded($, 'writing-guide')
   expect(await bandText($, 'desktop')).toBeUndefined()
@@ -5016,8 +5028,8 @@ test('compaction writes the stored copy', async ($, on) => {
 test('session start keeps at most 50 stored sessions and drops copies older than 14 days', async ($, on) => {
   const { config } = parseConfig(ALWAYS, undefined)
   const stored: Record<string, unknown> = {}
-  for (let i = 0; i < 60; i++) stored[`session:old${i}`] = { ...initSession(config, `old${i}`, 1, 'startup', '2.1.331'), touched: Date.now() - i * 1000 }
-  stored['session:ancient'] = { ...initSession(config, 'ancient', 1, 'startup', '2.1.331'), touched: Date.now() - 15 * 86_400_000 }
+  for (let i = 0; i < 60; i++) stored[`session:old${i}`] = { ...initSession(config, `old${i}`, 1, 'startup', '2.1.331'), touched: T0 - i * 1000 }
+  stored['session:ancient'] = { ...initSession(config, 'ancient', 1, 'startup', '2.1.331'), touched: T0 - 15 * 86_400_000 }
   world(on, { [USER_FILE]: ALWAYS }, { stored })
   await start($)
   await settle()
@@ -5032,7 +5044,7 @@ test('session start does not wait for the store pruning', async ($, on) => {
   let release!: () => void
   const holdKeys = new Promise<void>((r) => { release = r })
   const day = 86_400_000
-  const w = world(on, { [USER_FILE]: ALWAYS }, { holdKeys, stored: { 'session:old': { id: 'old', ledger: {}, touched: Date.now() - 15 * day } } })
+  const w = world(on, { [USER_FILE]: ALWAYS }, { holdKeys, stored: { 'session:old': { id: 'old', ledger: {}, touched: T0 - 15 * day } } })
   await start($)
   expect(w.stored['session:old'], 'start came back while the key list was still pending').toBeDefined()
   release()
@@ -5052,8 +5064,8 @@ test('skill-hash keys older than 14 days are pruned, newer ones kept, unstamped 
   const day = 86_400_000
   const w = world(on, { [USER_FILE]: ALWAYS }, {
     stored: {
-      'souffleur:skill-hash:old': { done: true, touched: Date.now() - 15 * day },
-      'souffleur:skill-hash:recent': { offers: 1, touched: Date.now() - 2 * day },
+      'souffleur:skill-hash:old': { done: true, touched: T0 - 15 * day },
+      'souffleur:skill-hash:recent': { offers: 1, touched: T0 - 2 * day },
       'souffleur:skill-hash:legacy': { done: true },
       'souffleur:declined': ['h'],
     },
@@ -5069,18 +5081,18 @@ test('skill-hash keys older than 14 days are pruned, newer ones kept, unstamped 
 test('reading a skill-hash record refreshes its stamp once it is a day old, so a record in use is not pruned', async ($, on) => {
   const day = 86_400_000
   const key = hashKey(hashOf('writing-guide'))
-  const stored: Record<string, unknown> = { [key]: { done: true, touched: Date.now() - 13 * day } }
+  const stored: Record<string, unknown> = { [key]: { done: true, touched: T0 - 13 * day } }
   world(on, { [USER_FILE]: ENFORCE }, { stored, skillAnswer: answerWith(TEST_RULE) })
   await start($)
   await mainLoad($, 'writing-guide')
   const refreshed = (stored[key] as { touched: number; done: boolean })
   expect(refreshed.done).toBe(true)
-  expect(Date.now() - refreshed.touched, 'stamp is fresh, so day 20 is 7 days after it, not 20').toBeLessThan(day)
+  expect(T0 - refreshed.touched, 'stamp is fresh, so day 20 is 7 days after it, not 20').toBeLessThan(day)
 })
 
 test('a skill-hash record read within a day is not written again', async ($, on) => {
   const key = hashKey(hashOf('writing-guide'))
-  const stamp = Date.now() - 3_600_000
+  const stamp = T0 - 3_600_000
   const stored: Record<string, unknown> = { [key]: { done: true, touched: stamp } }
   const w = world(on, { [USER_FILE]: ENFORCE }, { stored, skillAnswer: answerWith(TEST_RULE) })
   await start($)
@@ -5208,7 +5220,7 @@ const OWNER = `${LOCK_DIR}/owner`
 const heldBy = (at: number, token = 'other') => ({ [OWNER]: JSON.stringify({ at, token }) })
 
 test('/souffleur update: a lock held by another session skips the install and runs no git', async ($, on) => {
-  const w = world(on, { ...SETUP, ...heldBy(Date.now() - 30_000) }, { stored: QUIET, run: gitRun() })
+  const w = world(on, { ...SETUP, ...heldBy(T0 - 30_000) }, { stored: QUIET, run: gitRun() })
   own(w)
   await start($)
   expect(await runUser($, 'update')).toBe('Souffleur: another session is installing an update; try again in a minute.')
@@ -5219,7 +5231,7 @@ test('/souffleur update: a lock held by another session skips the install and ru
 })
 
 test('/souffleur update: a lost race (mkdir fails, a fresh owner is there) runs no git', async ($, on) => {
-  const w = world(on, { ...SETUP, ...heldBy(Date.now()) }, { stored: QUIET, run: gitRun(), holdLock: true })
+  const w = world(on, { ...SETUP, ...heldBy(T0) }, { stored: QUIET, run: gitRun(), holdLock: true })
   own(w)
   await start($)
   expect(await runUser($, 'update')).toMatch(/another session is installing/)
@@ -5246,7 +5258,7 @@ test('update auto: a lock that cannot be made logs the reason to debug and runs 
 })
 
 test('/souffleur update: a stale lock whose takeover another session holds runs no git and stays', async ($, on) => {
-  const w = world(on, { ...SETUP, ...heldBy(Date.now() - 180_000), [`${LOCK_DIR}.takeover/x`]: '' }, { stored: QUIET, run: gitRun(), dirMtime: { [`${LOCK_DIR}.takeover`]: Date.now() } })
+  const w = world(on, { ...SETUP, ...heldBy(T0 - 180_000), [`${LOCK_DIR}.takeover/x`]: '' }, { stored: QUIET, run: gitRun(), dirMtime: { [`${LOCK_DIR}.takeover`]: T0 } })
   own(w)
   await start($)
   expect(await runUser($, 'update')).toMatch(/another session is installing/)
@@ -5256,7 +5268,7 @@ test('/souffleur update: a stale lock whose takeover another session holds runs 
 })
 
 test('/souffleur update: an old takeover folder is removed, without a retry this time', async ($, on) => {
-  const w = world(on, { ...SETUP, ...heldBy(Date.now() - 180_000), [`${LOCK_DIR}.takeover/x`]: '' }, { stored: QUIET, run: gitRun(), dirMtime: { [`${LOCK_DIR}.takeover`]: Date.now() - 180_000 } })
+  const w = world(on, { ...SETUP, ...heldBy(T0 - 180_000), [`${LOCK_DIR}.takeover/x`]: '' }, { stored: QUIET, run: gitRun(), dirMtime: { [`${LOCK_DIR}.takeover`]: T0 - 180_000 } })
   own(w)
   await start($)
   expect(await runUser($, 'update')).toMatch(/another session is installing/)
@@ -5265,7 +5277,7 @@ test('/souffleur update: an old takeover folder is removed, without a retry this
 })
 
 test('update auto: a stale takeover removes its takeover folder after the install', async ($, on) => {
-  const w = world(on, { ...AUTO_FILE, ...heldBy(Date.now() - 180_000) }, { stored: STORED_NEWER, run: gitRun() })
+  const w = world(on, { ...AUTO_FILE, ...heldBy(T0 - 180_000) }, { stored: STORED_NEWER, run: gitRun() })
   own(w)
   await start($)
   await settleUpdate(w)
@@ -5284,7 +5296,7 @@ test('/souffleur update: a lock with no owner and no known age is fresh: busy, n
 })
 
 test('/souffleur update: a lock with no owner and an old folder time is stale and taken over', async ($, on) => {
-  const w = world(on, { ...SETUP, [`${LOCK_DIR}/junk`]: 'x' }, { stored: QUIET, run: gitRun(), dirMtime: { [LOCK_DIR]: Date.now() - 180_000 } })
+  const w = world(on, { ...SETUP, [`${LOCK_DIR}/junk`]: 'x' }, { stored: QUIET, run: gitRun(), dirMtime: { [LOCK_DIR]: T0 - 180_000 } })
   own(w)
   await start($)
   expect(await runUser($, 'update')).toMatch(/updated to/)
@@ -5292,7 +5304,7 @@ test('/souffleur update: a lock with no owner and an old folder time is stale an
 })
 
 test('update auto: a lock held by another session skips the install, says nothing and logs to debug', async ($, on) => {
-  const w = world(on, { ...AUTO_FILE, ...heldBy(Date.now() - 30_000) }, { stored: STORED_NEWER, run: gitRun() })
+  const w = world(on, { ...AUTO_FILE, ...heldBy(T0 - 30_000) }, { stored: STORED_NEWER, run: gitRun() })
   own(w)
   await start($)
   await settleUpdate(w)
@@ -5302,7 +5314,7 @@ test('update auto: a lock held by another session skips the install, says nothin
   expect(w.debugLogs.some((l) => l.includes('install lock'))).toBe(true)
 })
 
-for (const [name, at] of [['an old', Date.now() - 180_000], ['a future-dated', Date.now() + 3_600_000]] as const) {
+for (const [name, at] of [['an old', T0 - 180_000], ['a future-dated', T0 + 3_600_000]] as const) {
   test(`update auto: ${name} lock is stale, taken over and released after the install`, async ($, on) => {
     const w = world(on, { ...AUTO_FILE, ...heldBy(at, 'old') }, { stored: STORED_NEWER, run: gitRun() })
     own(w)
@@ -5334,7 +5346,7 @@ test('/souffleur update: the lock is released after a git failure', async ($, on
 test('/souffleur update: a lock another session took over during the install is not removed', async ($, on) => {
   let w!: World
   const base = gitRun()
-  w = world(on, { ...SETUP }, { stored: QUIET, run: (argv, init) => { if (argv.includes('checkout')) w.edit(OWNER, JSON.stringify({ at: Date.now(), token: 'taken-over' })); return base(argv, init) } })
+  w = world(on, { ...SETUP }, { stored: QUIET, run: (argv, init) => { if (argv.includes('checkout')) w.edit(OWNER, JSON.stringify({ at: T0, token: 'taken-over' })); return base(argv, init) } })
   own(w)
   await start($)
   expect(await runUser($, 'update')).toMatch(/updated to/)
@@ -5374,7 +5386,7 @@ test('update: a root under the plugins folder is market even when git calls it a
 })
 
 test('update auto: with update auto and a root listed in installed_plugins.json nothing is fetched or checked out', async ($, on) => {
-  const w = world(on, { ...AUTO_FILE }, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: gitRun() })
+  const w = world(on, { ...AUTO_FILE }, { stored: { updateCheck: { at: T0, latest: NEWER } }, run: gitRun() })
   own(w)
   const root = await learnRoot($, w)
   const before = { fetch: ran(w, 'fetch').length, checkout: ran(w, 'checkout').length }
@@ -5424,7 +5436,7 @@ test('update: an unknown home folder counts as owned: market, no install', async
 
 for (const [name, text] of [['missing', undefined], ['broken', '{not json'], ['without plugins', '{}'], ['with other roots', JSON.stringify({ plugins: { 'x@m': [{ installPath: '/elsewhere' }, null] } })]] as const) {
   test(`update: a ${name} installed_plugins.json leaves a real folder install as folder`, async ($, on) => {
-    const w = world(on, text === undefined ? SETUP : { ...SETUP, [OWNED]: text }, { stored: { updateCheck: { at: Date.now(), latest: NEWER } }, run: gitRun() })
+    const w = world(on, text === undefined ? SETUP : { ...SETUP, [OWNED]: text }, { stored: { updateCheck: { at: T0, latest: NEWER } }, run: gitRun() })
     own(w)
     await start($)
     await settleUpdate(w)
@@ -5614,4 +5626,53 @@ test('config dir: an exists check that throws keeps the configured path, not the
   await start($)
   expect(await run($, '')).not.toContain('Config: using')
   expect(w.writes.some((x) => x.path === USER_FILE)).toBe(false)
+})
+
+// ---- gaps named in #95 ----
+// Already covered elsewhere: a failing `session:<id>` write (`a failing store copy does not drop a deny`, `the store error clears after a later flush works`),
+// a background agent (`a background agent loads a skill after its Agent call returned…`) and an id change inside the process (the `an id change inside the process…` tests).
+
+test('a save by another writer between our read and our move is noticed: the change is retried on the new text and lands', async ($, on) => {
+  const w = world(on, { [USER_FILE]: BLOCKABLE })
+  await start($)
+  w.driftAfter(USER_FILE, 1)
+  const text = await run($, 'block writing-guide')
+  expect(text).not.toMatch(/kept changing/)
+  expect(JSON.parse(w.files[USER_FILE]!).projects['/work/proj'].block).toEqual(['writing-guide'])
+  expect(Object.keys(w.files).filter((f) => f.includes('.tmp-'))).toEqual([])
+})
+
+// ---- the clock copy: other processes' stamps are compared with a fresh read ----
+
+test('/souffleur update: a lock stamped after this process last read the clock is fresh, not future-dated', async ($, on) => {
+  const base = { ...SETUP, ...heldBy(T0 + 5_000) }
+  const inner = gitRun()
+  // The clock moves while the update looks up the releases, after the handler read it for the last time.
+  const w = world(on, base, { stored: QUIET, run: async (argv, init) => {
+    if (argv.includes('ls-remote')) await fakeClock.advance(5_000)
+    return inner(argv, init) as never
+  } })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toBe('Souffleur: another session is installing an update; try again in a minute.')
+  expect(ran(w, 'checkout').length).toBe(0)
+  expect(JSON.parse(w.files[OWNER]!).token).toBe('other')
+})
+
+test('a host clock that throws falls back to the system time and logs once to debug', async ($, on) => {
+  let broken = false
+  const w = world(on, SETUP, { clockDown: () => broken, stored: { installKind: 'folder', updateCheck: { at: T0, latest: 'v0.0.1' } }, run: runWith({ exitCode: 0, stdout: LS(NEWER) }) })
+  own(w)
+  await start($)
+  await settleUpdate(w)
+  broken = true
+  // An hour old in system time, weeks off by the last good reading (T0 lies ahead of the system time): only the system time says "not due".
+  w.stored['updateCheck'] = { at: Date.now() - 3_600_000, latest: 'v0.0.1' }
+  const before = lsRemoteCalls(w).length
+  own(w)
+  await start($)
+  await start($)
+  await settleUpdate(w, 3)
+  expect(lsRemoteCalls(w).length).toBe(before)
+  expect(w.debugLogs.filter((l) => l.startsWith('clock unavailable')).length).toBe(1)
 })

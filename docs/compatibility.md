@@ -11,6 +11,7 @@ Where the second column names a method, it says how the row was checked: `observ
 | `session.compact` runs a hook before and after; `/compact` reports trigger `manual` | 2.1.332 |
 | A `context` entry added in `prompt.submit` makes the model invoke the named skills first (no fixture) | 2.1.332 |
 | `prompt.compose` sections survive `/compact` | 2.1.322 |
+| `$.clock.now()` is asynchronous: it returns a promise of the time in milliseconds, and the test kit's `mock.clock(on, { now })` answers it with the fake time. The adapter keeps a synchronous copy refreshed at every event, and reads a fresh time before comparing with a stamp another process wrote. A throwing or silent clock falls back to the system time | 2.1.332 (observed) |
 | `$.session.id()` is stable across resume; `/clear` starts a new id without `session.start` | 2.1.332 |
 | `$.state` is empty after a resume; `$.store` keeps values across sessions (no fixture) | 2.1.332 |
 | After a hot reload of the mod, `$.state` still holds the session at `session.start`: Souffleur treats that as a reload and keeps the per-run counters, while a resume in a new process (empty `$.state`, session from the store) resets them | not verified; relies on the documented behaviour |

@@ -7,6 +7,7 @@ import type { HookOverlap, Passage } from '../core/migrate.ts'
 import { CHOICE_LABEL, INJECTED_HELP, addSkillToProject, hasProjectKey, ignoreInProject, NOT_SET_UP, SETUP_INTRO, applyChoice, candidates, choiceOf, cleanNeedText, configProblem, currentChoice, describePlan, explicitOnly, GROUP_ALL, GROUP_NONE, GROUP_ONE, groupByPlugin, injectedWarning, LATER, needKeyFor, options, parsePicks, parseSkips, picksPrompt, setupSteps } from '../core/setup.ts'
 import type { LoadChoice, NeedText, Plan, StartHooks, Suggestion } from '../core/setup.ts'
 import type { Action, CoreEvent, Session } from '../core/decide.ts'
+import { allowedSigners, goodSignature, signedTagObject, verifyTagArgs } from '../core/update.ts'
 import { audienceOf, classifyDeliverable, needTexts } from '../core/needs.ts'
 import { EXTRACT_SYSTEM, MAX_SKILL_TEXT, extractPrompt, hashKey, parseAnswer, shouldRead, skillHash, trusted } from '../core/learn.ts'
 import type { Proposal } from '../core/proposals.ts'
@@ -69,7 +70,44 @@ const noticed = new Set<string>()
 /** Set by `session.start` from the session it restored: a reload or resume keeps a dismissed dialog dismissed. */
 let restoredAskStopped = false
 
-const now = () => Date.now()
+/** The time of the host's clock as of the last `syncClock`; a test's fake clock moves it, nothing else reads the system time. */
+let clockMs = Date.now()
+const now = (): number => clockMs
+/** The clock call failed or was silent once already in this process; the debug line is written once. */
+let clockFallbackLogged = false
+/**
+ * `$.clock.now()` is asynchronous, so the synchronous `now()` reads this copy. It is refreshed at every event handler and at every core
+ * event (`apply`); a time that another process wrote is compared only after `wallNow`. When the host clock throws or does not answer
+ * within 50 ms the system time is used, and the first time says so in the debug log.
+ */
+async function syncClock($: Dollar): Promise<void> {
+  const quiet = new AbortController()
+  try {
+    const t = await Promise.race([$.clock.now(), $.clock.sleep(50, { signal: quiet.signal }).then(() => undefined, () => undefined)])
+    if (typeof t === 'number' && Number.isFinite(t)) {
+      clockMs = t
+      return
+    }
+  } catch {
+    // falls through to the system time
+  } finally {
+    quiet.abort()
+  }
+  clockMs = Date.now()
+  if (!clockFallbackLogged) {
+    clockFallbackLogged = true
+    try {
+      $.ui.log('clock unavailable: using the system time', { to: 'debug' })
+    } catch {
+      // a log line is a courtesy
+    }
+  }
+}
+/** A fresh time for comparing with a stamp written by another process (a lock, a folder time, a stored check time). */
+async function wallNow($: Dollar): Promise<number> {
+  await syncClock($)
+  return clockMs
+}
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err))
 
 const stripBom = (text: string) => text.replace(/^\uFEFF/, '')
@@ -469,13 +507,6 @@ async function installBlocker($: Dollar): Promise<string | undefined> {
   return at.exitCode === 0 && RELEASE_TAG.test(at.stdout.trim()) ? undefined : 'the install is not on a release tag'
 }
 
-/** Git verifies the last signature block of a tag, so the last `-----BEGIN ` line must open an SSH signature that ends the object; armor quoted in the message does not count. */
-function endsInSshSignature(obj: string): boolean {
-  const lines = obj.replace(/\n$/, '').split('\n')
-  const begin = lines.map((l, i) => (l.startsWith('-----BEGIN ') ? i : -1)).filter((i) => i >= 0).pop()
-  return begin !== undefined && lines[begin] === '-----BEGIN SSH SIGNATURE-----' && lines[lines.length - 1] === '-----END SSH SIGNATURE-----' && !lines.slice(begin + 1, -1).some((l) => l.startsWith('-----'))
-}
-
 /**
  * True when the tag object `oid` (the object `refs/tags/<tag>` pointed to when it was resolved) is an SSH-signed tag named `tag`
  * whose signature is the `updateSigner` key's. Git picks the verifier from the signature armor, so a PGP-signed tag would pass
@@ -485,14 +516,13 @@ function endsInSshSignature(obj: string): boolean {
 async function tagVerified($: Dollar, signer: string, tag: string, oid: string): Promise<boolean> {
   const obj = await git($, ['cat-file', 'tag', oid])
   if (obj.exitCode !== 0) return false
-  const header = obj.stdout.split('\n\n')[0] ?? ''
-  if (!header.split('\n').includes(`tag ${tag}`) || !endsInSshSignature(obj.stdout)) return false
+  if (!signedTagObject(obj.stdout, tag)) return false
   const dir = (await $.process.hookEnv()).CLAUDE_PLUGIN_DATA
   if (dir === undefined || dir === '') throw new Error('no plugin data folder')
   const file = `${dir}/allowed_signers`
-  await $.fs.write(file, `souffleur namespaces="git" ${signer}\n`)
-  const r = await git($, ['-c', 'gpg.format=ssh', '-c', `gpg.ssh.allowedSignersFile=${file}`, 'verify-tag', oid])
-  return r.exitCode === 0 && r.stderr.split('\n').some((line) => line.startsWith('Good "git" signature for souffleur with '))
+  await $.fs.write(file, allowedSigners(signer))
+  const r = await git($, verifyTagArgs(file, oid))
+  return r.exitCode === 0 && goodSignature(r.stderr)
 }
 
 type Install = { done: 'installed'; signed: boolean } | { done: 'refused'; reason: string } | { done: 'unverified' } | { done: 'busy' }
@@ -546,7 +576,8 @@ async function withInstallLock<T>($: Dollar, fn: () => Promise<T>): Promise<{ va
   const stale = async () => {
     const at = (await readOwner())?.at
     const t = typeof at === 'number' ? at : await mtime(lock)
-    return t !== undefined && (t > now() || now() - t >= LOCK_STALE_MS)
+    const wall = await wallNow($)
+    return t !== undefined && (t > wall || wall - t >= LOCK_STALE_MS)
   }
   await ok($, ['mkdir', '-p', data])
   let made = await ok($, ['mkdir', lock])
@@ -558,7 +589,7 @@ async function withInstallLock<T>($: Dollar, fn: () => Promise<T>): Promise<{ va
     const take = `${lock}.takeover`
     if (!(await ok($, ['mkdir', take]))) {
       const t = await mtime(take)
-      if (t !== undefined && now() - t >= LOCK_STALE_MS) await ok($, ['rm', '-rf', take])
+      if (t !== undefined && (await wallNow($)) - t >= LOCK_STALE_MS) await ok($, ['rm', '-rf', take])
       return undefined
     }
     try {
@@ -571,9 +602,10 @@ async function withInstallLock<T>($: Dollar, fn: () => Promise<T>): Promise<{ va
     }
   }
   if (!made) return undefined
-  const token = `${now()}-${Math.random().toString(36).slice(2)}`
+  const stamp = await wallNow($)
+  const token = `${stamp}-${Math.random().toString(36).slice(2)}`
   try {
-    await $.fs.write(owner, JSON.stringify({ at: now(), token }))
+    await $.fs.write(owner, JSON.stringify({ at: stamp, token }))
   } catch (err) {
     await ok($, ['rm', '-rf', lock])
     throw err
@@ -673,17 +705,19 @@ const HASH_PREFIX = hashKey('')
 async function pruneStore($: Dollar, currentId: string): Promise<void> {
   const keys: string[] = await $.store.keys()
   const kept: { key: string; touched: number }[] = []
+  // One fresh reading for the whole pass: stamps were written by other processes.
+  const wall = await wallNow($)
   for (const key of keys) {
     const isSession = key.startsWith('session:')
     if (!(isSession || key.startsWith(HASH_PREFIX)) || key === `session:${currentId}`) continue
     const copy: unknown = await $.store.get(key)
     const touched = typeof copy === 'object' && copy !== null ? (copy as { touched?: unknown }).touched : undefined
     if (typeof touched === 'number') {
-      if (now() - touched > SESSION_TTL_MS) await $.store.delete(key)
+      if (wall - touched > SESSION_TTL_MS) await $.store.delete(key)
       else if (isSession) kept.push({ key, touched })
     } else if (typeof copy === 'object' && copy !== null) {
-      await $.store.set(key, { ...copy, touched: now() })
-      if (isSession) kept.push({ key, touched: now() })
+      await $.store.set(key, { ...copy, touched: wall })
+      if (isSession) kept.push({ key, touched: wall })
     }
   }
   kept.sort((a, b) => b.touched - a.touched)
@@ -751,6 +785,7 @@ function serial<T>(work: () => Promise<T>): Promise<T> {
 /** Feeds one event to the core and stores the result. */
 function apply($: Dollar, make: (l: Loaded) => CoreEvent): Promise<{ actions: Action[]; l: Loaded }> {
   return serial(async () => {
+    await syncClock($)
     const { l, session } = await current($)
     const event = make(l)
     const r = decide(l.config, session, event)
@@ -2177,9 +2212,10 @@ async function markVersionDone($: Dollar, before: Session, after: Session, hash:
 async function refreshStamp($: Dollar, key: string, stored: unknown): Promise<void> {
   if (typeof stored !== 'object' || stored === null) return
   const touched = (stored as { touched?: unknown }).touched
-  if (typeof touched === 'number' && now() - touched < 86_400_000) return
+  const wall = await wallNow($)
+  if (typeof touched === 'number' && wall - touched < 86_400_000) return
   try {
-    await $.store.set(key, { ...stored, touched: now() })
+    await $.store.set(key, { ...stored, touched: wall })
   } catch {
     // the stamp stays; a failed refresh only means the age rule counts from the older one
   }
@@ -2356,6 +2392,7 @@ export const register: Register = (on) => {
   })
 
   on('session.start', async ($, e, next) => {
+    await syncClock($)
     await safe($, 'session.start', undefined, async () => {
       loaded = undefined
       ownHandled = false
@@ -2406,7 +2443,7 @@ export const register: Register = (on) => {
               await markShown($, tell)
             }
           }
-          await checkForUpdate($, l, now())
+          await checkForUpdate($, l, await wallNow($))
           if (l.config.update === 'auto' && k === 'folder') await autoInstall($, l, s.id)
         } finally {
           $.ui.log('update work done', { to: 'debug' })
@@ -2449,6 +2486,7 @@ export const register: Register = (on) => {
   })
 
   on('skill.prompt', async ($, e, next) => {
+    await syncClock($)
     await safe($, 'skill.prompt', undefined, async () => {
       const { actions } = await apply($, () => ({ type: 'skill', now: now(), skill: e.skill, text: e.text, ...(e.source === undefined ? {} : { source: e.source }), ...(e.pluginName === undefined ? {} : { pluginName: e.pluginName }), ...(e.path === undefined ? {} : { path: e.path }) }))
       for (const a of actions) if (a.kind === 'learn') void learnFrom($, a)
@@ -2458,6 +2496,7 @@ export const register: Register = (on) => {
 
   // The last chance to store the copy a resume reads: the turn may have ended without a turn.complete (exit, signal, -p).
   on('session.end', async ($, e, next) => {
+    await syncClock($)
     try {
       await serial(async () => {
         // After a reload `latest` is unset: the held state or the stored copy is the session to keep.
@@ -2474,6 +2513,7 @@ export const register: Register = (on) => {
   }).catch(($, e, next) => next(e))
 
   on('session.compact', async ($, e, next) => {
+    await syncClock($)
     const agentId = e.agentId === undefined ? {} : { agentId: e.agentId }
     await safe($, 'session.compact.before', undefined, async () => {
       await apply($, () => ({ type: 'compact', now: now(), phase: 'before', trigger: e.trigger, ...agentId }))
@@ -2488,6 +2528,7 @@ export const register: Register = (on) => {
   }).catch(($, e, next) => next(e))
 
   on('prompt.submit', async ($, e, next) => {
+    await syncClock($)
     const fromUser = isFromUser(e)
     if (fromUser) lastPromptKind = e.origin?.kind
     personTurn = fromUser || (e.command !== undefined && isUserOrigin(e))
@@ -2578,6 +2619,7 @@ export const register: Register = (on) => {
   }).catch(($, e, next) => next(e))
 
   on('prompt.compose', async ($, e, next) => {
+    await syncClock($)
     const r = await next(e)
     const text = await safe($, 'prompt.compose', undefined as string | undefined, async () => {
       const { l, session } = await current($)
@@ -2594,6 +2636,7 @@ export const register: Register = (on) => {
   })
 
   on('tool.call', async ($, e, next) => {
+    await syncClock($)
     const actions = await safe($, 'tool.call', [] as Action[], async () => {
       const fields = toolFields(e)
       const r = await apply($, (l) => ({
@@ -2617,6 +2660,7 @@ export const register: Register = (on) => {
   }).catch(($, e, next) => next(e))
 
   on('tool.run', { tool: PROPOSE_TOOL }, async ($, e) => {
+    await syncClock($)
     const text = await safe($, 'souffleur_propose', 'Souffleur could not queue the proposal. Tell the user and carry on.', () => runPropose($, e as unknown as Record<string, unknown>))
     return { result: text }
   }).catch(() => ({ result: 'Souffleur could not queue the proposal. Tell the user and carry on.' }))
@@ -2625,6 +2669,7 @@ export const register: Register = (on) => {
   // placeholder holds the window of the spawn; the agent's id replaces it once the result names it.
   let spawnSeq = 0
   on('agent.spawn', async ($, e, next) => {
+    await syncClock($)
     const token = `${SPAWN_PREFIX}${now()}:${++spawnSeq}`
     await safe($, 'agent.spawn', undefined, async () => {
       await apply($, () => ({ type: 'agentStart', now: now(), agentId: token }))
@@ -2648,6 +2693,7 @@ export const register: Register = (on) => {
   // A live agent run is what tells a skill load of the main session from an agent's: `skill.prompt` has no agentId, and a
   // background agent's Agent call returns at launch. A run starts with its `turn.start` and ends with its `turn.complete` or `agent.report`.
   on('turn.start', async ($, e, next) => {
+    await syncClock($)
     const r = await next(e)
     if (e.agentId !== undefined) {
       const agentId = e.agentId
@@ -2659,6 +2705,7 @@ export const register: Register = (on) => {
   })
 
   on('agent.report', async ($, e, next) => {
+    await syncClock($)
     const r = await next(e)
     await safe($, 'agent.report', undefined, async () => {
       await apply($, () => ({ type: 'agentDone', now: now(), agentId: e.agentId }))
@@ -2668,6 +2715,7 @@ export const register: Register = (on) => {
 
   // At the end of a turn: one question about the first waiting proposal; where no dialog opens, a notice with a reply hint.
   on('turn.complete', async ($, e, next) => {
+    await syncClock($)
     const r = await next(e)
     if (e.agentId !== undefined) {
       const agentId = e.agentId
@@ -2719,6 +2767,7 @@ export const register: Register = (on) => {
   })
 
   on('command.run', async ($, e, next) => {
+    await syncClock($)
     if (e.command === 'souffleur') {
       const verb0 = (e.args ?? '').trim().split(/\s+/)[0]
       // Only a read-only status is open to a plugin or the model; every other verb changes state or opens a dialog.
