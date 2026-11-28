@@ -7,6 +7,7 @@ import { parseConfig } from '../core/config.ts'
 import { clip } from '../core/needs.ts'
 import { makeProposal } from '../core/proposals.ts'
 import { hashKey, skillHash } from '../core/learn.ts'
+import { newSessionState, resetSessionState, sess } from './register.ts'
 
 // The tests send deliberately partial inputs (only what the mod reads); the engine fills in the rest. These helpers hold the casts.
 const submit = ($: Engine, input: Pick<PromptSubmitInput, 'text'> & Partial<PromptSubmitInput>) => $.prompt.submit(input as PromptSubmitInput)
@@ -3414,6 +3415,17 @@ test('a reload keeps the stop and the dismissed dialog', async ($, on) => {
   expect(String((await propose($, note('Answer in German.'))).result)).toBe(STOPPED)
 })
 
+test('an in-process resume keeps the dismissed dialog of the stored session', async ($, on) => {
+  const { config } = parseConfig(ENFORCE, undefined)
+  const other = { ...initSession(config, 's2', 1, 'startup', '2.1.331'), askStopped: true }
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: ['No'], stored: { 'session:s2': other } })
+  await start($)
+  w.setId('s2')
+  await propose($, note('Reply in German.'))
+  await turnEnd($)
+  expect(w.asked.length).toBe(0)
+})
+
 test('a new session starts without the stop', async ($, on) => {
   const w = world(on, { [USER_FILE]: ENFORCE }, { answers: ['__undefined__'] })
   await start($)
@@ -3514,6 +3526,60 @@ test('/clear forgets a dismissed dialog like it forgets the stop', async ($, on)
   expect(String((await propose($, note('Answer in French, always.'))).result)).toMatch(/Queued as note-/)
   await turnEnd($)
   expect(w.asked.length).toBe(2)
+})
+
+test('/clear forgets that no dialog could open', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
+  await start($)
+  await propose($, note('Reply in German.'))
+  await turnEnd($)
+  expect(w.asked.length).toBe(1)
+  w.setId('cleared')
+  await propose($, note('Answer in French, always.'))
+  await turnEnd($)
+  expect(w.asked.length).toBe(2)
+})
+
+test('a new session asks the project question again after /clear', async ($, on) => {
+  const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['a-skill'], answers: ['Later', 'Later'] })
+  await start($)
+  await turnEnd($)
+  expect(w.asked.length).toBe(1)
+  w.setId('cleared')
+  await turnEnd($)
+  expect(w.asked.length).toBe(2)
+})
+
+// A dialog the person left open in one session must not act in the next one (a late tap after the session changed).
+for (const [how, change] of [
+  ['a new session start', async ($: any, w: World) => { w.setId('s2'); await start($) }],
+  ['/clear', async ($: any, w: World) => { w.setId('cleared'); await run($, 'status') }],
+  ['an in-process resume', async ($: any, w: World) => { w.setId('s2'); await run($, 'status') }],
+] as const) {
+  test(`a late tap on the project question of the old session does nothing after ${how}`, async ($, on) => {
+    const { tap, opts } = ownLate({ answers: ['When the task needs it', 'This project only', "Don't watch"] })
+    const w = world(on, { [USER_FILE]: STD }, { ...opts, stored: { 'session:s2': initSession(parseConfig(STD, undefined).config, 's2', 1, 'startup', '2.1.331') } })
+    await start($)
+    await ownTimedOut($, w)
+    await change($, w)
+    tap('Set up now')
+    await idle()
+    expect(w.logs.some((l) => /set-up starts/.test(l))).toBe(false)
+  })
+}
+
+test('the session reset covers every key of the session state', () => {
+  // Dirty every key by hand: a key added to `newSessionState` and left out of the reset fails here.
+  const dirty: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(newSessionState())) {
+    dirty[key] = value instanceof Set ? new Set(['x']) : typeof value === 'boolean' ? true : typeof value === 'number' ? 41 : { token: 1, names: ['x'] }
+  }
+  Object.assign(sess, dirty)
+  resetSessionState('next')
+  const fresh = newSessionState()
+  for (const key of Object.keys(fresh) as (keyof typeof fresh)[]) {
+    expect(key === 'ownToken' ? sess[key] > 41 : sess[key]).toEqual(key === 'ownToken' ? true : fresh[key])
+  }
 })
 
 test('an accepted reply does not stop proposals', async ($, on) => {
