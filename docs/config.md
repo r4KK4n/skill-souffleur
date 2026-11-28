@@ -46,7 +46,6 @@ More on needs and audiences:
 - The request to load skills names each skill with its audience, so a writing skill for docs does not change your replies in the chat.
 - `/souffleur` lists under "Audience not set:" a need written as a plain string (`<need>: no audience set; add "for" to it in ~/.claude/souffleur.json`) and an always-on skill without `for` (`<skill>: always on without "for"; add "for": "chat" if it shapes your replies in this chat`).
 
-
 A skill with `"always": true` is needed from the first turn. A skill with `"need"` is needed once its need starts:
 
 - A `work` need starts when a prompt starts that kind of work.

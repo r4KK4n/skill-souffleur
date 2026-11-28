@@ -50,8 +50,6 @@ let interactive = false
 let proposeReady = false
 /** The origin kind of the last prompt of the person; under `claude -p` that is `sdk`, and no later prompt can carry a reply. */
 let lastPromptKind: string | undefined
-/** The turn now running was started by a prompt of the person (typed or a command); background and agent notification turns are not counted. */
-let personTurn = false
 /**
  * Everything that belongs to one session and must not reach the next: `resetSessionState` starts it over at `session.start`
  * and at an id change inside the process (`/clear`, an in-process `/resume`). A new flag of this kind goes here, nowhere else.
@@ -2542,7 +2540,6 @@ export const register: Register = (on) => {
     })
     interactive = e.isInteractive === true
     lastPromptKind = undefined
-    personTurn = false
     proposeReady = false
     toolSeen = false
     silentRetried = false
@@ -2601,7 +2598,6 @@ export const register: Register = (on) => {
     await syncClock($)
     const fromUser = isFromUser(e)
     if (fromUser) lastPromptKind = e.origin?.kind
-    personTurn = fromUser || (e.command !== undefined && isUserOrigin(e))
     // A hand edit or another session's save: read the files again before this prompt is judged.
     await safe($, 'config.reload', undefined, async () => {
       if (!loaded || (await configSig($, loaded.root)) === loadedSig) return
@@ -2803,8 +2799,6 @@ export const register: Register = (on) => {
         await apply($, () => ({ type: 'seen', now: now() }))
       })
     }
-    // One check per person prompt, whatever way its turn ended: a later turn without its own prompt (a background completion) is not the person's.
-    if (e.agentId === undefined) personTurn = false
     if (e.agentId === undefined && e.reason === 'answer' && (!sess.askStopped || sess.askAtTurnEnd || sess.noDialog)) {
       await safe($, 'turn.complete', undefined, async () => {
         if ((await current($)).session.paused) return
