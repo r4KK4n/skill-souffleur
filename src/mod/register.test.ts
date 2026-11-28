@@ -5620,3 +5620,17 @@ test('config dir: an exists check that throws keeps the configured path, not the
   expect(await run($, '')).not.toContain('Config: using')
   expect(w.writes.some((x) => x.path === USER_FILE)).toBe(false)
 })
+
+// ---- gaps named in #95 ----
+// Already covered elsewhere: a failing `session:<id>` write (`a failing store copy does not drop a deny`, `the store error clears after a later flush works`),
+// a background agent (`a background agent loads a skill after its Agent call returned…`) and an id change inside the process (the `an id change inside the process…` tests).
+
+test('a save by another writer between our read and our move is noticed: the change is retried on the new text and lands', async ($, on) => {
+  const w = world(on, { [USER_FILE]: BLOCKABLE })
+  await start($)
+  w.driftAfter(USER_FILE, 1)
+  const text = await run($, 'block writing-guide')
+  expect(text).not.toMatch(/kept changing/)
+  expect(JSON.parse(w.files[USER_FILE]!).projects['/work/proj'].block).toEqual(['writing-guide'])
+  expect(Object.keys(w.files).filter((f) => f.includes('.tmp-'))).toEqual([])
+})
