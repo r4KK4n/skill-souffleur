@@ -18,7 +18,7 @@ claude plugin validate .
 claude plugin test .
 ```
 
-`npm test` and `npm run typecheck` need no login. The two `claude plugin` commands need Claude Code (the version named in `VERIFIED_UP_TO` in `src/core/version.ts`) and no login either. Run them before you push a change to `src/mod/`.
+`npm test` runs only the core tests in `test/`. The adapter tests in `src/mod/register.test.ts` need the `claude` binary and run with `npm run test:mod`, which is `claude plugin test .`; without `claude` on your PATH you run only the core half. `npm test` and `npm run typecheck` need no login. The two `claude plugin` commands need Claude Code (the version named in `VERIFIED_UP_TO` in `src/core/version.ts`) and no login either. Run them before you push a change to `src/mod/`.
 
 ## Pull requests
 
