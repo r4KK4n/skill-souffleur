@@ -48,27 +48,50 @@ let latest: Session | undefined
 /** Set by `session.start`: a person is at the prompt, and the propose tool is registered. */
 let interactive = false
 let proposeReady = false
-/** A dialog was dismissed or could not open: no more questions at turn end in this process; only a dismissal is stored in the session. */
-let askStopped = false
-/** The hash of the proposal a notice showed because no dialog opens; only the person's very next prompt can answer it, by one reply word. */
-let shownHash: string | undefined
-/** A typed `/souffleur review` could not open its dialog: the next turn end asks even after a dismissal. */
-let askAtTurnEnd = false
-/** `$.ui.ask` rejected in this session: nobody can answer a dialog, so waiting proposals are shown as notices. */
-let noDialog = false
 /** The origin kind of the last prompt of the person; under `claude -p` that is `sdk`, and no later prompt can carry a reply. */
 let lastPromptKind: string | undefined
 /** The last prompt of the person was a typed command: its reply is not checked against the chat skill's limits. */
 let lastPromptCommand = false
 /** The turn now running was started by a prompt of the person (typed or a command); background and agent notification turns are not counted. */
 let personTurn = false
+/**
+ * Everything that belongs to one session and must not reach the next: `resetSessionState` starts it over at `session.start`
+ * and at an id change inside the process (`/clear`, an in-process `/resume`). A new flag of this kind goes here, nowhere else.
+ */
+export const newSessionState = () => ({
+  /** A dialog was dismissed or could not open: no more questions at turn end; only a dismissal is stored in the session. */
+  askStopped: false,
+  /** The hash of the proposal a notice showed because no dialog opens; only the person's very next prompt can answer it, by one reply word. */
+  shownHash: undefined as string | undefined,
+  /** A typed `/souffleur review` could not open its dialog: the next turn end asks even after a dismissal. */
+  askAtTurnEnd: false,
+  /** `$.ui.ask` rejected in this session: nobody can answer a dialog, so waiting proposals are shown as notices. */
+  noDialog: false,
+  /** The proposals a notice showed (kept after the offer ended), so each proposal gets one notice. */
+  noticed: new Set<string>(),
+  /** Proposals whose dialog timed out (turn end or typed command) and may still be answered. */
+  timedOutAsk: new Set<string>(),
+  /** Skill versions whose read is under way. */
+  reading: new Set<string>(),
+  /** Set once the question about the project's own skills was handled in this session. */
+  ownHandled: false,
+  /** Counts the project questions; a late answer belongs to the question it was asked for. A reset moves it on, so no answer of an earlier session matches. */
+  ownToken: 0,
+  /** Set once the current question was acted on, so a second answer cannot act again. */
+  ownActed: false,
+  /** A late `Set up now`: the round runs at the next turn end, where a dialog may open. */
+  pendingSetUp: undefined as { token: number; names: string[] } | undefined,
+})
+export const sess = newSessionState()
+/** The session id the state above belongs to, so one id change resets it once however many hooks notice the change. */
+let sessFor: string | undefined
+export function resetSessionState(id?: string): void {
+  Object.assign(sess, newSessionState(), { ownToken: sess.ownToken + 1 })
+  sessFor = id
+}
+
 /** How long a dialog may stay open before it counts as a rejection (turn end) or the typed command returns without it. */
 const ASK_WAIT_MS = 120_000
-/** The proposals a notice showed (kept after the offer ended), so each proposal gets one notice. */
-const noticed = new Set<string>()
-
-/** Set by `session.start` from the session it restored: a reload or resume keeps a dismissed dialog dismissed. */
-let restoredAskStopped = false
 
 /** The time of the host's clock as of the last `syncClock`; a test's fake clock moves it, nothing else reads the system time. */
 let clockMs = Date.now()
@@ -251,9 +274,9 @@ async function current($: Dollar): Promise<{ l: Loaded; session: Session }> {
   const old = [held, latest].filter((x): x is Session => x !== undefined && x.id !== id).sort((x, y) => (y.rev ?? 0) - (x.rev ?? 0))[0]
   if (old) {
     await flushCopy($, l, old)
+    if (sessFor !== id) resetSessionState(id)
     const copy = await $.store.get(`session:${id}`)
     if (isSession(copy, id)) return { l, session: await resumedSession($, l, copy, 'resume') }
-    askStopped = false // a cleared session starts without the stop, like proposalsStopped
     return { l, session: await freshSession($, l, id, 'clear') }
   }
   const stored = await $.store.get(`session:${id}`)
@@ -261,13 +284,12 @@ async function current($: Dollar): Promise<{ l: Loaded; session: Session }> {
   return { l, session: await freshSession($, l, id, 'startup') }
 }
 
-/** What a resume does to a stored copy, at `session.start` and at an in-process id switch: errors dropped, the start event, the config, the ask-stopped mark. */
+/** What a resume does to a stored copy, at `session.start` and at an in-process id switch: errors dropped, the start event, the config, the ask-stopped mark (the caller reset the session state before). */
 async function resumedSession($: Dollar, l: Loaded, before: Session, start: 'resume' | 'reload'): Promise<Session> {
   const version = (await $.session.version()).version
   let s = decide(l.config, { ...normalizeSession(before), errors: [] }, { type: 'start', now: now(), start, version }).session
   s = decide(l.config, s, { type: 'config', now: now(), errors: l.errors }).session
-  restoredAskStopped = s.askStopped === true
-  askStopped = restoredAskStopped
+  sess.askStopped = s.askStopped === true
   return s
 }
 
@@ -1790,8 +1812,6 @@ async function projectInstalled($: Dollar): Promise<string[]> {
   }
 }
 
-/** Set once the question about the project's own skills was handled in this session. */
-let ownHandled = false
 const OWN_NOW = 'Set up now'
 const OWN_IGNORE = 'Ignore all here'
 const OWN_LATER = 'Later'
@@ -1803,7 +1823,7 @@ const OWN_LATER = 'Later'
  * Where no dialog opens, one notice names the count.
  */
 async function askOwnSkills($: Dollar, dialog: boolean): Promise<void> {
-  if (ownHandled) return
+  if (sess.ownHandled) return
   const { l, session } = await current($)
   if (session.paused || session.proposals.length || !l.setUp) return
   let repo: unknown
@@ -1813,10 +1833,10 @@ async function askOwnSkills($: Dollar, dialog: boolean): Promise<void> {
     return
   }
   if (!repo) return
-  ownHandled = true
-  const token = ++ownToken
-  ownActed = false
-  pendingSetUp = undefined
+  sess.ownHandled = true
+  const token = ++sess.ownToken
+  sess.ownActed = false
+  sess.pendingSetUp = undefined
   const home: string | undefined = await homeOf($)
   const uc = await userConfig($)
   if (!home || !uc) return
@@ -1858,22 +1878,16 @@ async function askOwnSkills($: Dollar, dialog: boolean): Promise<void> {
 
 /** The names line shows at most this many names. */
 const MAX_NAMES_LINE = 40
-/** Counts the project questions of this process; a late answer belongs to the question it was asked for. */
-let ownToken = 0
-/** Set once the current question was acted on, so a second answer cannot act again. */
-let ownActed = false
-/** A late `Set up now`: the round runs at the next turn end, where a dialog may open. */
-let pendingSetUp: { token: number; names: string[] } | undefined
 
 /** `Set up now` runs init's round for the names, `Ignore all here` writes them to `ignored`; anything else does nothing. */
 async function actOnOwnAnswer($: Dollar, l: Loaded, names: string[], answer: unknown): Promise<void> {
   if (answer === OWN_NOW) {
-    ownActed = true
+    sess.ownActed = true
     say($, l, await runInit($, l, names))
     return
   }
   if (answer !== OWN_IGNORE) return
-  ownActed = true
+  sess.ownActed = true
   const kept = names.slice(0, MAX_LIST)
   const r = await editUserFile($, (d) => {
     let config: unknown = d
@@ -1890,7 +1904,7 @@ async function actOnOwnAnswer($: Dollar, l: Loaded, names: string[], answer: unk
 
 /** An answer after the two-minute limit: acts only for the current question, once, while the root still has no block. */
 async function lateOwnAnswer($: Dollar, l: Loaded, names: string[], answer: unknown, token: number): Promise<void> {
-  if (token !== ownToken || ownActed || (answer !== OWN_NOW && answer !== OWN_IGNORE)) return
+  if (token !== sess.ownToken || sess.ownActed || (answer !== OWN_NOW && answer !== OWN_IGNORE)) return
   try {
     if ((await current($)).session.paused) {
       say($, l, 'Souffleur: Souffleur is paused; /souffleur init sets them up later.')
@@ -1899,11 +1913,11 @@ async function lateOwnAnswer($: Dollar, l: Loaded, names: string[], answer: unkn
     const left = await stillUnnamed($, l, names)
     if (!left.length) return
     if (answer === OWN_NOW) {
-      if (askStopped || noDialog) {
+      if (sess.askStopped || sess.noDialog) {
         say($, l, 'Souffleur: run /souffleur init in this project to set them up.')
         return
       }
-      pendingSetUp = { token, names: left }
+      sess.pendingSetUp = { token, names: left }
       say($, l, 'Souffleur: set-up starts at the next turn end.')
       return
     }
@@ -1930,14 +1944,14 @@ async function stillUnnamed($: Dollar, l: Loaded, names: string[]): Promise<stri
 
 /** At a turn end: runs the set-up a late `Set up now` asked for, if it still applies. True when it ran. */
 async function runPendingSetUp($: Dollar): Promise<boolean> {
-  const p = pendingSetUp
-  pendingSetUp = undefined
+  const p = sess.pendingSetUp
+  sess.pendingSetUp = undefined
   if (!p) return false
   const { l } = await current($)
   try {
     const left = await stillUnnamed($, l, p.names)
     if (!left.length) return false
-    ownActed = true
+    sess.ownActed = true
     say($, l, await runInit($, l, left))
   } catch (err) {
     say($, l, `Souffleur: could not act on your answer (${message(err)}). /souffleur init asks again.`)
@@ -1973,13 +1987,13 @@ function update($: Dollar, change: (l: Loaded, s: Session) => Session): Promise<
 
 /** The person declined a proposal or dismissed a dialog (never a failure or a timeout): kept in the session, so a reload does not forget it. */
 async function markStopped($: Dollar, flags: { proposals?: boolean; ask?: boolean }): Promise<void> {
-  if (flags.ask) askStopped = true
+  if (flags.ask) sess.askStopped = true
   await update($, (_l, s) => ({ ...s, ...(flags.proposals ? { proposalsStopped: true } : {}), ...(flags.ask ? { askStopped: true } : {}) }))
 }
 
 /** A prompt of the person ends the offer a notice made. Without an answer the proposal just stays queued: no stop. */
 function endOffer(): void {
-  shownHash = undefined
+  sess.shownHash = undefined
 }
 
 /** Applies the user's answer to one waiting proposal: writes after a yes, remembers a no, keeps the proposal when the write fails. */
@@ -2032,12 +2046,12 @@ async function commitAnswerNow($: Dollar, hash: string, label: string): Promise<
 
 /** Shows the first waiting proposal that no notice showed yet. A reply may answer only what was written to the transcript, so the offer is armed only then. */
 function noticeFirst($: Dollar, l: Loaded, session: Session): void {
-  const p = session.proposals.find((x) => !noticed.has(x.hash))
+  const p = session.proposals.find((x) => !sess.noticed.has(x.hash))
   // A session that takes no person prompt (`claude -p`) cannot be answered by a reply word: name the command.
   const form = !interactive && lastPromptKind === 'sdk' ? 'command' : 'reply'
   if (p === undefined || !say($, l, proposalNotice(p, form))) return
-  shownHash = p.hash
-  noticed.add(p.hash)
+  sess.shownHash = p.hash
+  sess.noticed.add(p.hash)
 }
 
 /** One dialog about the first waiting proposal. Returns the line to show, or undefined when nothing was asked or the dialog gave no answer. */
@@ -2045,13 +2059,13 @@ async function askFirst($: Dollar, atTurnEnd = false): Promise<string | undefine
   const { l, session } = await current($)
   // A proposal whose dialog timed out (at a turn end or in a typed command) is not asked again while that dialog is still open.
   const waiting = await withStoredDeclined($, session)
-  const q = nextQuestion({ ...waiting, proposals: waiting.proposals.filter((p) => !timedOutAsk.has(p.hash)) })
+  const q = nextQuestion({ ...waiting, proposals: waiting.proposals.filter((p) => !sess.timedOutAsk.has(p.hash)) })
   if (!q) return undefined
   if (!interactive && lastPromptKind === 'sdk') {
     // Nobody can answer a dialog in a headless run (Remote Control also reports not interactive, but its prompts are a person's), and a client that never answers would hold the turn end for two minutes per proposal.
     if (atTurnEnd) {
-      noDialog = true
-      askStopped = true
+      sess.noDialog = true
+      sess.askStopped = true
       noticeFirst($, l, session)
     }
     return undefined
@@ -2064,8 +2078,8 @@ async function askFirst($: Dollar, atTurnEnd = false): Promise<string | undefine
   } catch (err) {
     if (err instanceof TimedOut) {
       // Only this proposal falls back. The dialog stays open: a later tap still counts while the proposal waits.
-      timedOutAsk.add(q.hash)
-      asking.then((late) => lateAnswer($, q.hash, late), () => undefined).finally(() => timedOutAsk.delete(q.hash))
+      sess.timedOutAsk.add(q.hash)
+      asking.then((late) => lateAnswer($, q.hash, late), () => undefined).finally(() => sess.timedOutAsk.delete(q.hash))
       // A typed command answers for itself: no notice, no stop.
       if (!atTurnEnd) return ASK_TIMEOUT_LINE
       noticeFirst($, l, session)
@@ -2075,12 +2089,12 @@ async function askFirst($: Dollar, atTurnEnd = false): Promise<string | undefine
     } else if (atTurnEnd) {
       // A rejection that is no dismissal is not kept: show the proposal once and let a one-word reply answer it.
       // Only this process knows it: a session resumed in a client that can open a dialog asks again, and no stop is set.
-      noDialog = true
-      askStopped = true
+      sess.noDialog = true
+      sess.askStopped = true
       noticeFirst($, l, session)
     } else {
       // A dialog in a typed command that cannot open: the turn-end question still comes.
-      askAtTurnEnd = true
+      sess.askAtTurnEnd = true
     }
     return undefined
   }
@@ -2097,8 +2111,6 @@ class TimedOut extends Error {}
 const ASK_TIMEOUT_LINE = 'Souffleur: no answer within two minutes; the proposal stays queued. A late tap in the dialog still counts.'
 /** How the mod kit words the rejection of a dialog the person closed: `$.ui.ask: no answer (the dialog was dismissed)`. */
 const DISMISSED = /dismissed/i
-/** Proposals whose dialog timed out (turn end or typed command) and may still be answered. */
-const timedOutAsk = new Set<string>()
 
 /** A dialog answered after its timeout: counts only while the proposal still waits (a reply may have answered it first). */
 async function lateAnswer($: Dollar, hash: string, label: unknown): Promise<void> {
@@ -2106,8 +2118,8 @@ async function lateAnswer($: Dollar, hash: string, label: unknown): Promise<void
   try {
     const { session } = await current($)
     if (session.paused || !session.proposals.some((p) => p.hash === hash)) return
-    if (shownHash === hash) shownHash = undefined
-    askAtTurnEnd = true
+    if (sess.shownHash === hash) sess.shownHash = undefined
+    sess.askAtTurnEnd = true
     const line = await commitAnswer($, hash, label)
     try {
       $.ui.toast(line)
@@ -2124,8 +2136,8 @@ async function lateAnswer($: Dollar, hash: string, label: unknown): Promise<void
  * the prompt answers nothing. The shown proposal is forgotten by the first prompt of the person, whatever it says.
  */
 async function answerShown($: Dollar, text: string): Promise<string | undefined> {
-  const hash = shownHash
-  shownHash = undefined
+  const hash = sess.shownHash
+  sess.shownHash = undefined
   const verdict = parseReply(text)
   if (hash === undefined || verdict === undefined) return undefined
   const { l, session } = await current($)
@@ -2135,7 +2147,7 @@ async function answerShown($: Dollar, text: string): Promise<string | undefined>
   // By the full hash: the short id may name another waiting proposal.
   try {
     const line = await commitAnswer($, hash, verdict === 'accept' ? YES_EVERYWHERE : NO)
-    askAtTurnEnd = true // the next waiting proposal gets its question or notice at the next turn end
+    sess.askAtTurnEnd = true // the next waiting proposal gets its question or notice at the next turn end
     try {
       $.ui.toast(line)
     } catch {
@@ -2172,8 +2184,6 @@ async function propose($: Dollar, raw: unknown, from: string): Promise<{ status:
 
 // --- Learning from skill texts ---
 
-/** Skill versions whose read is under way in this process. */
-const reading = new Set<string>()
 const READ_TIMEOUT_MS = 30_000
 
 type LearnAction = Extract<Action, { kind: 'learn' }>
@@ -2203,11 +2213,11 @@ async function learnFrom($: Dollar, a: LearnAction): Promise<void> {
     }
     const text = fileText ?? a.text
     hash = skillHash(a.skill, text)
-    if (reading.has(hash)) {
+    if (sess.reading.has(hash)) {
       hash = undefined
       return
     }
-    reading.add(hash)
+    sess.reading.add(hash)
     const key = hashKey(hash)
     const l = await serial(async () => {
       const { l, session } = await current($)
@@ -2261,7 +2271,7 @@ async function learnFrom($: Dollar, a: LearnAction): Promise<void> {
       }
     }
   } finally {
-    if (hash !== undefined) reading.delete(hash)
+    if (hash !== undefined) sess.reading.delete(hash)
   }
 }
 
@@ -2352,7 +2362,7 @@ async function runReview($: Dollar): Promise<string> {
   const { session: rest } = await current($)
   const out = [...done]
   if (rest.proposals.length) {
-    out.push(done.length ? 'Still waiting:' : rest.proposals.some((p) => timedOutAsk.has(p.hash)) ? 'Waiting for your answer; a dialog for it is still open:' : 'Waiting for your answer, and no dialog can open here:', ...proposalLines(rest), 'Add one with /souffleur accept <id> (everywhere) or /souffleur accept <id> here (this project only).')
+    out.push(done.length ? 'Still waiting:' : rest.proposals.some((p) => sess.timedOutAsk.has(p.hash)) ? 'Waiting for your answer; a dialog for it is still open:' : 'Waiting for your answer, and no dialog can open here:', ...proposalLines(rest), 'Add one with /souffleur accept <id> (everywhere) or /souffleur accept <id> here (this project only).')
   }
   return out.join('\n')
 }
@@ -2465,18 +2475,16 @@ export const register: Register = (on) => {
     await syncClock($)
     await safe($, 'session.start', undefined, async () => {
       loaded = undefined
-      ownHandled = false
       lastBand = undefined
-      pendingSetUp = undefined
       backedUp = false // a session start is a fresh run: the first change saves a new backup
       const l = await getLoaded($)
       const id: string = await $.session.id()
+      resetSessionState(id)
       const version = (await $.session.version()).version
       const held: Session | undefined = (await $.state.get(REF)).value
       const stored = held?.id === id ? undefined : await $.store.get(`session:${id}`)
       const before = held?.id === id ? held : isSession(stored, id) ? stored : undefined
       let s: Session
-      restoredAskStopped = false
       if (before) {
         // Resume or reload: the ledger stays, what the config said last time does not.
         s = await resumedSession($, l, before, held?.id === id ? 'reload' : 'resume')
@@ -2537,12 +2545,6 @@ export const register: Register = (on) => {
     lastPromptKind = undefined
     lastPromptCommand = false
     personTurn = false
-    askStopped = restoredAskStopped
-    shownHash = undefined
-    noticed.clear()
-    timedOutAsk.clear()
-    noDialog = false
-    askAtTurnEnd = false
     proposeReady = false
     toolSeen = false
     silentRetried = false
@@ -2811,15 +2813,15 @@ export const register: Register = (on) => {
       // One check per person prompt: a later turn without its own prompt (a background completion) is not the person's.
       personTurn = false
     }
-    if (e.agentId === undefined && e.reason === 'answer' && (!askStopped || askAtTurnEnd || noDialog)) {
+    if (e.agentId === undefined && e.reason === 'answer' && (!sess.askStopped || sess.askAtTurnEnd || sess.noDialog)) {
       await safe($, 'turn.complete', undefined, async () => {
         if ((await current($)).session.paused) return
         // While an offer is armed no person prompt has ended it yet: a new notice would redirect the reply, and a new
         // dialog would add one more open question. The offer stays until a prompt of the person ends it.
-        if (shownHash !== undefined) return
-        askAtTurnEnd = false
-        if (pendingSetUp && !noDialog && (await runPendingSetUp($))) return
-        if (noDialog) {
+        if (sess.shownHash !== undefined) return
+        sess.askAtTurnEnd = false
+        if (sess.pendingSetUp && !sess.noDialog && (await runPendingSetUp($))) return
+        if (sess.noDialog) {
           // A dialog was tried and nobody can answer: no new attempt, only a notice for a proposal not shown yet.
           const { l, session } = await current($)
           noticeFirst($, l, session)
@@ -2828,7 +2830,7 @@ export const register: Register = (on) => {
         }
         const hadProposals = (await current($)).session.proposals.length > 0
         const line = await askFirst($, true)
-        if (!hadProposals && line === undefined && !noDialog && !askStopped) await askOwnSkills($, interactive || lastPromptKind !== 'sdk')
+        if (!hadProposals && line === undefined && !sess.noDialog && !sess.askStopped) await askOwnSkills($, interactive || lastPromptKind !== 'sdk')
         if (line !== undefined) {
           try {
             $.ui.toast(line)
@@ -2850,7 +2852,7 @@ export const register: Register = (on) => {
       if (verb0 === 'init' || verb0 === 'migrate') {
         const text = await safe($, `command.run.${verb0}`, undefined as string | undefined, async () => {
           loaded = undefined // read the files again: another session may have changed them
-          if (verb0 === 'init') pendingSetUp = undefined // init asks about these names itself
+          if (verb0 === 'init') sess.pendingSetUp = undefined // init asks about these names itself
           const { l } = await current($)
           return verb0 === 'init' ? runInit($, l) : runMigrate($, l)
         })
