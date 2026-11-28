@@ -71,6 +71,8 @@ type Opts = {
   holdLock?: boolean
   /** Every `mkdir` fails and makes nothing, as on a host without it. */
   noMkdir?: boolean
+  /** The first `mkdir` of the user file lock fails although no folder is there, as when a holder released in between. */
+  mkdirFailsOnce?: boolean
   /** Modification times `$.fs.stat` reports for folders. */
   dirMtime?: Record<string, number>
   /** `$.env.get('HOME')` answers nothing. */
@@ -234,6 +236,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
     }
     if (e.argv[0] === 'mkdir') {
       const dir = e.argv[e.argv.length - 1]!
+      if (opts.mkdirFailsOnce && dir.endsWith('/user-file.lock')) { opts.mkdirFailsOnce = false; return { value: { exitCode: 1, stdout: '', stderr: 'mkdir: File exists' } } as never }
       if (opts.noMkdir) return { value: { exitCode: 127, stdout: '', stderr: 'mkdir: not found' } } as never
       if (e.argv[1] === '-p') { dirs.add(dir); return { value: { exitCode: 0, stdout: '', stderr: '' } } as never }
       if (opts.holdLock && dir.endsWith('/update.lock')) return { value: { exitCode: 1, stdout: '', stderr: 'mkdir: File exists' } } as never
@@ -5749,9 +5752,37 @@ test('a host where mkdir does not work still writes the user file, with one debu
   expect(w.debugLogs.filter((l) => l.includes('user file lock')).length).toBeGreaterThan(0)
 })
 
-test('an edit that fails inside the lock still releases it and the next edit runs', async ($, on) => {
-  const w = world(on, { [USER_FILE]: BLOCKABLE }, { failWrite: /\.tmp-/ })
+test('an edit that fails inside the lock still releases it, and the next edit writes', async ($, on) => {
+  const opts: Opts = { failWrite: /\.tmp-/ }
+  const w = world(on, { [USER_FILE]: BLOCKABLE }, opts)
   await start($)
   expect(await run($, 'block writing-guide')).toMatch(/could not write/)
   expect(Object.keys(w.files).filter((f) => f.startsWith(USER_LOCK))).toEqual([])
+  delete opts.failWrite
+  expect(await run($, 'block terse:terse-mode')).toMatch(/terse:terse-mode blocked/)
+  expect(blockedIn(w)).toEqual(['terse:terse-mode'])
+})
+
+test('a mkdir that fails while the lock is gone again is retried: the edit still runs under the lock', async ($, on) => {
+  let underLock = false
+  let w!: World
+  w = world(on, { [USER_FILE]: BLOCKABLE }, { mkdirFailsOnce: true, onWrite: (p) => { if (/\.tmp-/.test(p)) underLock = USER_LOCK_OWNER in w.files } })
+  await start($)
+  expect(await run($, 'block writing-guide')).toMatch(/writing-guide blocked/)
+  expect(underLock).toBe(true)
+  expect(w.debugLogs.filter((l) => l.includes('user file lock'))).toEqual([])
+})
+
+test('a lock that cannot be made on a later attempt counts as held: no unlocked edit', async ($, on) => {
+  const opts: Opts = {}
+  const w = world(on, { [USER_FILE]: BLOCKABLE, ...lockedBy(T0 - 1000) }, opts)
+  await start($)
+  const pending = run($, 'block writing-guide')
+  await w.clock.advance(300)
+  delete w.files[USER_LOCK_OWNER]
+  opts.noMkdir = true
+  await w.clock.advance(3500)
+  expect(await pending).toMatch(/holds the lock/)
+  expect(userWrites(w).length).toBe(0)
+  expect(w.debugLogs.filter((l) => l.includes('user file lock'))).toEqual([])
 })

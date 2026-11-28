@@ -583,8 +583,14 @@ async function withLock<T>($: Dollar, name: string, label: string, staleMs: numb
   let made = await ok($, ['mkdir', lock])
   if (!made) {
     // A lock that cannot be made and is not there is a host problem (no mkdir, a data folder that cannot be created), not another session.
-    if (!(await exists(lock))) throw new Error(`could not create the ${label}`)
-    if (!(await stale())) return undefined
+    if (!(await exists(lock))) {
+      // The holder may have released between our mkdir and this check: try once more before calling it a host problem.
+      made = await ok($, ['mkdir', lock])
+      if (!made && !(await exists(lock))) throw new Error(`could not create the ${label}`)
+      if (!made) return undefined
+    } else if (!(await stale())) return undefined
+  }
+  if (!made) {
     // One session removes a stale lock: the one that makes the takeover folder.
     const take = `${lock}.takeover`
     if (!(await ok($, ['mkdir', take]))) {
@@ -1542,24 +1548,34 @@ function editUserFile(
   return run
 }
 
-/** Takes the user file lock, retrying every 100 ms for up to 3 s, and edits under it. Without a usable lock (no `mkdir`, no data folder) it edits without one. */
+/**
+ * Takes the user file lock, retrying every 100 ms until 3 s have passed on the wall clock, and edits under it. Only when the very first try finds
+ * that no lock can be made at all (no `mkdir`, no data folder) does it edit without one; on a later try the same error counts as a held lock.
+ */
 async function editUserFileLocked($: Dollar, change: (doc: unknown) => unknown, opts: { missing?: 'allow' | 'refuse' }): Promise<Edited> {
   let entered = false
   const edit = () => {
     entered = true
     return editUserFileOnce($, change, opts)
   }
-  for (let waited = 0; ; waited += USER_LOCK_RETRY_MS) {
+  const start = await wallNow($)
+  for (let first = true; ; first = false) {
     try {
       const got = await withLock($, 'user-file.lock', 'user file lock', USER_LOCK_STALE_MS, edit)
       if (got) return got.value
     } catch (err) {
       if (entered) throw err
-      $.ui.log(`user file lock unavailable, editing without it: ${message(err)}`, { to: 'debug' })
-      return editUserFileOnce($, change, opts)
+      if (first) {
+        $.ui.log(`user file lock unavailable, editing without it: ${message(err)}`, { to: 'debug' })
+        return editUserFileOnce($, change, opts)
+      }
     }
-    if (waited >= USER_LOCK_WAIT_MS) break
-    await $.clock.sleep(USER_LOCK_RETRY_MS)
+    if ((await wallNow($)) - start >= USER_LOCK_WAIT_MS) break
+    try {
+      await $.clock.sleep(USER_LOCK_RETRY_MS)
+    } catch {
+      break
+    }
   }
   const home: string | undefined = await homeOf($)
   const uc = await userConfig($)
