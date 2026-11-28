@@ -102,4 +102,4 @@ git clone --branch v0.2.9 https://github.com/r4KK4n/skill-souffleur ~/.claude/sk
 - [docs/updates.md](docs/updates.md): install kinds, updates, signed releases.
 - [docs/data.md](docs/data.md): what Souffleur reads, stores and costs, and its limits.
 - [docs/design.md](docs/design.md): how it works. [docs/background.md](docs/background.md): why it exists.
-- [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [LICENSE](LICENSE) (MIT, no warranty). Read `src/mod/register.ts` first if you want to see everything that touches your machine.
+- [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [LICENSE](LICENSE) (MIT, no warranty). Read `src/mod/register.ts` first: it is the adapter that touches your machine (files, processes, and the network for updates). `src/core/` holds the pure rules and has no such access.
