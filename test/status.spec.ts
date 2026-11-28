@@ -278,18 +278,6 @@ test('audience hints: an always-on skill without "for" gets a hint, one with "fo
   assert.doesNotMatch(t, /^gone: always on/m)
 })
 
-test('reply check: the chat skill row note counts violations; nothing without reply or without checked replies', () => {
-  const c: Config = { ...config, skills: { ...config.skills, 'terse:terse-mode': { always: true, for: 'chat', from: 'user', reply: { maxChars: 100 } } } }
-  const long = 'word '.repeat(60)
-  let s = fresh(c)
-  assert.doesNotMatch(renderTable(c, s, T1), /replies over the limit/)
-  for (const answer of [long, 'ok', long]) s = decide(c, s, { type: 'reply', now: T1, answer, fromCommand: false, aborted: false }).session
-  assert.match(renderTable(c, s, T1), /^- terse:terse-mode: 2 of 3 replies over the limit$/m)
-  const bare: Config = { ...c, skills: { ...c.skills, 'terse:terse-mode': { always: true, for: 'chat', from: 'user' } } }
-  assert.doesNotMatch(renderTable(bare, s, T1), /replies over the limit/)
-  assert.doesNotMatch(renderTable(config, fresh(), T1), /replies over the limit/)
-})
-
 test('the table shows failure counts after the error cleared', () => {
   const s: Session = { ...fresh(), failCounts: { 'tool.call': 3, classifier: 1 } }
   assert.match(renderTable(config, s, T1), /^Failures this session: tool\.call 3, classifier 1$/m)
@@ -340,12 +328,11 @@ test('status line with notices off still shows the cost', () => {
   assert.equal(statusLine(s, 'enforce', 0, quiet), '1 loaded · ~$0.03')
 })
 
-test('table shows the small-model line after the reply check, with the total', () => {
-  const s: Session = { ...fresh(), modelUse: used(), replyCheck: { total: 3, over: 1, sinceReminder: 0 } }
+test('table shows the small-model line, with the total', () => {
+  const s: Session = { ...fresh(), modelUse: used() }
   const total = used({ calls: 310, usd: 0.21 })
   const out = renderTable(config, s, T1, undefined, total)
   assert.match(out, /^Small model: 42 calls, 18\.3k in \/ 1\.2k out, about \$0\.03 this session \(total 310 calls, about \$0\.21\)\. Estimate at list price\.$/m)
-  assert.ok(out.indexOf('Small model:') > out.indexOf('Reply check:') || !out.includes('Reply check:'))
   assert.doesNotMatch(renderTable(config, fresh(), T1), /Small model/)
 })
 

@@ -1,5 +1,5 @@
 import { AUDIENCES } from './types.ts'
-import type { Audience, Config, Need, Match, Mode, NeedName, Note, Origin, ReplyLimits, Rule, SkillName, SkillRule } from './types.ts'
+import type { Audience, Config, Need, Match, Mode, NeedName, Note, Origin, Rule, SkillName, SkillRule } from './types.ts'
 
 type FileConfig = {
   mode?: Mode
@@ -213,25 +213,6 @@ function parseNeed(value: unknown, name: string, soft: (m: string) => void): Nee
   return isObject(value) ? { for: audience, what: text } : { for: 'work', what: text, noAudience: true }
 }
 
-/** `{ maxChars: 200-20000, headings: 0-20 }`, both optional; anything else is soft-rejected whole. */
-function parseReply(v: unknown, where: string, soft: (m: string) => void): ReplyLimits | undefined {
-  if (!isObject(v)) return void soft(`${where}: must be an object with maxChars and headings; ignored`)
-  const unknown = Object.keys(v).filter((k) => k !== 'maxChars' && k !== 'headings')
-  if (unknown.length) return void soft(`${where}: unknown key ${show(unknown[0])}; ignored`)
-  const out: ReplyLimits = {}
-  const int = (value: unknown, lo: number, hi: number): value is number => typeof value === 'number' && Number.isInteger(value) && value >= lo && value <= hi
-  if (v.maxChars !== undefined) {
-    if (!int(v.maxChars, 200, 20000)) return void soft(`${where}.maxChars: must be an integer from 200 to 20000; ignored`)
-    out.maxChars = v.maxChars
-  }
-  if (v.headings !== undefined) {
-    if (!int(v.headings, 0, 20)) return void soft(`${where}.headings: must be an integer from 0 to 20; ignored`)
-    out.headings = v.headings
-  }
-  if (out.maxChars === undefined && out.headings === undefined) return void soft(`${where}: needs maxChars or headings; ignored`)
-  return out
-}
-
 function parseRule(v: unknown, where: string, source: Origin, soft: (m: string) => void, name: string): Omit<SkillRule, 'from'> {
   check(isObject(v), where, 'must be an object')
   const obj = v as Record<string, unknown>
@@ -256,13 +237,7 @@ function parseRule(v: unknown, where: string, source: Origin, soft: (m: string) 
     else if (rule.always !== true) soft(`${name}.for: only for always-on skills; ignored`)
     else rule.for = obj.for
   }
-  if (obj.reply !== undefined) {
-    if (rule.always !== true || rule.for !== 'chat') soft(`${name}.reply: only for an always-on skill with "for": "chat"; ignored`)
-    else {
-      const reply = parseReply(obj.reply, `${name}.reply`, soft)
-      if (reply !== undefined) rule.reply = reply
-    }
-  }
+  if (obj.reply !== undefined) soft(`${name}.reply is no longer supported; ignored`)
   if (obj.notIn !== undefined) {
     const list = obj.notIn
     if (source === 'project') soft(`${name}.notIn is only allowed in the user config; ignored`)
@@ -611,15 +586,6 @@ export function parseConfig(
       blockedSkills: block.blockedSkills,
       own: [...block.ownSkills.filter((n) => Object.hasOwn(config.skills, n)), ...block.ownNotes.filter((id) => config.notes.some((n) => n.id === id)), ...block.ownRules.filter((id) => config.rules.some((r) => r.id === id))],
       ignored: block.ignored,
-    }
-  }
-  let replyOwner: string | undefined
-  for (const [name, rule] of Object.entries(config.skills)) {
-    if (rule.reply === undefined) continue
-    if (replyOwner === undefined) replyOwner = name
-    else {
-      errors.push(`${rule.from} config: ${name}.reply: only one chat skill can carry reply; ignored`)
-      delete rule.reply
     }
   }
   return { config, errors }

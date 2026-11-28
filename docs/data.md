@@ -26,7 +26,6 @@ Network:
 Costs:
 
 - Detecting needs costs two small-model calls on each prompt you type, by default run in parallel. With `"workCheck": "after"` call B runs only on code prompts, so most prompts cost one call; while call B is paused, a code prompt costs one too. Call A asks what the prompt will produce (budget 2.5 seconds, a `chat-reply` starts nothing) and call B picks a `work` need, awaited only for code work (budget 4 seconds). A call that runs out of time means no new need for that prompt. Needs from a project file that is not trusted are not classified.
-- In `enforce`, an answer held for breaking a `reply` limit costs one more call of your main model (the rewrite), mostly served from cache. It is not a small-model call and not in the `/souffleur` cost figure.
 - `/souffleur` shows the small-model calls, their tokens and an estimated cost at list price; the figure is an estimate, not a bill.
 - Reading a skill costs one small-model call of up to 30 seconds in the background, at most five per session.
 - A restored skill adds its full text to the context again. The restore request and the notes of one prompt stay under 10,000 characters together; skills that do not fit stay `not needed yet` or `stale` in `/souffleur` and are asked for on a later prompt.
