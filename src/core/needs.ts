@@ -33,7 +33,6 @@ export function clip(text: string, head = 1500, tail = 500): string {
  * `code-or-repo-work`; with `workCheck: 'after'` it starts only then, and its 4 s budget counts from its own start. A gets 2.5 s. A late, rejected, empty or unknown answer of A
  * fails the prompt; a failed B is reported as `bFailure` and fails nothing.
  */
-
 export async function classifyDeliverable(
   prompt: string,
   needs: Record<NeedName, Need>,
