@@ -1697,12 +1697,64 @@ test('turn end asks one question, and yes everywhere writes the rule and keeps e
   expect(denied.deny).toMatch(/dev-workflow/)
 })
 
-test('yes for this project writes where as the main repository root', async ($, on) => {
+test('yes for this project writes a rule into projects[main root] and no where', async ($, on) => {
   const w = world(on, { [USER_FILE]: ENFORCE }, { answers: ['Yes, this project only'], repoRoot: '/work/main' })
   await start($)
   await propose($, AGENT_RULE)
   await turnEnd($)
-  expect(userFile(w).rules[0].where).toBe('/work/main')
+  const doc = userFile(w)
+  expect(doc.rules).toBeUndefined()
+  expect(doc.projects['/work/main'].rules.length).toBe(1)
+  expect(doc.projects['/work/main'].rules[0].skill).toBe('dev-workflow')
+  expect('where' in doc.projects['/work/main'].rules[0]).toBe(false)
+  expect(w.toasts.join('\n')).toMatch(/added rule .* to .* for \/work\/main/)
+  // The reload keeps it and `project` lists it as this project's own.
+  expect(await run($, 'project')).toMatch(/This project only: rule /)
+})
+
+test('yes for this project writes a note into projects[main root], next to an own skill and need', async ($, on) => {
+  const file = JSON.stringify({ mode: 'enforce', skills: {}, needs: {}, projects: { '/work/main': { skills: { own: { always: true } }, needs: { ui: { what: 'UI work' } } } } })
+  const w = world(on, { [USER_FILE]: file }, { answers: ['Yes, this project only'], repoRoot: '/work/main' })
+  await start($)
+  await propose($, { kind: 'note', text: 'Answer in German.' })
+  await turnEnd($)
+  const block = userFile(w).projects['/work/main']
+  expect(userFile(w).notes).toBeUndefined()
+  expect(block.notes.length).toBe(1)
+  expect('where' in block.notes[0]).toBe(false)
+  expect(block.skills).toEqual({ own: { always: true } })
+  expect(block.needs).toEqual({ ui: { what: 'UI work' } })
+  expect(await run($, 'project')).toMatch(/This project only: skill own, note /)
+})
+
+test('accept <id> here writes into the project block too', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', repoRoot: '/work/main' })
+  await start($)
+  const id = idOf(await propose($, note('Answer in German.')))
+  await run($, `accept ${id} here`)
+  expect(userFile(w).notes).toBeUndefined()
+  expect(userFile(w).projects['/work/main'].notes[0].id).toBe(id)
+})
+
+test('a project-only proposal that reuses a standard id is refused, nothing is written and it stays queued', async ($, on) => {
+  const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', repoRoot: '/work/main' })
+  await start($)
+  const id = idOf(await propose($, note('Keep it short.')))
+  w.files[USER_FILE] = JSON.stringify({ mode: 'enforce', skills: {}, needs: {}, notes: [{ id, text: 'Standard text.' }] })
+  const before = w.writes.length
+  const out = await run($, `accept ${id} here`)
+  expect(out).toMatch(/already in the standard; block it first or rename/)
+  expect(out).toMatch(/stays queued/)
+  expect(w.writes.length).toBe(before)
+  expect(userFile(w).projects).toBeUndefined()
+})
+
+test('an existing top-level where entry still applies', async ($, on) => {
+  const file = JSON.stringify({ mode: 'enforce', skills: {}, needs: {}, rules: [{ id: 'r-old', before: { tools: ['Agent'] }, skill: 'dev-workflow', where: '/work/main' }] })
+  world(on, { [USER_FILE]: file }, { repoRoot: '/work/main' })
+  await start($)
+  const denied = await $.tool.call({ tool: 'Agent', prompt: 'x' } as never)
+  expect(denied.deny).toMatch(/dev-workflow/)
 })
 
 test('no declines it for good: the hash is stored and the proposal is not queued again', async ($, on) => {
@@ -1766,7 +1818,8 @@ test('/souffleur accept writes in text mode, and "here" scopes it to the project
   const id = /Queued as (\S+)\./.exec(String(r1.result))![1]!
   expect(await run($, 'accept nope')).toMatch(/no proposal nope/)
   expect(await run($, `accept ${id} here`)).toMatch(/added rule/)
-  expect(userFile(w).rules[0].where).toBe('/work/main')
+  expect(userFile(w).rules).toBeUndefined()
+  expect(userFile(w).projects['/work/main'].rules[0].skill).toBe('dev-workflow')
   expect(await run($, 'review')).toMatch(/no proposals/)
 })
 
@@ -1921,7 +1974,8 @@ test('accept takes only here or project as a second word', async ($, on) => {
   expect(await run($, `accept ${id} banana`)).toMatch(/Usage: \/souffleur accept/)
   expect(w.writes.length).toBe(0)
   expect(await run($, `accept ${id} project`)).toMatch(/added note/)
-  expect(userFile(w).notes[0].where).toBe('/work/main')
+  expect(userFile(w).notes).toBeUndefined()
+  expect(userFile(w).projects['/work/main'].notes[0].id).toBe(id)
 })
 
 test('decline records the hash like No, and it survives a new session id through the store', async ($, on) => {

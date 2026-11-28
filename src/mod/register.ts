@@ -1945,15 +1945,17 @@ async function runPendingSetUp($: Dollar): Promise<boolean> {
 /**
  * Adds one entry to the user file through `editUserFile`: write only now (the caller has the user's yes), keep every other key. Returns the user-facing line.
  */
-async function writeEntry($: Dollar, kind: 'rule' | 'note', entry: Rule | Note): Promise<{ ok: boolean; text: string; wrote?: boolean }> {
+async function writeEntry($: Dollar, kind: 'rule' | 'note', entry: Rule | Note, project?: string): Promise<{ ok: boolean; text: string; wrote?: boolean }> {
+  let keep = false
   const e = await editUserFile($, (doc) => {
-    const r = addEntry(doc, kind, entry)
+    const r = addEntry(doc, kind, entry, project)
+    keep = r.keep === true
     return r.note ? new Refusal(r.note) : r.config
   }, { missing: 'allow' })
-  if (!e.ok) return { ok: e.kind === 'refused', text: e.text }
+  if (!e.ok) return { ok: e.kind === 'refused' && !keep, text: e.text }
   const home: string | undefined = await homeOf($)
   const uc = await userConfig($)
-  return { ok: true, wrote: true, text: `added ${kind} ${entry.id} to ${shownPath(home, uc?.path ?? '~/.claude/souffleur.json')}${entry.where === undefined ? '' : ` for ${entry.where}`}` }
+  return { ok: true, wrote: true, text: `added ${kind} ${entry.id} to ${shownPath(home, uc?.path ?? '~/.claude/souffleur.json')}${project === undefined ? '' : ` for ${project}`}` }
 }
 
 /** The session after a change the core has no event for: read, change, store. */
@@ -1990,7 +1992,7 @@ async function commitAnswerNow($: Dollar, hash: string, label: string): Promise<
   if (r.write) {
     let w: { ok: boolean; text: string; wrote?: boolean }
     try {
-      w = await writeEntry($, r.write.kind, r.write.entry)
+      w = await writeEntry($, r.write.kind, r.write.entry, r.write.project)
     } catch (err) {
       w = { ok: false, text: `writing failed (${scrub(await homeOf($), message(err))}), so nothing was written` }
     }

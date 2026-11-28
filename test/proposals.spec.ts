@@ -79,10 +79,11 @@ test('yes everywhere writes rule without where', () => {
   assert.deepEqual(r.session.proposals, [])
 })
 
-test('yes project writes where', () => {
+test('yes project returns the root to write into and no where', () => {
   const s = enqueue(config, fresh(), prop(ruleRaw('dev-workflow'))).session
   const r = answer(config, s, s.proposals[0]!.hash, 'Yes, this project only', '/work/a')
-  assert.equal((r.write!.entry as Rule).where, '/work/a')
+  assert.equal(r.write!.project, '/work/a')
+  assert.equal('where' in r.write!.entry, false)
 })
 
 test('a confirmed note without need is sent once in the next context', () => {
@@ -106,13 +107,28 @@ test('other text yields revise request in next context', () => {
 test('addEntry keeps every other key and refuses a taken id', () => {
   const doc = { mode: 'enforce', skills: { a: { always: true } }, trustProjects: ['/w'] }
   const entry: Rule = { id: 'r1', before: { tools: ['Agent'] }, skill: 's', source: 'slip' }
-  const r = addEntry(doc, 'rule', entry, '/work/a')
-  assert.deepEqual((r.config as typeof doc & { rules: Rule[] }).rules, [{ ...entry, where: '/work/a' }])
+  const r = addEntry(doc, 'rule', entry)
+  assert.deepEqual((r.config as typeof doc & { rules: Rule[] }).rules, [entry])
   assert.equal((r.config as typeof doc).mode, 'enforce')
   assert.deepEqual((r.config as typeof doc).trustProjects, ['/w'])
   assert.deepEqual(doc, { mode: 'enforce', skills: { a: { always: true } }, trustProjects: ['/w'] }, 'input untouched')
   assert.match(addEntry(r.config, 'rule', entry).note ?? '', /already/)
   assert.deepEqual(addEntry(undefined, 'note', { id: 'n', text: 'x', source: 'user' }).config, { notes: [{ id: 'n', text: 'x', source: 'user' }] })
+})
+
+test('addEntry with a root writes into projects[root], keeps the block and refuses a standard id', () => {
+  const entry: Rule = { id: 'r1', before: { tools: ['Agent'] }, skill: 's', source: 'slip' }
+  const doc = { notes: [{ id: 'n-std', text: 'x' }], projects: { '/work/a/': { block: ['n-std'], skills: { own: { always: true } } } } }
+  const r = addEntry(doc, 'rule', entry, '/work/a')
+  const cfg = r.config as { rules?: unknown; projects: Record<string, Record<string, unknown>> }
+  assert.equal(cfg.rules, undefined)
+  assert.deepEqual(cfg.projects['/work/a/']!.rules, [entry])
+  assert.deepEqual(cfg.projects['/work/a/']!.skills, { own: { always: true } })
+  assert.equal(addEntry(doc, 'note', { id: 'n-std', text: 'y', source: 'user' }, '/work/a').note, undefined, 'blocked first: allowed')
+  const std = addEntry({ rules: [entry] }, 'rule', entry, '/work/a')
+  assert.match(std.note ?? '', /already in the standard; block it first or rename/)
+  assert.deepEqual(std.config, { rules: [entry] })
+  assert.match(addEntry(r.config, 'rule', entry, '/work/a').note ?? '', /already in the block/)
 })
 
 test('parseShaped reads the small model answer, tolerates noise, falls back to a note', () => {

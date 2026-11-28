@@ -1,4 +1,4 @@
-import { checkEntry, normRoot } from './config.ts'
+import { MAX_LIST, checkEntry, normRoot } from './config.ts'
 import type { Session } from './decide.ts'
 import { describeNote, describeRule } from './rules.ts'
 import type { Config, Need, Note, Rule } from './types.ts'
@@ -103,11 +103,11 @@ export const findProposal = (s: Session, id: string): Proposal | undefined => s.
 const clip = (text: string) => (text.length > 200 ? `${text.slice(0, 200)}...` : text)
 
 /**
- * Applies the user's answer. A yes returns the entry to write (with `where` for the project answer and the root known)
+ * Applies the user's answer. A yes returns the entry to write (with `project` set to the root for the project answer)
  * and removes the proposal; a confirmed note without `need` is also sent once in the next context. `No` remembers the hash.
  * Any other text asks the model to revise the proposal. An empty answer (a dismissed dialog) changes nothing.
  */
-export function answer(config: Config, s: Session, hash: string, label: string, root?: string): { session: Session; write?: { kind: 'rule' | 'note'; entry: Rule | Note }; revise?: string; note?: string } {
+export function answer(config: Config, s: Session, hash: string, label: string, root?: string): { session: Session; write?: { kind: 'rule' | 'note'; entry: Rule | Note; project?: string }; revise?: string; note?: string } {
   void config
   const p = s.proposals.find((q) => q.hash === hash)
   if (p === undefined || label.trim() === '') return { session: s }
@@ -115,9 +115,9 @@ export function answer(config: Config, s: Session, hash: string, label: string, 
   if (label === NO) return { session: { ...s, proposals: rest, declined: [...s.declined, hash] } }
   if (label === YES_EVERYWHERE || label === YES_PROJECT) {
     if (label === YES_PROJECT && root === undefined) return { session: s, note: 'The project folder is unknown, so nothing was added.' }
-    const entry = label === YES_PROJECT ? { ...p.entry, where: normRoot(root!) } : { ...p.entry }
+    const entry = { ...p.entry }
     const fresh = p.kind === 'note' && (entry as Note).need === undefined ? [...s.freshNotes, entry.id] : s.freshNotes
-    return { session: { ...s, proposals: rest, freshNotes: fresh }, write: { kind: p.kind, entry } }
+    return { session: { ...s, proposals: rest, freshNotes: fresh }, write: { kind: p.kind, entry, ...(label === YES_PROJECT ? { project: normRoot(root!) } : {}) } }
   }
   if (p.from.startsWith('skill:')) {
     const revise = `Souffleur: the user answered proposal ${p.entry.id} with a request to revise it: ${clip(label.trim())}. Call souffleur_propose again with the revised ${p.kind}.`
@@ -129,18 +129,36 @@ export function answer(config: Config, s: Session, hash: string, label: string, 
 
 const isDoc = (v: unknown): v is Record<string, unknown> => isObject(v)
 
-/** The user file with one entry added; every other key stays. A taken id leaves the file as it was and says so. */
-export function addEntry(doc: unknown, kind: 'rule' | 'note', entry: Rule | Note, where?: string): { config: unknown; note?: string } {
+/**
+ * The user file with one entry added; every other key stays. A taken id leaves the file as it was and says so.
+ * `keep` marks a refusal after which the proposal stays queued. With `root` the entry goes into `projects[root]` (the project block), unless the standard keeps the id after the block.
+ */
+export function addEntry(doc: unknown, kind: 'rule' | 'note', entry: Rule | Note, root?: string): { config: unknown; note?: string; keep?: true } {
   const key = kind === 'rule' ? 'rules' : 'notes'
   const base: Record<string, unknown> = isDoc(doc) ? { ...doc } : {}
-  const list: unknown[] = Array.isArray(base[key]) ? [...(base[key] as unknown[])] : []
-  if (list.some((x) => isObject(x) && x.id === entry.id)) return { config: doc, note: `${entry.id} is already in the file.` }
-  if (where === undefined && isObject(base.projects)) {
-    const used = Object.values(base.projects).some((b) => isObject(b) && ['notes', 'rules'].some((k) => Array.isArray(b[k]) && (b[k] as unknown[]).some((x) => isObject(x) && x.id === entry.id)))
-    if (used) return { config: doc, note: `${entry.id} is already used by a project block, so nothing was added. Rename it or remove it there.` }
+  const has = (list: unknown) => Array.isArray(list) && list.some((x) => isObject(x) && x.id === entry.id)
+  if (root === undefined) {
+    if (has(base[key])) return { config: doc, note: `${entry.id} is already in the file.` }
+    if (isObject(base.projects)) {
+      const used = Object.values(base.projects).some((b) => isObject(b) && ['notes', 'rules'].some((k) => has(b[k])))
+      if (used) return { config: doc, note: `${entry.id} is already used by a project block, so nothing was added. Rename it or remove it there.` }
+    }
+    base[key] = [...(Array.isArray(base[key]) ? (base[key] as unknown[]) : []), entry]
+    return { config: base }
   }
-  list.push(where === undefined ? entry : { ...entry, where })
-  base[key] = list
+  if (base.projects !== undefined && !isObject(base.projects)) return { config: doc, note: '"projects" is not an object, so nothing was added.', keep: true }
+  const projects: Record<string, unknown> = { ...(base.projects as Record<string, unknown> | undefined) }
+  const at = Object.keys(projects).find((k) => normRoot(k) === root) ?? root
+  if (projects[at] !== undefined && !isObject(projects[at])) return { config: doc, note: `the block for ${root} is not an object, so nothing was added.`, keep: true }
+  const block: Record<string, unknown> = { ...(projects[at] as Record<string, unknown> | undefined) }
+  const names = Array.isArray(block.block) ? block.block : []
+  if (has(base[key]) && !names.includes(entry.id)) return { config: doc, note: `projects["${root}"].${key}.${entry.id}: already in the standard; block it first or rename`, keep: true }
+  if (has(block[key])) return { config: doc, note: `${entry.id} is already in the block of ${root}.` }
+  const own: unknown[] = Array.isArray(block[key]) ? [...(block[key] as unknown[])] : []
+  if (own.length >= MAX_LIST) return { config: doc, note: `the block of ${root} already has ${MAX_LIST} ${key}, so nothing was added.`, keep: true }
+  block[key] = [...own, entry]
+  projects[at] = block
+  base.projects = projects
   return { config: base }
 }
 
