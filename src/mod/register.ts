@@ -1,5 +1,5 @@
 import { atom, read, update as updateAtom } from 'claude-code'
-import type { Register, RenderElement } from 'claude-code'
+import type { EngineInterface, ModelCompleteRequest, ModelCompleteResult, Register, RenderElement } from 'claude-code'
 import { MAX_LIST, MAX_PROJECT_ROOTS, excludedIn, isTrustedRoot, normRoot, parseConfig } from '../core/config.ts'
 import { decide, initSession, normalizeSession, SPAWN_PREFIX } from '../core/decide.ts'
 import { MIGRATE_INTRO, describeHook, findHookOverlaps, findPassages, hookQuestion, hookSteps, isGuess, migrateSteps, passageLines, removeHook } from '../core/migrate.ts'
@@ -24,8 +24,8 @@ import type { UpdateInfo } from '../core/status.ts'
 import { compareVersions } from '../core/version.ts'
 import { isFromUser, isUserOrigin, presentArgs, toolFields } from './map.ts'
 
-// The hooks' `$` is the engine interface; the adapter calls only documented members.
-type Dollar = any
+// The hooks' `$` is the engine interface; the adapter calls only documented members. The type resolves only under tsconfig.mod.json (npm run typecheck:mod).
+type Dollar = EngineInterface
 /** `root` is the main repository root (what `where` names), `tree` the session's own working tree (what globs are relative to). */
 type Loaded = { config: Config; errors: string[]; root: string; tree: string; cwd: string; setUp: boolean; legacy?: string }
 
@@ -777,7 +777,7 @@ async function countCall($: Dollar, model: string, usage: UsageFields | undefine
  * answer. The total is read, changed and written (best effort: another process may add a call in between, and that
  * call is lost). A failure to count never fails the caller.
  */
-async function callModel($: Dollar, request: { model: string; [key: string]: unknown }): Promise<any> {
+async function callModel($: Dollar, request: ModelCompleteRequest): Promise<ModelCompleteResult> {
   const r = await $.model.complete(request)
   void countCall($, request.model, r?.isAnswered === true ? r.usage : undefined)
   return r
@@ -840,7 +840,7 @@ async function listedSkills($: Dollar): Promise<string[] | undefined> {
   try {
     const skills = (await $.session.usage({ breakdown: 'summary' }))?.context?.breakdown?.skills
     const listed: { name: string }[] | undefined = skills?.skillFrontmatter
-    if (!listed?.length) return undefined
+    if (!skills || !listed?.length) return undefined
     if (typeof skills.totalSkills === 'number' && typeof skills.includedSkills === 'number' && skills.includedSkills < skills.totalSkills) return undefined
     return [...new Set(listed.map((x) => x.name))]
   } catch {
@@ -1520,7 +1520,10 @@ let backedUp = false
 
 /** What a `change` returns to stop an edit: the text is the answer, and nothing is written. */
 class Refusal {
-  constructor(readonly text: string) {}
+  readonly text: string
+  constructor(text: string) {
+    this.text = text
+  }
 }
 type EditFailure = { ok: false; kind: 'home' | 'read' | 'missing' | 'json' | 'problem' | 'refused' | 'changed' | 'write'; detail: string; text: string }
 type Edited = { ok: true; wrote: boolean } | EditFailure
@@ -1633,7 +1636,7 @@ async function editUserFileOnce(
     }
     // Read once more right before the move: another session or the user may have saved the file since. Then apply the change to what is there now.
     const again = await readState($, path, home)
-    if (again.kind !== st.kind || (again.kind === 'ok' && st.kind === 'ok' && again.text !== st.text) || again.kind === 'error') {
+    if (again.kind !== st.kind || (again.kind === 'ok' && st.kind === 'ok' && again.text !== st.text)) {
       await dropTmp()
       continue
     }
@@ -1779,7 +1782,7 @@ async function projectInstalled($: Dollar): Promise<string[]> {
   try {
     const skills = (await $.session.usage({ breakdown: 'summary' }))?.context?.breakdown?.skills
     const listed: { name: string; source?: string }[] | undefined = skills?.skillFrontmatter
-    if (!listed?.length) return []
+    if (!skills || !listed?.length) return []
     if (typeof skills.totalSkills === 'number' && typeof skills.includedSkills === 'number' && skills.includedSkills < skills.totalSkills) return []
     return [...new Set(listed.filter((x) => x.source === 'projectSettings' || x.source === 'project').map((x) => x.name))]
   } catch {

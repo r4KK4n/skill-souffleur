@@ -20,6 +20,8 @@ claude plugin test .
 
 `npm test` runs only the core tests in `test/`. The adapter tests in `src/mod/register.test.ts` need the `claude` binary and run with `npm run test:mod`, which is `claude plugin test .`; without `claude` on your PATH you run only the core half. `npm test` and `npm run typecheck` need no login. The two `claude plugin` commands need Claude Code (the version named in `VERIFIED_UP_TO` in `src/core/version.ts`) and no login either. Run them before you push a change to `src/mod/`.
 
+`npm run typecheck:mod` checks `src/mod/` against the mod API types of the installed Claude Code. Claude Code does not ship those types in its npm package (the file is `claude-code.d.ts`), so CI cannot run this check and it skips itself with a one-line note when it finds no file. To get the file, open a Claude Code session of the version you check against and load the `plugin-authoring` skill; Claude Code then writes it under `<tmp>/claude-<uid>/bundled-skills/<version>/`, where the script looks. You can also point `CLAUDE_MOD_TYPES` at a copy. Run it before a pull request that touches `src/mod/` and after you bump the verified Claude Code version. The script links the file into `.mod-types/`, which git ignores; do not commit it.
+
 ## Pull requests
 
 - Branch from `main` and keep one change per pull request.

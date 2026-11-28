@@ -1,11 +1,17 @@
 import { expect, mock, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
 import { PLUGIN_VERSION } from './version.ts'
-import type { On } from 'claude-code'
+import type { CommandRunInput, On, PromptSubmitInput, SessionCompactInput } from 'claude-code'
 import { decide, initSession } from '../core/decide.ts'
 import { parseConfig } from '../core/config.ts'
 import { clip } from '../core/needs.ts'
 import { makeProposal } from '../core/proposals.ts'
 import { hashKey, skillHash } from '../core/learn.ts'
+
+// The tests send deliberately partial inputs (only what the mod reads); the engine fills in the rest. These helpers hold the casts.
+const submit = ($: Engine, input: Pick<PromptSubmitInput, 'text'> & Partial<PromptSubmitInput>) => $.prompt.submit(input as PromptSubmitInput)
+const compact = ($: Engine, input: Pick<SessionCompactInput, 'trigger'> & Partial<SessionCompactInput>) => $.session.compact(input as SessionCompactInput)
+const runCommand = ($: Engine, input: Pick<CommandRunInput, 'command' | 'args'> & Partial<CommandRunInput>) => $.command.run(input as CommandRunInput)
 
 /** The fake clock of the world the running test built; `settle` flushes work the mod left detached. */
 let fakeClock: { settle: () => Promise<void>; advance: (ms: number) => Promise<void> }
@@ -382,7 +388,7 @@ const start = ($: any) => $.session.start({ cwd: '/work/proj', surface: 'termina
 const skillLoaded = ($: any, skill: string) => $.skill.prompt({ skill, text: 'x', len: 1, head: 'x', tail: 'x' })
 const agentRuns = ($: any, agentId: string) => $.turn.start({ text: '', turnId: `t-${agentId}`, agentId })
 const agentEnds = ($: any, agentId: string) => turnEnd($, { agentId, turnId: `t-${agentId}` })
-const table = async ($: any) => (await $.command.run({ command: 'souffleur', args: '' })).text as string
+const table = async ($: any) => (await runCommand($, { command: 'souffleur', args: '' })).text as string
 
 const ALWAYS = JSON.stringify({ skills: { 'writing-guide': { always: true } } })
 const UI = JSON.stringify({
@@ -394,7 +400,7 @@ const UI = JSON.stringify({
 test('prompt from composer gets a context block naming missing always skills', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS })
   await start($)
-  const r = await $.prompt.submit({ text: 'hello' })
+  const r = await submit($, { text: 'hello' })
   expect(r.context?.join('\n')).toMatch(/writing-guide/)
   expect(w.seen.prompts.length).toBe(1)
 })
@@ -402,7 +408,7 @@ test('prompt from composer gets a context block naming missing always skills', a
 test('prompt with e.command set is passed through unchanged', async ($, on) => {
   world(on, { [USER_FILE]: ALWAYS })
   await start($)
-  const r = await $.prompt.submit({ text: '/compact', command: { name: 'compact', args: '' } } as never)
+  const r = await submit($, { text: '/compact', command: { name: 'compact', args: '' } } as never)
   expect(r.context).toBe(undefined)
   expect(r.text).toBe('/compact')
 })
@@ -410,7 +416,7 @@ test('prompt with e.command set is passed through unchanged', async ($, on) => {
 test('Write to x.html is denied while ui-checklist is needed and not loaded', async ($, on) => {
   world(on, { [USER_FILE]: UI }, { classify: 'match' })
   await start($)
-  await $.prompt.submit({ text: 'build me a login screen' })
+  await submit($, { text: 'build me a login screen' })
   const r = await $.tool.call({ tool: 'Write', file_path: '/work/proj/x.html', content: '' } as never)
   expect(r.deny).toMatch(/ui-checklist/)
   await skillLoaded($, 'ui-checklist')
@@ -421,7 +427,7 @@ test('Write to x.html is denied while ui-checklist is needed and not loaded', as
 test('observe mode: Write to x.html passes although ui-checklist is missing', async ($, on) => {
   world(on, { [USER_FILE]: UI.replace('enforce', 'observe') }, { classify: 'match' })
   await start($)
-  await $.prompt.submit({ text: 'build me a login screen' })
+  await submit($, { text: 'build me a login screen' })
   const r = await $.tool.call({ tool: 'Write', file_path: '/work/proj/x.html', content: '' } as never)
   expect(r.deny).toBe(undefined)
   expect(await table($)).toMatch(/Would have denied/)
@@ -458,7 +464,7 @@ test('a hook error passes the event through and shows degraded', async ($, on) =
   })
   await start($)
   fail = true
-  const r = await $.prompt.submit({ text: 'hello there' })
+  const r = await submit($, { text: 'hello there' })
   expect(r.text).toBe('hello there')
   expect(w.statuses.at(-1)).toMatch(/^\d\d:\d\d · degraded, see \/souffleur$/)
 })
@@ -480,9 +486,9 @@ test('a hook that works again clears its error and logs back to normal', async (
   })
   await start($)
   fail = true
-  await $.prompt.submit({ text: 'hello there' })
+  await submit($, { text: 'hello there' })
   expect(w.statuses.at(-1)).toMatch(/^\d\d:\d\d · degraded, see \/souffleur$/)
-  await $.prompt.submit({ text: 'and again' })
+  await submit($, { text: 'and again' })
   expect(w.statuses.at(-1)).not.toMatch(/degraded/)
   expect(w.logs).toContain('Souffleur: back to normal.')
 })
@@ -504,7 +510,7 @@ test('hook A error survives hook B success', async ($, on) => {
   })
   await start($)
   fail = true
-  await $.prompt.submit({ text: 'hello there' }) // prompt.submit fails
+  await submit($, { text: 'hello there' }) // prompt.submit fails
   expect(w.statuses.at(-1)).toMatch(/^\d\d:\d\d · degraded, see \/souffleur$/)
   await $.tool.call({ tool: 'Read', path: 'a.txt' } as never) // tool.call works
   expect(w.statuses.at(-1)).toMatch(/^\d\d:\d\d · degraded, see \/souffleur$/)
@@ -546,7 +552,7 @@ test('session restored from $.store when $.state is empty', async ($, on) => {
   world(on, { [USER_FILE]: ALWAYS }, { stored: { 'session:s1': first } })
   await start($)
   expect(await table($)).toMatch(/writing-guide \| loaded/)
-  const r = await $.prompt.submit({ text: 'carry on' })
+  const r = await submit($, { text: 'carry on' })
   expect(r.context).toBe(undefined)
 })
 
@@ -582,8 +588,8 @@ test('compaction marks the skill stale and the next prompt asks for it again', a
   world(on, { [USER_FILE]: ALWAYS })
   await start($)
   await skillLoaded($, 'writing-guide')
-  await $.session.compact({ trigger: 'manual' })
-  const r = await $.prompt.submit({ text: 'after compact' })
+  await compact($, { trigger: 'manual' })
+  const r = await submit($, { text: 'after compact' })
   expect(r.context?.join('\n')).toMatch(/writing-guide/)
 })
 
@@ -591,8 +597,8 @@ test('a skipped compaction leaves the ledger alone', async ($, on) => {
   world(on, { [USER_FILE]: ALWAYS }, { skipCompact: true })
   await start($)
   await skillLoaded($, 'writing-guide')
-  await $.session.compact({ trigger: 'manual' })
-  const r = await $.prompt.submit({ text: 'after skip' })
+  await compact($, { trigger: 'manual' })
+  const r = await submit($, { text: 'after skip' })
   expect(r.context).toBe(undefined)
 })
 
@@ -615,7 +621,7 @@ test('a background agent loads a skill after its Agent call returned: not main, 
   world(on, { [USER_FILE]: UI }, { classify: 'match' })
   on('tool.call', { tool: 'Agent' }, () => ({ result: {} }))
   await start($)
-  await $.prompt.submit({ text: 'build me a login screen' })
+  await submit($, { text: 'build me a login screen' })
   await $.tool.call({ tool: 'Agent', prompt: 'x', description: 'd', subagent_type: 'general-purpose', run_in_background: true } as never)
   await agentRuns($, 'a1')
   await skillLoaded($, 'ui-checklist')
@@ -627,7 +633,7 @@ test('after the agent run ends a load counts for main again', async ($, on) => {
   world(on, { [USER_FILE]: UI }, { classify: 'match' })
   on('tool.call', { tool: 'Agent' }, () => ({ result: {} }))
   await start($)
-  await $.prompt.submit({ text: 'build me a login screen' })
+  await submit($, { text: 'build me a login screen' })
   await $.tool.call({ tool: 'Agent', prompt: 'x', description: 'd', subagent_type: 'general-purpose' } as never)
   await agentRuns($, 'a1')
   await agentEnds($, 'a1')
@@ -639,7 +645,7 @@ test('after the agent run ends a load counts for main again', async ($, on) => {
 test('a main Skill call counts for main while an agent runs', async ($, on) => {
   world(on, { [USER_FILE]: UI }, { classify: 'match' })
   await start($)
-  await $.prompt.submit({ text: 'build me a login screen' })
+  await submit($, { text: 'build me a login screen' })
   await agentRuns($, 'a1')
   await $.tool.call({ tool: 'Skill', skill: 'ui-checklist' } as never)
   await skillLoaded($, 'ui-checklist')
@@ -652,7 +658,7 @@ test('a failed Agent tool call does not end a run that is live', async ($, on) =
     throw new Error('launch failed')
   })
   await start($)
-  await $.prompt.submit({ text: 'build me a login screen' })
+  await submit($, { text: 'build me a login screen' })
   await agentRuns($, 'a1')
   await $.tool.call({ tool: 'Agent', prompt: 'x', description: 'd', subagent_type: 'general-purpose' } as never).catch(() => undefined)
   await skillLoaded($, 'ui-checklist')
@@ -668,7 +674,7 @@ test('a skill preloaded while the agent spawns does not count for main', async (
     return { model: 'm', agentId: 'a1' } as never
   })
   await start($)
-  await $.prompt.submit({ text: 'build me a login screen' })
+  await submit($, { text: 'build me a login screen' })
   const spawn = $.agent.spawn({ prompt: 'x' } as never)
   await settle()
   await skillLoaded($, 'ui-checklist')
@@ -689,7 +695,7 @@ test('a spawn that fails leaves no placeholder behind', async ($, on) => {
     throw new Error('no')
   })
   await start($)
-  await $.prompt.submit({ text: 'build me a login screen' })
+  await submit($, { text: 'build me a login screen' })
   await $.agent.spawn({ prompt: 'x' } as never).catch(() => undefined)
   await skillLoaded($, 'ui-checklist')
   expect(await table($)).toMatch(/ui-checklist \| loaded/)
@@ -700,7 +706,7 @@ test('a live run the engine lists as failed is pruned at the next prompt', async
   on('agent.list', () => ({ value: [{ id: 'a1', status: 'failed' }] }) as never)
   await start($)
   await agentRuns($, 'a1')
-  await $.prompt.submit({ text: 'build me a login screen' })
+  await submit($, { text: 'build me a login screen' })
   await skillLoaded($, 'ui-checklist')
   expect(await table($)).toMatch(/ui-checklist \| loaded/)
 })
@@ -711,7 +717,7 @@ test('a run the engine lists as completed is pruned, a running one is kept', asy
   await start($)
   await agentRuns($, 'a1')
   await agentRuns($, 'a2')
-  await $.prompt.submit({ text: 'build me a login screen' })
+  await submit($, { text: 'build me a login screen' })
   await skillLoaded($, 'ui-checklist')
   expect(await table($)).not.toMatch(/ui-checklist \| loaded/)
   await agentEnds($, 'a2')
@@ -724,7 +730,7 @@ test('a live run the list does not name survives a prompt (a workflow agent)', a
   on('agent.list', () => ({ value: [] }) as never)
   await start($)
   await agentRuns($, 'wf1')
-  await $.prompt.submit({ text: 'build me a login screen' })
+  await submit($, { text: 'build me a login screen' })
   await skillLoaded($, 'ui-checklist')
   expect(await table($)).not.toMatch(/ui-checklist \| loaded/)
 })
@@ -738,11 +744,11 @@ test('the agent list is not asked while no run is live, and a slow list prunes n
     return slow ? (new Promise(() => {}) as never) : ({ value: [{ id: 'a1', status: 'completed' }] } as never)
   })
   await start($)
-  await $.prompt.submit({ text: 'hello' })
+  await submit($, { text: 'hello' })
   expect(asked).toBe(0)
   await agentRuns($, 'a1')
   slow = true
-  await $.prompt.submit({ text: 'build me a login screen' })
+  await submit($, { text: 'build me a login screen' })
   expect(asked).toBe(1)
   await skillLoaded($, 'ui-checklist')
   expect(await table($)).not.toMatch(/ui-checklist \| loaded/)
@@ -755,7 +761,7 @@ test('nothing is pruned when the agent list fails', async ($, on) => {
   })
   await start($)
   await agentRuns($, 'a1')
-  await $.prompt.submit({ text: 'build me a login screen' })
+  await submit($, { text: 'build me a login screen' })
   await skillLoaded($, 'ui-checklist')
   expect(await table($)).not.toMatch(/ui-checklist \| loaded/)
 })
@@ -764,7 +770,7 @@ test('an agent.report ends the run', async ($, on) => {
   world(on, { [USER_FILE]: UI }, { classify: 'match' })
   on('agent.report', (_, e) => ({ text: e.text }) as never)
   await start($)
-  await $.prompt.submit({ text: 'build me a login screen' })
+  await submit($, { text: 'build me a login screen' })
   await agentRuns($, 'a1')
   await $.agent.report({ agentId: 'a1', subagentType: 'general-purpose', status: 'completed', text: 'done' } as never)
   await skillLoaded($, 'ui-checklist')
@@ -774,7 +780,7 @@ test('an agent.report ends the run', async ($, on) => {
 test('a main turn.start and turn.complete leave the live runs alone', async ($, on) => {
   world(on, { [USER_FILE]: UI }, { classify: 'match' })
   await start($)
-  await $.prompt.submit({ text: 'build me a login screen' })
+  await submit($, { text: 'build me a login screen' })
   await agentRuns($, 'a1')
   await $.turn.start({ text: '', turnId: 'main1' } as never)
   await turnEnd($, { turnId: 'main1' })
@@ -787,10 +793,10 @@ test('new session id after clear starts a fresh ledger', async ($, on) => {
   await start($)
   await skillLoaded($, 'writing-guide')
   expect(await table($)).toMatch(/writing-guide \| loaded/)
-  await $.command.run({ command: 'clear', args: '' })
+  await runCommand($, { command: 'clear', args: '' })
   w.setId('s2')
   expect(await table($)).toMatch(/writing-guide \| not needed yet/)
-  const r = await $.prompt.submit({ text: 'fresh' })
+  const r = await submit($, { text: 'fresh' })
   expect(r.context?.join('\n')).toMatch(/writing-guide/)
 })
 
@@ -901,7 +907,7 @@ const SETTINGS = JSON.stringify(
   2,
 )
 const PICKS = JSON.stringify({ skills: [{ name: 'ui-checklist', need: 'ui', needText: 'Building a screen.' }] })
-const run = async ($: any, args: string) => (await $.command.run({ command: 'souffleur', args, origin: COMPOSER })).text as string
+const run = async ($: any, args: string) => (await runCommand($, { command: 'souffleur', args, origin: COMPOSER })).text as string
 const SKILLS = ['writing-guide', 'ui-checklist', 'pdf']
 
 test('init asks per skill and writes the user file', async ($, on) => {
@@ -1447,7 +1453,7 @@ test('migrate warns about a hook for something Souffleur does not watch', async 
 test('a configured skill that is not installed here is not requested and shows as not installed here', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS }, { skills: ['pdf'] })
   await start($)
-  const r = await $.prompt.submit({ text: 'hello' })
+  const r = await submit($, { text: 'hello' })
   expect(r.context).toBe(undefined)
   expect(await table($)).toMatch(/\| writing-guide \| not installed here \|/)
   expect(w.statuses.at(-1)).toMatch(/^\d\d:\d\d · observe · 0 loaded, 1 not installed here$/)
@@ -1463,7 +1469,7 @@ const flowInjected = JSON.stringify({ skills: { 'flow:plan': { always: true, sta
 test('a command list fallback marks nothing and the skill is still requested', async ($, on) => {
   world(on, { [USER_FILE]: ALWAYS }, { listOnly: ['pdf'] })
   await start($)
-  const r = await $.prompt.submit({ text: 'hello' })
+  const r = await submit($, { text: 'hello' })
   expect(r.context?.join('\n')).toMatch(/writing-guide/)
   expect(await table($)).not.toMatch(/not installed here/)
 })
@@ -1471,21 +1477,21 @@ test('a command list fallback marks nothing and the skill is still requested', a
 test('an incomplete skill listing marks nothing', async ($, on) => {
   world(on, { [USER_FILE]: ALWAYS }, { skills: LISTED(['pdf']), incomplete: true })
   await start($)
-  await $.prompt.submit({ text: 'hello' })
+  await submit($, { text: 'hello' })
   expect(await table($)).not.toMatch(/not installed here/)
 })
 
 test('a bare config name matches a plugin skill in the list, and the other way round', async ($, on) => {
   world(on, { [USER_FILE]: JSON.stringify({ skills: { 'writing-guide': { always: true }, 'docs:ui-checklist': { always: true } } }) }, { skills: ['docs:writing-guide', 'ui-checklist'] })
   await start($)
-  await $.prompt.submit({ text: 'hello' })
+  await submit($, { text: 'hello' })
   expect(await table($)).not.toMatch(/not installed here/)
 })
 
 test('a skill injected at startup but missing from the list shows as not installed here', async ($, on) => {
   world(on, { [USER_FILE]: flowInjected }, { skills: ['pdf'] })
   await start($)
-  await $.prompt.submit({ text: 'hello' })
+  await submit($, { text: 'hello' })
   expect(await table($)).toMatch(/\| flow:plan \| not installed here \|/)
 })
 
@@ -1518,7 +1524,7 @@ test('a skill listing that never answers does not hold the prompt back', async (
   const started = start($)
   await w.clock.advance(300)
   await started
-  const p = $.prompt.submit({ text: 'build me a login screen' })
+  const p = submit($, { text: 'build me a login screen' })
   await w.clock.advance(300)
   const r = await p
   expect(r.context?.join('\n')).toMatch(/ui-checklist/)
@@ -1631,7 +1637,7 @@ test('migrate: a script file that names a watched skill has no warning and Turn 
 test('migrate notes a watched skill that is not installed in this session', async ($, on) => {
   world(on, { [USER_FILE]: ALWAYS, [SETTINGS_PATH]: HOOK_SETTINGS('bash ~/.claude/hooks/writing-guide-reload.sh') }, { skills: ['pdf'], answers: ['Keep'] })
   await start($)
-  await $.prompt.submit({ text: 'hello' })
+  await submit($, { text: 'hello' })
   expect(await run($, 'migrate')).toMatch(/writing-guide is configured but not installed in this session/)
 })
 
@@ -1773,7 +1779,7 @@ test('no declines it for good: the hash is stored and the proposal is not queued
 test('a headless run opens no dialog, even one that would never answer', async ($, on) => {
   const w = world(on, { [USER_FILE]: ENFORCE }, { answers: ['Yes, everywhere'], holdAsk: true })
   await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: false })
-  await $.prompt.submit({ text: 'hello', origin: { kind: 'sdk' } } as never)
+  await submit($, { text: 'hello', origin: { kind: 'sdk' } } as never)
   await propose($, AGENT_RULE)
   await propose($, { ...AGENT_RULE, before: { tools: ['Bash'] } })
   await turnEnd($)
@@ -1786,7 +1792,7 @@ test('a headless run opens no dialog, even one that would never answer', async (
 test('a Remote Control session (not interactive, bridge prompt) still asks', async ($, on) => {
   const w = world(on, { [USER_FILE]: ENFORCE }, { answers: ['Yes, everywhere'] })
   await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: false })
-  await $.prompt.submit({ text: 'hello', origin: { kind: 'bridge' } } as never)
+  await submit($, { text: 'hello', origin: { kind: 'bridge' } } as never)
   await propose($, AGENT_RULE)
   await turnEnd($)
   expect(w.asked.length).toBe(1)
@@ -1862,10 +1868,10 @@ test('text typed under Other asks the model to revise, in the next prompt contex
   await propose($, AGENT_RULE)
   await turnEnd($)
   expect(w.writes.length).toBe(0)
-  const r = await $.prompt.submit({ text: 'go on' })
+  const r = await submit($, { text: 'go on' })
   expect(r.context?.join('\n')).toMatch(/Only when the brief is long/)
   expect(r.context?.join('\n')).toMatch(/souffleur_propose/)
-  const r2 = await $.prompt.submit({ text: 'and more' })
+  const r2 = await submit($, { text: 'and more' })
   expect(r2.context?.join('\n') ?? '').not.toMatch(/Only when the brief is long/)
 })
 
@@ -1894,10 +1900,10 @@ test('a confirmed note is sent once in the next prompt, and notes show in the sy
   await propose($, { kind: 'note', text: 'Keep answers short.' })
   await turnEnd($)
   expect(userFile(w).notes.length).toBe(2)
-  const r = await $.prompt.submit({ text: 'hello' })
+  const r = await submit($, { text: 'hello' })
   expect(r.context?.join('\n')).toMatch(/Keep answers short\./)
   expect(r.context?.join('\n') ?? '').not.toMatch(/Reply in German/)
-  expect((await $.prompt.submit({ text: 'again' })).context?.join('\n') ?? '').not.toMatch(/Keep answers short/)
+  expect((await submit($, { text: 'again' })).context?.join('\n') ?? '').not.toMatch(/Keep answers short/)
 })
 
 test('the section leaves out the propose sentence when the tool did not register', async ($, on) => {
@@ -1995,7 +2001,7 @@ test('accept, decline, rule and review only act when the user typed them', async
   await start($)
   const id = idOf(await propose($, note('Reply in German.')))
   for (const args of [`accept ${id}`, `decline ${id}`, 'rule Always say hi', 'review']) {
-    const r = await $.command.run({ command: 'souffleur', args, origin: { kind: 'plugin', name: 'other' } } as never)
+    const r = await runCommand($, { command: 'souffleur', args, origin: { kind: 'plugin', name: 'other' } } as never)
     expect(String(r.text)).toMatch(/only the user can run/i)
   }
   expect(w.writes.length).toBe(0)
@@ -2370,7 +2376,7 @@ test('untrusted project file: no restore text and no system prompt mention for i
   world(on, { [USER_FILE]: ENFORCE, [PROJECT_FILE]: PROJECT_ALWAYS })
   on('prompt.compose', () => ({ sections: [] }))
   await start($)
-  const r = await $.prompt.submit({ text: 'hello' })
+  const r = await submit($, { text: 'hello' })
   expect(r.context).toBe(undefined)
   expect(await systemSection($)).not.toMatch(/proj-skill/)
   expect(await table($)).toMatch(/not trusted/)
@@ -2380,7 +2386,7 @@ test('trusted project file (with a trailing slash in trustProjects): restore tex
   world(on, { [USER_FILE]: JSON.stringify({ mode: 'enforce', trustProjects: ['/work/proj/'] }), [PROJECT_FILE]: JSON.stringify({ skills: { 'proj-skill': { always: true, for: 'chat' } } }) }, { repoRoot: '/work/proj' })
   on('prompt.compose', () => ({ sections: [] }))
   await start($)
-  const r = await $.prompt.submit({ text: 'hello' })
+  const r = await submit($, { text: 'hello' })
   expect(r.context?.join('\n')).toMatch(/proj-skill/)
   expect(await systemSection($)).toMatch(/follow proj-skill;/)
 })
@@ -2388,7 +2394,7 @@ test('trusted project file (with a trailing slash in trustProjects): restore tex
 test('untrusted project file: a project need is not classified and its brief check does not deny', async ($, on) => {
   const w = world(on, { [USER_FILE]: ENFORCE, [PROJECT_FILE]: JSON.stringify({ skills: { 'proj-skill': { need: 'pn' } }, needs: { pn: 'A project need.' } }) }, { classify: 'match' })
   await start($)
-  await $.prompt.submit({ text: 'hello' })
+  await submit($, { text: 'hello' })
   expect(w.classifyCalls()).toBe(0)
   await run($, 'need pn')
   const r = await $.tool.call({ tool: 'Agent', prompt: 'do it' } as never)
@@ -2399,17 +2405,17 @@ test('three classifier failures in a row make the status degraded, a good run cl
   let answer = 'unsure'
   const w = world(on, { [USER_FILE]: JSON.stringify({ skills: { g: { need: 'n' } }, needs: { n: 'Something.' } }) }, { classify: () => answer })
   await start($)
-  await $.prompt.submit({ text: 'one' })
-  await $.prompt.submit({ text: 'two' })
+  await submit($, { text: 'one' })
+  await submit($, { text: 'two' })
   expect(w.statuses.at(-1)).not.toMatch(/degraded/)
-  await $.prompt.submit({ text: 'three' })
+  await submit($, { text: 'three' })
   expect(w.statuses.at(-1)).toMatch(/^\d\d:\d\d · degraded, see \/souffleur$/)
   expect(await table($)).toMatch(/classifier: /)
   // the breaker skips the next 10 prompts; the probe after them succeeds and clears it
-  for (let i = 0; i < 10; i++) await $.prompt.submit({ text: `wait ${i}` })
+  for (let i = 0; i < 10; i++) await submit($, { text: `wait ${i}` })
   expect(w.statuses.at(-1)).toMatch(/degraded/)
   answer = 'no-match'
-  await $.prompt.submit({ text: 'four' })
+  await submit($, { text: 'four' })
   expect(w.statuses.at(-1)).not.toMatch(/degraded/)
 })
 
@@ -2428,12 +2434,12 @@ test('pause stops classifier calls and turn-end questions; resume brings them ba
   const before = w.classifyCalls()
   const asked = w.asked.length
   await run($, 'pause')
-  await $.prompt.submit({ text: 'while paused' })
+  await submit($, { text: 'while paused' })
   expect(w.classifyCalls()).toBe(before)
   await turnEnd($)
   expect(w.asked.length).toBe(asked)
   expect(await run($, 'resume')).toMatch(/on again/)
-  await $.prompt.submit({ text: 'after resume' })
+  await submit($, { text: 'after resume' })
   expect(w.classifyCalls()).toBe(before + 2)
   await turnEnd($)
   expect(w.asked.length).toBe(asked + 1)
@@ -2559,9 +2565,9 @@ test('compaction then prompt writes the cut line once', async ($, on) => {
   await start($)
   await skillLoaded($, 'writing-guide')
   w.logs.length = 0
-  await $.session.compact({ trigger: 'manual' })
-  await $.prompt.submit({ text: 'after compact' })
-  await $.prompt.submit({ text: 'and again' })
+  await compact($, { trigger: 'manual' })
+  await submit($, { text: 'after compact' })
+  await submit($, { text: 'and again' })
   expect(w.logs.filter((l) => /cut by compaction: writing-guide/.test(l))).toHaveLength(1)
 })
 
@@ -2570,7 +2576,7 @@ test('a subagent compaction writes no line', async ($, on) => {
   await start($)
   await skillLoaded($, 'writing-guide')
   w.logs.length = 0
-  await $.session.compact({ trigger: 'manual', agentId: 'a1' } as never)
+  await compact($, { trigger: 'manual', agentId: 'a1' } as never)
   expect(w.logs).toEqual([])
 })
 
@@ -2588,10 +2594,10 @@ test('a new session id logs its start line and no diff against the old session',
 test('a missing propose tool is registered again and announced once', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS })
   await start($)
-  await $.prompt.submit({ text: 'first' })
+  await submit($, { text: 'first' })
   w.logs.length = 0
   w.dropTool()
-  await $.prompt.submit({ text: 'hello' })
+  await submit($, { text: 'hello' })
   expect(w.tools.map((t) => t.name)).toEqual(['souffleur_propose', 'souffleur_propose'])
   expect(w.logs).toEqual(['Souffleur: tool reconnected.'])
 })
@@ -2600,7 +2606,7 @@ test('a present propose tool is left alone', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS })
   await start($)
   w.logs.length = 0
-  await $.prompt.submit({ text: 'hello' })
+  await submit($, { text: 'hello' })
   expect(w.tools).toHaveLength(1)
   expect(w.logs).toEqual([])
 })
@@ -2609,10 +2615,10 @@ test('notices false writes no line and still reconnects the tool', async ($, on)
   const w = world(on, { [USER_FILE]: JSON.stringify({ notices: false, skills: { 'writing-guide': { always: true } } }) })
   await start($)
   await skillLoaded($, 'writing-guide')
-  await $.session.compact({ trigger: 'manual' })
-  await $.prompt.submit({ text: 'first' })
+  await compact($, { trigger: 'manual' })
+  await submit($, { text: 'first' })
   w.dropTool()
-  await $.prompt.submit({ text: 'hello' })
+  await submit($, { text: 'hello' })
   expect(w.logs).toEqual([])
   expect(w.tools).toHaveLength(2)
 })
@@ -2620,9 +2626,9 @@ test('notices false writes no line and still reconnects the tool', async ($, on)
 test('a throwing ui.log does not break session start or the prompt', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS }, { failLog: true })
   await start($)
-  await $.prompt.submit({ text: 'first' })
+  await submit($, { text: 'first' })
   w.dropTool()
-  const r = await $.prompt.submit({ text: 'hello' })
+  const r = await submit($, { text: 'hello' })
   expect(r.context?.join('\n')).toMatch(/writing-guide/)
   expect(w.tools).toHaveLength(2)
   expect(w.statuses.at(-1)).not.toMatch(/degraded/)
@@ -2631,7 +2637,7 @@ test('a throwing ui.log does not break session start or the prompt', async ($, o
 test('start with a broken user file logs the degraded line once', async ($, on) => {
   const w = world(on, { [USER_FILE]: '{bad' })
   await start($)
-  await $.prompt.submit({ text: 'hello' })
+  await submit($, { text: 'hello' })
   expect(w.logs.filter((l) => /degraded/.test(l))).toHaveLength(1)
 })
 
@@ -2646,7 +2652,7 @@ test('resume after a cut repeats no cut line', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS })
   await start($)
   await skillLoaded($, 'writing-guide')
-  await $.session.compact({ trigger: 'manual' })
+  await compact($, { trigger: 'manual' })
   expect(w.logs.filter((l) => /cut by compaction/.test(l))).toHaveLength(1)
   await start($)
   expect(w.logs.filter((l) => /cut by compaction/.test(l))).toHaveLength(1)
@@ -2656,7 +2662,7 @@ test('loading a cut skill again writes the reloaded line', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS })
   await start($)
   await skillLoaded($, 'writing-guide')
-  await $.session.compact({ trigger: 'manual' })
+  await compact($, { trigger: 'manual' })
   w.logs.length = 0
   await skillLoaded($, 'writing-guide')
   expect(w.logs).toEqual(['Souffleur: reloaded: writing-guide.'])
@@ -2665,7 +2671,7 @@ test('loading a cut skill again writes the reloaded line', async ($, on) => {
 test('a skill that did not load after two requests writes one problem line', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS })
   await start($)
-  for (let i = 0; i < 6; i++) await $.prompt.submit({ text: `p${i}` })
+  for (let i = 0; i < 6; i++) await submit($, { text: `p${i}` })
   expect(w.logs.filter((l) => /did not load after two requests/.test(l))).toHaveLength(1)
 })
 
@@ -2673,8 +2679,8 @@ test('a tool the list never shows is registered once, silently', async ($, on) =
   const w = world(on, { [USER_FILE]: ALWAYS }, { listMode: 'hidden' })
   await start($)
   w.logs.length = 0
-  await $.prompt.submit({ text: 'one' })
-  await $.prompt.submit({ text: 'two' })
+  await submit($, { text: 'one' })
+  await submit($, { text: 'two' })
   expect(w.tools).toHaveLength(2)
   expect(w.logs).toEqual([])
 })
@@ -2682,11 +2688,11 @@ test('a tool the list never shows is registered once, silently', async ($, on) =
 test('a tool seen once and then missing is announced each time it comes back', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS })
   await start($)
-  await $.prompt.submit({ text: 'one' })
+  await submit($, { text: 'one' })
   w.logs.length = 0
   w.dropTool()
-  await $.prompt.submit({ text: 'two' })
-  await $.prompt.submit({ text: 'three' })
+  await submit($, { text: 'two' })
+  await submit($, { text: 'three' })
   expect(w.logs.filter((l) => /reconnected/.test(l))).toEqual(['Souffleur: tool reconnected.'])
   expect(w.tools).toHaveLength(2)
 })
@@ -2694,7 +2700,7 @@ test('a tool seen once and then missing is announced each time it comes back', a
 test('a throwing tool list does not break the prompt or record an error', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS }, { listMode: 'throws' })
   await start($)
-  const r = await $.prompt.submit({ text: 'hello' })
+  const r = await submit($, { text: 'hello' })
   expect(r.context?.join('\n')).toMatch(/writing-guide/)
   expect(w.statuses.at(-1)).not.toMatch(/degraded/)
   expect(w.tools).toHaveLength(1)
@@ -2703,7 +2709,7 @@ test('a throwing tool list does not break the prompt or record an error', async 
 test('a non-array tool list is skipped without an error', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS }, { listMode: 'junk' })
   await start($)
-  await $.prompt.submit({ text: 'hello' })
+  await submit($, { text: 'hello' })
   expect(w.statuses.at(-1)).not.toMatch(/degraded/)
   expect(w.tools).toHaveLength(1)
 })
@@ -2711,7 +2717,7 @@ test('a non-array tool list is skipped without an error', async ($, on) => {
 test('a tool list that never answers does not hold the prompt back', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS }, { listMode: 'hangs' })
   await start($)
-  const p = $.prompt.submit({ text: 'hello' })
+  const p = submit($, { text: 'hello' })
   await w.clock.advance(300)
   const r = await p
   expect(r.context?.join('\n')).toMatch(/writing-guide/)
@@ -2719,8 +2725,8 @@ test('a tool list that never answers does not hold the prompt back', async ($, o
 })
 
 // ---- reply words (#44) ----
-const reply = ($: any, text: string, origin?: Record<string, unknown>) => $.prompt.submit({ text, ...(origin ? { origin } : {}) } as never)
-const COMPOSER = { kind: 'composer' }
+const reply = ($: any, text: string, origin?: Record<string, unknown>) => submit($, { text, ...(origin ? { origin } : {}) } as never)
+const COMPOSER = { kind: 'composer' } as const
 const hasLine = (w: World, text: string) => w.seen.prompts.some((p) => (p.context ?? []).some((c) => c.includes(text)))
 
 test('ask rejected: one notice with the reply hint, no second ask', async ($, on) => {
@@ -2797,7 +2803,7 @@ test('reply from a peer does not accept', async ($, on) => {
   await propose($, note('Reply in German.'))
   await turnEnd($)
   for (const origin of [{ kind: 'peer' }, { kind: 'plugin', name: 'x' }, { kind: 'task-notification' }]) await reply($, 'accept', origin)
-  await $.prompt.submit({ text: 'accept', isMeta: true } as never)
+  await submit($, { text: 'accept', isMeta: true } as never)
   expect(w.writes.length).toBe(0)
   expect(await run($, 'review')).toMatch(/Reply in German/)
 })
@@ -2864,25 +2870,25 @@ const armed = async ($: any, on: any) => {
 
 test('an sdk origin never accepts', async ($, on) => {
   const w = await armed($, on)
-  await $.prompt.submit({ text: 'accept', origin: { kind: 'sdk' } } as never)
+  await submit($, { text: 'accept', origin: { kind: 'sdk' } } as never)
   expect(w.writes.length).toBe(0)
 })
 
 test('a prompt without an origin never accepts', async ($, on) => {
   const w = await armed($, on)
-  await $.prompt.submit({ text: 'accept' } as never)
+  await submit($, { text: 'accept' } as never)
   expect(w.writes.length).toBe(0)
 })
 
 test('a typed command with a reply word never accepts', async ($, on) => {
   const w = await armed($, on)
-  await $.prompt.submit({ text: 'accept', command: { name: 'accept', args: '' }, origin: COMPOSER } as never)
+  await submit($, { text: 'accept', command: { name: 'accept', args: '' }, origin: COMPOSER } as never)
   expect(w.writes.length).toBe(0)
 })
 
 test('a typed command ends the offer', async ($, on) => {
   const w2 = await armed($, on)
-  await $.prompt.submit({ text: '/something', command: { name: 'something', args: '' }, origin: COMPOSER } as never)
+  await submit($, { text: '/something', command: { name: 'something', args: '' }, origin: COMPOSER } as never)
   await reply($, 'accept', COMPOSER)
   expect(w2.writes.length).toBe(0)
 })
@@ -2972,7 +2978,7 @@ test('a prompt that starts a need writes the reason to the debug log only', asyn
   const w = world(on, { [USER_FILE]: UI }, { classify: 'match' })
   await start($)
   w.logs.length = 0
-  await $.prompt.submit({ text: 'build me a login screen' })
+  await submit($, { text: 'build me a login screen' })
   expect(w.debugLogs.filter((l) => /need started: need:ui/.test(l))).toHaveLength(1)
   expect(w.logs.filter((l) => /need:ui/.test(l))).toEqual([])
 })
@@ -2996,7 +3002,7 @@ test('a dialog nobody answers gives up after two minutes and shows the notice', 
 test('a throwing ui.log on a need-start prompt still delivers the restore context', async ($, on) => {
   const w = world(on, { [USER_FILE]: UI }, { classify: 'match', failLog: true, skills: ['ui-checklist'] })
   await start($)
-  const r = await $.prompt.submit({ text: 'build me a login screen' })
+  const r = await submit($, { text: 'build me a login screen' })
   expect(r.context?.join('\n')).toMatch(/ui-checklist/)
   expect(w.statuses.at(-1)).not.toMatch(/degraded/)
 })
@@ -3029,7 +3035,7 @@ test('the notice names the command where the session takes no reply (sdk prompt,
   const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
   await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: false })
   const id = idOf(await propose($, note('Reply in German.')))
-  await $.prompt.submit({ text: 'hello', origin: { kind: 'sdk' } } as never)
+  await submit($, { text: 'hello', origin: { kind: 'sdk' } } as never)
   await turnEnd($)
   const line = w.logs.filter((l) => l.includes(`proposal ${id}`)).at(-1)!
   expect(line).toContain(`/souffleur accept ${id}`)
@@ -3040,7 +3046,7 @@ test('the notice keeps the reply words over Remote Control (bridge prompt, not i
   const w = world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject' })
   await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: false })
   const id = idOf(await propose($, note('Reply in German.')))
-  await $.prompt.submit({ text: 'hello', origin: { kind: 'bridge' } } as never)
+  await submit($, { text: 'hello', origin: { kind: 'bridge' } } as never)
   await turnEnd($)
   expect(w.logs.filter((l) => l.includes(`proposal ${id}`)).at(-1)).toContain('Reply "accept"')
 })
@@ -3138,7 +3144,7 @@ test('the Agent brief check leaves out a skill excluded in this project', async 
   const cfg = JSON.stringify({ mode: 'enforce', skills: { 'ui-design': { need: 'ui', notIn: ['/work/proj'] }, 'writing-guide': { need: 'ui' } }, needs: { ui: 'Designing something a user sees.' } })
   world(on, { [USER_FILE]: cfg })
   await start($)
-  await $.command.run({ command: 'souffleur', args: 'need ui', origin: COMPOSER })
+  await runCommand($, { command: 'souffleur', args: 'need ui', origin: COMPOSER })
   const r = await $.tool.call({ tool: 'Agent', prompt: 'do it', description: 'd', subagent_type: 'general-purpose' } as never)
   expect(JSON.stringify(r)).toMatch(/Configured skills: writing-guide\./)
 })
@@ -3165,14 +3171,14 @@ test('the status line does not count a skill excluded in this project', async ($
 test('a failed call A writes its kind to the debug log', async ($, on) => {
   const w = world(on, { [USER_FILE]: JSON.stringify({ skills: { g: { need: 'n' } }, needs: { n: 'Something.' } }) }, { classify: () => 'banana' })
   await start($)
-  await $.prompt.submit({ text: 'one two three four' })
+  await submit($, { text: 'one two three four' })
   expect(w.debugLogs.join('\n')).toMatch(/classifier: unknown-label/)
 })
 
 test('a failed call B writes classifier B to the debug log', async ($, on) => {
   const w = world(on, { [USER_FILE]: JSON.stringify({ skills: { g: { need: 'n' } }, needs: { n: { for: 'work', what: 'Something.' } } }) }, { classify: (labels) => (labels?.includes('chat-reply') ? 'code-or-repo-work' : 'banana') })
   await start($)
-  await $.prompt.submit({ text: 'one two three four' })
+  await submit($, { text: 'one two three four' })
   expect(w.debugLogs.join('\n')).toMatch(/classifier B: unknown-label/)
   expect(w.debugLogs.join('\n')).not.toMatch(/classifier: /)
 })
@@ -3180,7 +3186,7 @@ test('a failed call B writes classifier B to the debug log', async ($, on) => {
 test('three failed call B runs in a row show degraded in the status', async ($, on) => {
   const w = world(on, { [USER_FILE]: JSON.stringify({ skills: { g: { need: 'n' } }, needs: { n: { for: 'work', what: 'Something.' } } }) }, { classify: (labels) => (labels?.includes('chat-reply') ? 'code-or-repo-work' : 'banana') })
   await start($)
-  for (let i = 0; i < 3; i++) await $.prompt.submit({ text: 'one two three four' })
+  for (let i = 0; i < 3; i++) await submit($, { text: 'one two three four' })
   expect(w.statuses.at(-1)).toMatch(/degraded/)
 })
 
@@ -3188,13 +3194,13 @@ test('three failing call B runs then a good one (A says code work): status clear
   let bGood = false
   const w = world(on, { [USER_FILE]: JSON.stringify({ skills: { g: { need: 'n' } }, needs: { n: { for: 'work', what: 'Something.' } } }) }, { classify: (labels) => (labels?.includes('chat-reply') ? 'code-or-repo-work' : bGood ? 'n' : 'banana') })
   await start($)
-  for (let i = 0; i < 3; i++) await $.prompt.submit({ text: 'one two three four' })
+  for (let i = 0; i < 3; i++) await submit($, { text: 'one two three four' })
   expect(w.statuses.at(-1)).toMatch(/degraded/)
   // B is paused now: the next 10 code prompts skip it, the one after probes it
-  for (let i = 0; i < 10; i++) await $.prompt.submit({ text: 'one two three four' })
+  for (let i = 0; i < 10; i++) await submit($, { text: 'one two three four' })
   expect(w.statuses.at(-1)).toMatch(/degraded/)
   bGood = true
-  await $.prompt.submit({ text: 'one two three four' })
+  await submit($, { text: 'one two three four' })
   expect(w.statuses.at(-1)).not.toMatch(/degraded/)
   expect(await table($)).toMatch(/^Failures this session: classifier B 1$/m)
 })
@@ -3205,10 +3211,10 @@ test('after three failed call B runs the status lists the B pause and B is no lo
   const requests: Record<string, unknown>[] = []
   world(on, { [USER_FILE]: B_CFG() }, { classify: (labels) => (labels?.includes('chat-reply') ? 'code-or-repo-work' : 'banana'), classifyRequests: requests })
   await start($)
-  for (let i = 0; i < 3; i++) await $.prompt.submit({ text: 'one two three four' })
+  for (let i = 0; i < 3; i++) await submit($, { text: 'one two three four' })
   expect(await table($)).toMatch(/work detection paused \(call B failed 3 times\); next try in 10 prompts/)
   const before = requests.length
-  await $.prompt.submit({ text: 'one two three four' })
+  await submit($, { text: 'one two three four' })
   // only call A ran on the skipped prompt
   expect(requests.length - before).toBe(1)
   expect(await table($)).toMatch(/next try in 9 prompts/)
@@ -3228,13 +3234,13 @@ test('only code prompts use up the B pause; a chat reply leaves it alone (#126)'
   let a = 'code-or-repo-work'
   world(on, { [USER_FILE]: B_CFG() }, { classify: (labels) => (labels?.includes('chat-reply') ? a : 'banana') })
   await start($)
-  for (let i = 0; i < 3; i++) await $.prompt.submit({ text: 'one two three four' })
+  for (let i = 0; i < 3; i++) await submit($, { text: 'one two three four' })
   expect(await table($)).toMatch(/next try in 10 prompts/)
   a = 'chat-reply'
-  await $.prompt.submit({ text: 'one two three four' })
+  await submit($, { text: 'one two three four' })
   expect(await table($)).toMatch(/next try in 10 prompts/)
   a = 'code-or-repo-work'
-  await $.prompt.submit({ text: 'one two three four' })
+  await submit($, { text: 'one two three four' })
   expect(await table($)).toMatch(/next try in 9 prompts/)
 })
 
@@ -3243,10 +3249,10 @@ test('workCheck after: a chat reply makes one classifier call, code work two (#1
   let a = 'chat-reply'
   world(on, { [USER_FILE]: B_CFG({ workCheck: 'after' }) }, { classify: (labels) => (labels?.includes('chat-reply') ? a : 'n'), classifyRequests: requests })
   await start($)
-  await $.prompt.submit({ text: 'one two three four' })
+  await submit($, { text: 'one two three four' })
   expect(requests.length).toBe(1)
   a = 'code-or-repo-work'
-  await $.prompt.submit({ text: 'one two three four' })
+  await submit($, { text: 'one two three four' })
   expect(requests.length).toBe(3)
 })
 
@@ -3259,13 +3265,13 @@ test('a long chat reply is counted and the next prompt carries the reminder line
   const w = world(on, { [USER_FILE]: REPLY_CFG })
   await start($)
   await skillLoaded($, 'terse:terse-mode')
-  await $.prompt.submit({ text: 'first question' })
+  await submit($, { text: 'first question' })
   await turnEnd($, { answer: LONG_REPLY })
-  const r = await $.prompt.submit({ text: 'second question' })
+  const r = await submit($, { text: 'second question' })
   expect(r.context?.join('\n')).toMatch(/Souffleur: your last reply had \d+ characters and 1 heading \(limit 200 characters, 0 headings\)\. Replies in this chat follow terse:terse-mode\./)
   expect(await table($)).toMatch(/- terse:terse-mode: 1 of 1 replies over the limit/)
   expect(w.toasts).toEqual([])
-  expect((await $.prompt.submit({ text: 'third question' })).context?.join('\n') ?? '').not.toMatch(/last reply/)
+  expect((await submit($, { text: 'third question' })).context?.join('\n') ?? '').not.toMatch(/last reply/)
 })
 
 test('replies of subagents, other turn reasons, aborted turns and paused sessions are not checked', async ($, on) => {
@@ -3280,17 +3286,17 @@ test('replies of subagents, other turn reasons, aborted turns and paused session
   await turnEnd($, { answer: LONG_REPLY })
   await run($, 'resume')
   expect(await table($)).not.toMatch(/replies over the limit/)
-  expect((await $.prompt.submit({ text: 'q' })).context?.join('\n') ?? '').not.toMatch(/last reply/)
+  expect((await submit($, { text: 'q' })).context?.join('\n') ?? '').not.toMatch(/last reply/)
 })
 
 test('the reply to a typed command is not checked', async ($, on) => {
   world(on, { [USER_FILE]: REPLY_CFG })
   await start($)
   await skillLoaded($, 'terse:terse-mode')
-  await $.prompt.submit({ text: '/review the diff', command: { name: 'review', args: 'the diff' } } as never)
+  await submit($, { text: '/review the diff', command: { name: 'review', args: 'the diff' } } as never)
   await turnEnd($, { answer: LONG_REPLY })
   expect(await table($)).not.toMatch(/replies over the limit/)
-  await $.prompt.submit({ text: 'plain question' })
+  await submit($, { text: 'plain question' })
   await turnEnd($, { answer: LONG_REPLY })
   expect(await table($)).toMatch(/1 of 1 replies over the limit/)
 })
@@ -3301,14 +3307,14 @@ test('a config without reply counts nothing', async ($, on) => {
   await skillLoaded($, 'terse:terse-mode')
   await turnEnd($, { answer: LONG_REPLY })
   expect(await table($)).not.toMatch(/replies over the limit/)
-  expect((await $.prompt.submit({ text: 'q' })).context?.join('\n') ?? '').not.toMatch(/last reply/)
+  expect((await submit($, { text: 'q' })).context?.join('\n') ?? '').not.toMatch(/last reply/)
 })
 
 test('the counts survive a resume of the session', async ($, on) => {
   const w = world(on, { [USER_FILE]: REPLY_CFG })
   await start($)
   await skillLoaded($, 'terse:terse-mode')
-  await $.prompt.submit({ text: 'question' })
+  await submit($, { text: 'question' })
   await turnEnd($, { answer: LONG_REPLY })
   await $.session.start({ cwd: '/work/proj', surface: 'terminal', isInteractive: true, source: 'resume' } as never)
   expect(w.stored).toBeTruthy()
@@ -3319,14 +3325,14 @@ test('a turn that is not the answer to a person prompt is not counted and keeps 
   world(on, { [USER_FILE]: REPLY_CFG })
   await start($)
   await skillLoaded($, 'terse:terse-mode')
-  await $.prompt.submit({ text: 'question' })
+  await submit($, { text: 'question' })
   await turnEnd($, { answer: LONG_REPLY })
   // a background notification turn: a prompt that is not from the person, then a short answer
-  await $.prompt.submit({ text: '<task-notification>done</task-notification>', isMeta: true } as never)
+  await submit($, { text: '<task-notification>done</task-notification>', isMeta: true } as never)
   await turnEnd($, { answer: 'ok' })
   expect(await table($)).toMatch(/1 of 1 replies over the limit/)
-  expect((await $.prompt.submit({ text: 'next' })).context?.join('\n')).toMatch(/last reply had/)
-  await $.prompt.submit({ text: '<task-notification>again</task-notification>', isMeta: true } as never)
+  expect((await submit($, { text: 'next' })).context?.join('\n')).toMatch(/last reply had/)
+  await submit($, { text: '<task-notification>again</task-notification>', isMeta: true } as never)
   await turnEnd($, { answer: LONG_REPLY })
   expect(await table($)).toMatch(/1 of 1 replies over the limit/)
 })
@@ -3444,7 +3450,7 @@ test('a reply offer that a person prompt ends without an answer does not stop pr
 
 test('a typed command ends the offer without stopping proposals', async ($, on) => {
   await armed($, on)
-  await $.prompt.submit({ text: '/something', command: { name: 'something', args: '' }, origin: COMPOSER } as never)
+  await submit($, { text: '/something', command: { name: 'something', args: '' }, origin: COMPOSER } as never)
   expect(String((await propose($, note('Answer in German, always.'))).result)).toMatch(/Queued as note-/)
 })
 
@@ -3470,7 +3476,7 @@ test('a timed-out dialog that the person accepts by command does not stop propos
   await settle()
   await w.clock.advance(120_000)
   await t
-  await $.prompt.submit({ text: `/souffleur accept ${id}`, command: { name: 'souffleur', args: `accept ${id}` }, origin: COMPOSER } as never)
+  await submit($, { text: `/souffleur accept ${id}`, command: { name: 'souffleur', args: `accept ${id}` }, origin: COMPOSER } as never)
   expect(String((await propose($, note('Answer in French, always.'))).result)).toMatch(/Queued as note-/)
 })
 
@@ -3688,7 +3694,7 @@ test('block and unblock answer for unknown names, and write nothing', async ($, 
 test('/souffleur pause without an origin is refused', async ($, on) => {
   const w = world(on, { [USER_FILE]: BLOCKABLE })
   await start($)
-  const r = await $.command.run({ command: 'souffleur', args: 'pause' } as never)
+  const r = await runCommand($, { command: 'souffleur', args: 'pause' } as never)
   expect(String(r.text)).toMatch(/only the user can run \/souffleur pause/)
   expect(w.writes.length).toBe(0)
 })
@@ -3697,7 +3703,7 @@ test('block and unblock only act when the user typed them', async ($, on) => {
   const w = world(on, { [USER_FILE]: BLOCKABLE })
   await start($)
   for (const args of ['block writing-guide', 'unblock writing-guide', 'project']) {
-    const r = await $.command.run({ command: 'souffleur', args, origin: { kind: 'plugin', name: 'other' } } as never)
+    const r = await runCommand($, { command: 'souffleur', args, origin: { kind: 'plugin', name: 'other' } } as never)
     expect(String(r.text)).toMatch(/only the user can run/i)
   }
   expect(w.writes.length).toBe(0)
@@ -4165,7 +4171,7 @@ test('init Everywhere puts the project skill into the standard', async ($, on) =
 test('a session that reports no interactive prompt (Remote Control) still gets the project question', async ($, on) => {
   const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['proj-skill'], answers: ['Ignore all here'] })
   await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: false })
-  await $.prompt.submit({ text: 'hello', origin: { kind: 'bridge' } } as never)
+  await submit($, { text: 'hello', origin: { kind: 'bridge' } } as never)
   await turnEnd($)
   expect(w.asked.length).toBe(1)
   expect(rootBlock(w)).toEqual({ ignored: ['proj-skill'] })
@@ -4174,7 +4180,7 @@ test('a session that reports no interactive prompt (Remote Control) still gets t
 test('a headless sdk session gets the notice instead of the dialog', async ($, on) => {
   const w = world(on, { [USER_FILE]: STD }, { repoRoot: MAIN, projectSkills: ['proj-skill'], answers: ['Ignore all here'] })
   await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: false })
-  await $.prompt.submit({ text: 'hello', origin: { kind: 'sdk' } } as never)
+  await submit($, { text: 'hello', origin: { kind: 'sdk' } } as never)
   await turnEnd($)
   expect(w.asked.length).toBe(0)
   expect(w.logs.some((l) => /this project has 1 skills? not in your config/.test(l))).toBe(true)
@@ -4224,7 +4230,7 @@ test('the classifier asks through complete with a fixed instruction, the labels 
   const requests: Record<string, unknown>[] = []
   const w = world(on, { [USER_FILE]: COST_CFG }, { classify: 'match', usage: USAGE, classifyRequests: requests })
   await start($)
-  await $.prompt.submit({ text: 'fix the build' })
+  await submit($, { text: 'fix the build' })
   expect(w.classifyCalls()).toBe(2)
   const a = requests.find((r) => String(r.prompt).includes('chat-reply'))!
   expect(a.model).toBe('haiku')
@@ -4247,7 +4253,7 @@ test('a 200 KB prompt sends at most about 2,005 characters of prompt text in eac
   const requests: Record<string, unknown>[] = []
   const w = world(on, { [USER_FILE]: COST_CFG }, { classify: 'match', classifyRequests: requests })
   await start($)
-  await $.prompt.submit({ text: `fix ${'x'.repeat(200_000)} done` })
+  await submit($, { text: `fix ${'x'.repeat(200_000)} done` })
   expect(w.classifyCalls()).toBe(2)
   for (const r of requests) {
     const text = String(r.prompt).split('Prompt:\n').at(-1)!.split('\n\n').at(-1)!
@@ -4260,7 +4266,7 @@ test('both classifier calls pass their own timeout to the model', async ($, on) 
   const requests: Record<string, unknown>[] = []
   world(on, { [USER_FILE]: COST_CFG }, { classify: 'match', classifyRequests: requests })
   await start($)
-  await $.prompt.submit({ text: 'fix the build' })
+  await submit($, { text: 'fix the build' })
   expect(requests.find((r) => String(r.prompt).includes('chat-reply'))!.timeoutMs).toBe(2500)
   expect(requests.find((r) => !String(r.prompt).includes('chat-reply'))!.timeoutMs).toBe(4000)
 })
@@ -4270,36 +4276,36 @@ test('after three failed runs the classifier pauses for 10 prompts, then probes 
   let answer = 'unsure'
   const w = world(on, { [USER_FILE]: COST_CFG }, { classify: () => answer })
   await start($)
-  for (const t of ['one', 'two', 'three']) await $.prompt.submit({ text: t })
+  for (const t of ['one', 'two', 'three']) await submit($, { text: t })
   expect(w.classifyCalls()).toBe(6)
-  for (let i = 0; i < 10; i++) await $.prompt.submit({ text: `skipped ${i}` })
+  for (let i = 0; i < 10; i++) await submit($, { text: `skipped ${i}` })
   expect(w.classifyCalls()).toBe(6)
   expect(w.statuses.at(-1)).toMatch(/degraded/)
   // the probe fails: another 10 prompts without a call
-  await $.prompt.submit({ text: 'probe one' })
+  await submit($, { text: 'probe one' })
   expect(w.classifyCalls()).toBe(8)
-  for (let i = 0; i < 10; i++) await $.prompt.submit({ text: `skipped again ${i}` })
+  for (let i = 0; i < 10; i++) await submit($, { text: `skipped again ${i}` })
   expect(w.classifyCalls()).toBe(8)
   // the next probe succeeds and resets the breaker
   answer = 'no-match'
-  await $.prompt.submit({ text: 'probe two' })
+  await submit($, { text: 'probe two' })
   expect(w.classifyCalls()).toBe(10)
   expect(w.statuses.at(-1)).not.toMatch(/degraded/)
-  await $.prompt.submit({ text: 'normal' })
+  await submit($, { text: 'normal' })
   expect(w.classifyCalls()).toBe(12)
 })
 
 test('a classifier answer with whitespace and a period still starts the need', async ($, on) => {
   const w = world(on, { [USER_FILE]: COST_CFG }, { classify: (labels) => (labels?.includes('chat-reply') ? ' code-or-repo-work.\n' : 'n.') })
   await start($)
-  await $.prompt.submit({ text: 'fix the build' })
+  await submit($, { text: 'fix the build' })
   expect(w.debugLogs.join('\n')).not.toMatch(/classifier/)
 })
 
 test('every classifier call is counted with its tokens in /souffleur, the status and the store total', async ($, on) => {
   const w = world(on, { [USER_FILE]: COST_CFG }, { classify: 'match', usage: { input_tokens: 1_000_000, output_tokens: 0 } })
   await start($)
-  await $.prompt.submit({ text: 'fix the build' })
+  await submit($, { text: 'fix the build' })
   await settle()
   expect(await table($)).toMatch(/^Small model: 2 calls, 2\.0M in \/ 0 out, about \$0\.20 this session \(total 2 calls, about \$0\.20\)\. Estimate at list price\.$/m)
   await settle()
@@ -4311,7 +4317,7 @@ test('every classifier call is counted with its tokens in /souffleur, the status
 test('a rejected classifier call counts as a call without tokens', async ($, on) => {
   const w = world(on, { [USER_FILE]: COST_CFG }, { classifyRejected: true, usage: USAGE })
   await start($)
-  await $.prompt.submit({ text: 'fix the build' })
+  await submit($, { text: 'fix the build' })
   expect(w.classifyCalls()).toBeGreaterThan(0)
   await settle()
   expect(await table($)).toMatch(/^Small model: \d calls, 0 in \/ 0 out,/m)
@@ -4323,7 +4329,7 @@ test('a late classifier result after the timeout is counted once', async ($, on)
   const hold = new Promise<void>((r) => { release = r })
   const w = world(on, { [USER_FILE]: COST_CFG }, { classify: 'match', usage: USAGE, holdClassify: hold })
   await start($)
-  const p = $.prompt.submit({ text: 'fix the build' })
+  const p = submit($, { text: 'fix the build' })
   await w.clock.advance(5000)
   await p
   expect(w.debugLogs.join('\n')).toMatch(/classifier: timeout/)
@@ -4354,7 +4360,7 @@ test('the status line shows the cost with notices off', async ($, on) => {
   const cfg = JSON.stringify({ mode: 'enforce', notices: false, skills: { g: { need: 'n' } }, needs: { n: { for: 'work', what: 'Something.' } } })
   const w = world(on, { [USER_FILE]: cfg }, { classify: 'match', usage: { input_tokens: 1_000_000 } })
   await start($)
-  await $.prompt.submit({ text: 'fix the build' })
+  await submit($, { text: 'fix the build' })
   await settle()
   expect(w.statuses.at(-1)).toMatch(/ · ~\$0\.20$/)
   expect(w.toasts).toEqual([])
@@ -4370,11 +4376,11 @@ test('no calls: no cost in the status and no line in /souffleur', async ($, on) 
 test('a new session starts at zero while the total keeps counting', async ($, on) => {
   const w = world(on, { [USER_FILE]: COST_CFG }, { classify: 'match', usage: USAGE })
   await start($)
-  await $.prompt.submit({ text: 'one' })
+  await submit($, { text: 'one' })
   w.setId('s2')
   await settle()
   expect(await table($)).toMatch(/^Small model: no calls this session \(total 2 calls,/m)
-  await $.prompt.submit({ text: 'two' })
+  await submit($, { text: 'two' })
   await settle()
   expect(await table($)).toMatch(/^Small model: 2 calls, 300 in \/ 4 out, .* this session \(total 4 calls,/m)
 })
@@ -4382,7 +4388,7 @@ test('a new session starts at zero while the total keeps counting', async ($, on
 test('the count survives a reload of the session', async ($, on) => {
   const w = world(on, { [USER_FILE]: COST_CFG }, { classify: 'match', usage: USAGE })
   await start($)
-  await $.prompt.submit({ text: 'one' })
+  await submit($, { text: 'one' })
   await start($)
   await settle()
   expect(await table($)).toMatch(/^Small model: 2 calls,/m)
@@ -4393,7 +4399,7 @@ test('the count survives a reload of the session', async ($, on) => {
 test('a store failure for the total fails no hook and keeps the session count', async ($, on) => {
   const w = world(on, { [USER_FILE]: COST_CFG }, { classify: 'match', usage: USAGE, failStoreKey: 'modelUseTotal' })
   await start($)
-  const r = await $.prompt.submit({ text: 'fix the build' })
+  const r = await submit($, { text: 'fix the build' })
   expect(r.text).toBe('fix the build')
   await settle()
   const t = await table($)
@@ -4409,7 +4415,7 @@ test('counting never delays the answer: a held total write does not hold the pro
   const w = world(on, { [USER_FILE]: COST_CFG }, { classify: 'match', usage: USAGE, holdTotal: hold })
   await start($)
   // The total write is held: the prompt must still return (a hang fails the test by its own timeout).
-  await $.prompt.submit({ text: 'fix the build' })
+  await submit($, { text: 'fix the build' })
   release()
   await settle()
   expect(w.stored['modelUseTotal']).toMatchObject({ calls: 2 })
@@ -4423,14 +4429,14 @@ test('the status line shows the time of the last activity', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS })
   await start($)
   expect(w.statuses.at(-1)).toMatch(/^\d\d:\d\d · observe · /)
-  await $.prompt.submit({ text: 'hello' })
+  await submit($, { text: 'hello' })
   expect(w.statuses.at(-1)).toMatch(/^\d\d:\d\d · observe · 0 loaded, 1 restoring$/)
 })
 
 test('a main-loop turn end stamps lastSeen; a subagent turn end does not', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS })
   await start($)
-  await $.prompt.submit({ text: 'hello' })
+  await submit($, { text: 'hello' })
   const first = (w.stored['session:s1'] as any).lastSeen as number
   await w.clock.advance(120_000)
   await turnEnd($, { agentId: 'a1' })
@@ -4849,7 +4855,7 @@ test('update auto: never delays session.start', async ($, on) => {
   await start($)
 })
 
-const runUser = async ($: any, args: string, origin: unknown = COMPOSER) => (await $.command.run({ command: 'souffleur', args, ...(origin ? { origin } : {}) })).text as string
+const runUser = async ($: Engine, args: string, origin: CommandRunInput['origin'] | undefined = COMPOSER) => (await runCommand($, { command: 'souffleur', args, ...(origin ? { origin } : {}) })).text as string
 
 test('/souffleur update: installs an unsigned tag when no signer is set, with the unsigned wording', async ($, on) => {
   const w = world(on, SETUP, { stored: QUIET, run: gitRun() })
@@ -4913,7 +4919,7 @@ test('/souffleur update: only the user can run it', async ($, on) => {
   const w = world(on, SETUP, { stored: QUIET, run: gitRun() })
   own(w)
   await start($)
-  for (const origin of [{ kind: 'plugin', name: 'other' }, { kind: 'model' }]) {
+  for (const origin of [{ kind: 'plugin', name: 'other' }, { kind: 'peer' }] as const) {
     expect(await runUser($, 'update', origin)).toMatch(/only the user can run/i)
   }
   expect(ran(w, 'checkout').length).toBe(0)
@@ -4924,9 +4930,9 @@ test('every verb that changes state refuses a non-user origin, and nothing chang
   const w = world(on, { [USER_FILE]: UI, [SETTINGS_PATH]: SETTINGS }, { skills: SKILLS, proposals: PICKS, answers: ['When the task needs it'] })
   await start($)
   const before = await run($, 'status')
-  for (const origin of [{ kind: 'plugin', name: 'other' }, { kind: 'model' }]) {
+  for (const origin of [{ kind: 'plugin', name: 'other' }, { kind: 'peer' }] as const) {
     for (const args of ['pause', 'need ui', 'drop ui', 'init', 'migrate']) {
-      const r = await $.command.run({ command: 'souffleur', args, origin } as never)
+      const r = await runCommand($, { command: 'souffleur', args, origin } as never)
       expect(String(r.text)).toBe(`Souffleur: only the user can run /souffleur ${args.split(' ')[0]}; a plugin or the model cannot.`)
     }
   }
@@ -4941,7 +4947,7 @@ test('status and a bare /souffleur still answer a non-user origin (#34)', async 
   await start($)
   const origin = { kind: 'plugin', name: 'other' }
   for (const args of ['', 'status']) {
-    const r = await $.command.run({ command: 'souffleur', args, origin } as never)
+    const r = await runCommand($, { command: 'souffleur', args, origin } as never)
     expect(String(r.text)).not.toMatch(/only the user can run/i)
     expect(String(r.text)).toMatch(/Mode: enforce/)
   }
@@ -4951,7 +4957,7 @@ test('a plugin cannot resume a user pause, and odd spellings of a verb are refus
   const w = world(on, { [USER_FILE]: UI }, {})
   await start($)
   const origin = { kind: 'plugin', name: 'other' }
-  const as = async (args: string) => String((await $.command.run({ command: 'souffleur', args, origin } as never)).text)
+  const as = async (args: string) => String((await runCommand($, { command: 'souffleur', args, origin } as never)).text)
   expect(await run($, 'pause')).toMatch(/paused for this session/)
   expect(await as('resume')).toBe('Souffleur: only the user can run /souffleur resume; a plugin or the model cannot.')
   expect(await run($, 'resume')).toBe('Souffleur: checks are on again.') // it was still paused
@@ -4965,7 +4971,7 @@ test('a plugin cannot resume a user pause, and odd spellings of a verb are refus
 test('status with a trailing verb from a plugin answers status and does not pause (#34)', async ($, on) => {
   world(on, { [USER_FILE]: UI }, {})
   await start($)
-  const r = await $.command.run({ command: 'souffleur', args: 'status pause', origin: { kind: 'plugin', name: 'other' } } as never)
+  const r = await runCommand($, { command: 'souffleur', args: 'status pause', origin: { kind: 'plugin', name: 'other' } } as never)
   expect(String(r.text)).toMatch(/Mode: enforce/)
   expect(await run($, 'resume')).toBe('Souffleur: not paused.')
 })
@@ -4983,7 +4989,7 @@ const bandText = async ($: any, surface: 'terminal' | 'desktop'): Promise<string
 test('the band is never drawn on the terminal, where the status line shows', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS })
   await start($)
-  await $.prompt.submit({ text: 'hello' })
+  await submit($, { text: 'hello' })
   expect(w.statuses.at(-1)).toMatch(/1 restoring/)
   expect(await bandText($, 'terminal')).toBeUndefined()
 })
@@ -4998,7 +5004,7 @@ test('on the desktop nothing is drawn while every skill is loaded', async ($, on
 test('on the desktop a restoring skill shows the status text', async ($, on) => {
   const w = world(on, { [USER_FILE]: ALWAYS })
   await start($)
-  await $.prompt.submit({ text: 'hello' })
+  await submit($, { text: 'hello' })
   expect(await bandText($, 'desktop')).toBe(w.statuses.at(-1))
 })
 
@@ -5050,7 +5056,7 @@ test('update off hides the band for a newer release left in the store', async ($
 test('a mounted band goes away when the restoring skill loads, with no new prompt', async ($, on) => {
   world(on, { [USER_FILE]: ALWAYS })
   await start($)
-  await $.prompt.submit({ text: 'hello' })
+  await submit($, { text: 'hello' })
   const ui = await $.ui.mount(BAND('desktop'))
   expect((await ui.find({ type: 'Text' }))?.text).toMatch(/1 restoring/)
   await skillLoaded($, 'writing-guide')
@@ -5061,7 +5067,7 @@ test('a mounted band goes away when the restoring skill loads, with no new promp
 test('a failing store copy does not drop a deny', async ($, on) => {
   const w = world(on, { [USER_FILE]: UI }, { classify: 'match', failStoreKey: 'session:s1' })
   await start($)
-  await $.prompt.submit({ text: 'build me a login screen' })
+  await submit($, { text: 'build me a login screen' })
   const r = await $.tool.call({ tool: 'Write', file_path: '/work/proj/x.html', content: '' } as never)
   expect(r.deny).toMatch(/ui-checklist/)
   expect(w.debugLogs.join('\n')).toMatch(/store copy failed/)
@@ -5084,7 +5090,7 @@ test('a classified prompt with small-model calls writes no copy before the turn 
   const w = world(on, { [USER_FILE]: UI }, { classify: 'match' })
   await start($)
   const before = sessionSets(w)
-  await $.prompt.submit({ text: 'build me a login screen' })
+  await submit($, { text: 'build me a login screen' })
   expect(w.classifyCalls()).toBeGreaterThan(0)
   expect(sessionSets(w)).toBe(before)
 })
@@ -5134,7 +5140,7 @@ test('compaction writes the stored copy', async ($, on) => {
   await start($)
   await skillLoaded($, 'writing-guide')
   const n = w.storeSets.filter((k) => k === 'session:s1').length
-  await $.session.compact({ trigger: 'manual' })
+  await compact($, { trigger: 'manual' })
   expect(w.storeSets.filter((k) => k === 'session:s1').length).toBeGreaterThan(n)
   expect(JSON.stringify(w.stored['session:s1'])).toMatch(/stale/)
 })
@@ -5291,11 +5297,11 @@ test('backups: one per process, newest three kept, other suffixes untouched', as
 test('a hand edit of the user file takes effect at the next prompt', async ($, on) => {
   const w = world(on, { [USER_FILE]: UI }, { classify: 'match' })
   await start($)
-  await $.prompt.submit({ text: 'build me a login screen' })
+  await submit($, { text: 'build me a login screen' })
   const write = { tool: 'Write', file_path: '/work/proj/x.html', content: '' } as never
   expect((await $.tool.call(write)).deny).toMatch(/ui-checklist/)
   w.edit(USER_FILE, UI.replace('enforce', 'observe'))
-  await $.prompt.submit({ text: 'build me a login screen' })
+  await submit($, { text: 'build me a login screen' })
   expect((await $.tool.call(write)).deny).toBe(undefined)
 })
 
@@ -5727,11 +5733,11 @@ test('config dir: migrate reads CLAUDE.md, imports and the memory index under CL
 test('config dir: a change of the file under CLAUDE_CONFIG_DIR is picked up at the next prompt', async ($, on) => {
   const w = world(on, { [CC_USER]: UI }, { classify: 'match', env: { CLAUDE_CONFIG_DIR: CC } })
   await start($)
-  await $.prompt.submit({ text: 'build me a login screen' })
+  await submit($, { text: 'build me a login screen' })
   const write = { tool: 'Write', file_path: '/work/proj/x.html', content: '' } as never
   expect((await $.tool.call(write)).deny).toMatch(/ui-checklist/)
   w.edit(CC_USER, UI.replace('enforce', 'observe'))
-  await $.prompt.submit({ text: 'build me a login screen' })
+  await submit($, { text: 'build me a login screen' })
   expect((await $.tool.call(write)).deny).toBe(undefined)
 })
 

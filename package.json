@@ -11,7 +11,8 @@
   "scripts": {
     "test": "node --test --experimental-strip-types 'test/**/*.spec.ts'",
     "test:mod": "claude plugin test .",
-    "typecheck": "tsc -p . && tsc -p tsconfig.core.json"
+    "typecheck": "tsc -p . && tsc -p tsconfig.core.json",
+    "typecheck:mod": "node scripts/typecheck-mod.mjs"
   },
   "devDependencies": {
     "@types/node": "^22",

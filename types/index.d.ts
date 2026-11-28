@@ -16,12 +16,12 @@ declare module 'claude-code' {
             requests: number
           }
         >
-        needs: Record<string, { since: number; reason: string }>
+        needs: Record<string, { since: number; reason: string; misses?: number; dormant?: boolean; evidence?: boolean }>
         duties: { skill: string; openedAt: number; by: string; denied: boolean; told?: boolean }[]
         paused: boolean
         id: string
         mainSkillCalls: string[]
-        subagentsRunning: number
+        liveAgents?: string[]
         compactedSincePrompt: boolean
         agentDenied: boolean
         observed: { at: number; reason: string }[]
@@ -56,10 +56,25 @@ declare module 'claude-code' {
         freshNotes: string[]
         revise: string[]
         proposed: string[]
+        skillReads?: number
+        learnCalls?: string[]
+        proposalsStopped?: boolean
+        askStopped?: boolean
         rev?: number
         classifyFails?: number
+        workFails?: number
+        classifyPause?: number
+        workPause?: number
         learnFails?: number
         touched?: number
+        noticed?: { cut: string[]; problems: string[]; tells?: Record<string, number> }
+        failCounts?: Record<string, number>
+        replyCheck?: { total: number; over: number; sinceReminder: number; pending?: string }
+        modelUse?: { calls: number; input: number; output: number; cacheRead: number; cacheWrite: number; usd: number; unpriced?: string[] }
+        turnDenials?: Record<string, number>
+        turnTries?: string[]
+        lastSeen?: number
+        updateShown?: string
       }
     }
   }
