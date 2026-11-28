@@ -49,3 +49,25 @@ export function updateLine(kind: UpdateKind, tag: string, cur: string, root = 't
 export function refusalLine(reason: string, root: string): string {
   return `Souffleur: not updated, ${reason}. Update by hand with git in ${root}.`
 }
+
+/** Git verifies the last signature block of a tag, so the last `-----BEGIN ` line must open an SSH signature that ends the object; armor quoted in the message does not count. */
+export function endsInSshSignature(obj: string): boolean {
+  const lines = obj.replace(/\n$/, '').split('\n')
+  const begin = lines.map((l, i) => (l.startsWith('-----BEGIN ') ? i : -1)).filter((i) => i >= 0).pop()
+  return begin !== undefined && lines[begin] === '-----BEGIN SSH SIGNATURE-----' && lines[lines.length - 1] === '-----END SSH SIGNATURE-----' && !lines.slice(begin + 1, -1).some((l) => l.startsWith('-----'))
+}
+
+/** The raw tag object (`git cat-file tag`) names `tag` in its own header and ends in an SSH signature. The signature does not cover the ref name, so the header is checked. */
+export function signedTagObject(obj: string, tag: string): boolean {
+  const header = obj.split('\n\n')[0] ?? ''
+  return header.split('\n').includes(`tag ${tag}`) && endsInSshSignature(obj)
+}
+
+/** The allowed_signers file: one line, the update signer's key for the `git` namespace. */
+export const allowedSigners = (signer: string): string => `souffleur namespaces="git" ${signer}\n`
+
+/** The arguments after `git -C <root>` that verify the tag object `oid` against the allowed_signers `file`. */
+export const verifyTagArgs = (file: string, oid: string): string[] => ['-c', 'gpg.format=ssh', '-c', `gpg.ssh.allowedSignersFile=${file}`, 'verify-tag', oid]
+
+/** The line git prints on stderr for a signature from the allowed_signers entry. */
+export const goodSignature = (stderr: string): boolean => stderr.split('\n').some((line) => line.startsWith('Good "git" signature for souffleur with '))

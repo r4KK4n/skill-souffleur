@@ -7,6 +7,7 @@ import type { HookOverlap, Passage } from '../core/migrate.ts'
 import { CHOICE_LABEL, INJECTED_HELP, addSkillToProject, hasProjectKey, ignoreInProject, NOT_SET_UP, SETUP_INTRO, applyChoice, candidates, choiceOf, cleanNeedText, configProblem, currentChoice, describePlan, explicitOnly, GROUP_ALL, GROUP_NONE, GROUP_ONE, groupByPlugin, injectedWarning, LATER, needKeyFor, options, parsePicks, parseSkips, picksPrompt, setupSteps } from '../core/setup.ts'
 import type { LoadChoice, NeedText, Plan, StartHooks, Suggestion } from '../core/setup.ts'
 import type { Action, CoreEvent, Session } from '../core/decide.ts'
+import { allowedSigners, goodSignature, signedTagObject, verifyTagArgs } from '../core/update.ts'
 import { audienceOf, classifyDeliverable, needTexts } from '../core/needs.ts'
 import { EXTRACT_SYSTEM, MAX_SKILL_TEXT, extractPrompt, hashKey, parseAnswer, shouldRead, skillHash, trusted } from '../core/learn.ts'
 import type { Proposal } from '../core/proposals.ts'
@@ -480,13 +481,6 @@ async function installBlocker($: Dollar): Promise<string | undefined> {
   return at.exitCode === 0 && RELEASE_TAG.test(at.stdout.trim()) ? undefined : 'the install is not on a release tag'
 }
 
-/** Git verifies the last signature block of a tag, so the last `-----BEGIN ` line must open an SSH signature that ends the object; armor quoted in the message does not count. */
-function endsInSshSignature(obj: string): boolean {
-  const lines = obj.replace(/\n$/, '').split('\n')
-  const begin = lines.map((l, i) => (l.startsWith('-----BEGIN ') ? i : -1)).filter((i) => i >= 0).pop()
-  return begin !== undefined && lines[begin] === '-----BEGIN SSH SIGNATURE-----' && lines[lines.length - 1] === '-----END SSH SIGNATURE-----' && !lines.slice(begin + 1, -1).some((l) => l.startsWith('-----'))
-}
-
 /**
  * True when the tag object `oid` (the object `refs/tags/<tag>` pointed to when it was resolved) is an SSH-signed tag named `tag`
  * whose signature is the `updateSigner` key's. Git picks the verifier from the signature armor, so a PGP-signed tag would pass
@@ -496,14 +490,13 @@ function endsInSshSignature(obj: string): boolean {
 async function tagVerified($: Dollar, signer: string, tag: string, oid: string): Promise<boolean> {
   const obj = await git($, ['cat-file', 'tag', oid])
   if (obj.exitCode !== 0) return false
-  const header = obj.stdout.split('\n\n')[0] ?? ''
-  if (!header.split('\n').includes(`tag ${tag}`) || !endsInSshSignature(obj.stdout)) return false
+  if (!signedTagObject(obj.stdout, tag)) return false
   const dir = (await $.process.hookEnv()).CLAUDE_PLUGIN_DATA
   if (dir === undefined || dir === '') throw new Error('no plugin data folder')
   const file = `${dir}/allowed_signers`
-  await $.fs.write(file, `souffleur namespaces="git" ${signer}\n`)
-  const r = await git($, ['-c', 'gpg.format=ssh', '-c', `gpg.ssh.allowedSignersFile=${file}`, 'verify-tag', oid])
-  return r.exitCode === 0 && r.stderr.split('\n').some((line) => line.startsWith('Good "git" signature for souffleur with '))
+  await $.fs.write(file, allowedSigners(signer))
+  const r = await git($, verifyTagArgs(file, oid))
+  return r.exitCode === 0 && goodSignature(r.stderr)
 }
 
 type Install = { done: 'installed'; signed: boolean } | { done: 'refused'; reason: string } | { done: 'unverified' } | { done: 'busy' }
