@@ -539,15 +539,15 @@ async function ok($: Dollar, argv: string[]): Promise<boolean> {
 }
 
 /**
- * Takes the install lock, runs `fn`, releases it. The lock is the folder `<plugin data>/update.lock`, made with `mkdir`, which fails when
- * it exists, so one session wins. An `owner` file inside holds `{ at, token }`. A lock older than 2 minutes, dated in the future or with no
- * readable owner and an old folder is stale: it is removed and taken once. The release removes the folder only while the token is ours.
- * `undefined` when another session holds the lock.
+ * Takes the lock `<plugin data>/<name>`, runs `fn`, releases it. The lock is a folder made with `mkdir`, which fails when it exists, so one
+ * session wins. An `owner` file inside holds `{ at, token }`. A lock older than `staleMs`, dated in the future or with no readable owner and
+ * an old folder is stale: it is removed and taken once. The release removes the folder only while the token is ours. `undefined` when another
+ * session holds the lock. Throws when the lock cannot be made at all (no data folder, no `mkdir`); `label` names it in that error.
  */
-async function withInstallLock<T>($: Dollar, fn: () => Promise<T>): Promise<{ value: T } | undefined> {
+async function withLock<T>($: Dollar, name: string, label: string, staleMs: number, fn: () => Promise<T>): Promise<{ value: T } | undefined> {
   const data = (await $.process.hookEnv()).CLAUDE_PLUGIN_DATA
   if (data === undefined || data === '') throw new Error('no plugin data folder')
-  const lock = `${data}/update.lock`
+  const lock = `${data}/${name}`
   const owner = `${lock}/owner`
   const readOwner = async (): Promise<{ at?: unknown; token?: unknown } | undefined> => {
     try {
@@ -577,19 +577,19 @@ async function withInstallLock<T>($: Dollar, fn: () => Promise<T>): Promise<{ va
     const at = (await readOwner())?.at
     const t = typeof at === 'number' ? at : await mtime(lock)
     const wall = await wallNow($)
-    return t !== undefined && (t > wall || wall - t >= LOCK_STALE_MS)
+    return t !== undefined && (t > wall || wall - t >= staleMs)
   }
   await ok($, ['mkdir', '-p', data])
   let made = await ok($, ['mkdir', lock])
   if (!made) {
     // A lock that cannot be made and is not there is a host problem (no mkdir, a data folder that cannot be created), not another session.
-    if (!(await exists(lock))) throw new Error('could not create the update lock')
+    if (!(await exists(lock))) throw new Error(`could not create the ${label}`)
     if (!(await stale())) return undefined
     // One session removes a stale lock: the one that makes the takeover folder.
     const take = `${lock}.takeover`
     if (!(await ok($, ['mkdir', take]))) {
       const t = await mtime(take)
-      if (t !== undefined && (await wallNow($)) - t >= LOCK_STALE_MS) await ok($, ['rm', '-rf', take])
+      if (t !== undefined && (await wallNow($)) - t >= staleMs) await ok($, ['rm', '-rf', take])
       return undefined
     }
     try {
@@ -616,6 +616,9 @@ async function withInstallLock<T>($: Dollar, fn: () => Promise<T>): Promise<{ va
     if ((await readOwner())?.token === token) await ok($, ['rm', '-rf', lock])
   }
 }
+
+/** The install lock: `update.lock`, stale after 2 minutes. */
+const withInstallLock = <T>($: Dollar, fn: () => Promise<T>) => withLock($, 'update.lock', 'update lock', LOCK_STALE_MS, fn)
 
 /** Under the install lock: fetches, resolves `tag` once to an object id, verifies that object when a signer is set (or `needSigner`), and checks out its commit. Throws on a git failure. */
 async function installTag($: Dollar, l: Loaded, tag: string, needSigner: boolean): Promise<Install> {
