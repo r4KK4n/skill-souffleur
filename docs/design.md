@@ -252,6 +252,10 @@ Confirmed rules and notes are written to the user file, `~/.claude/souffleur.jso
 | The main model does all of it through the tool | Has the context, but reading every skill would cost tokens and context in the main conversation. |
 | Mixed (chosen 2026-11-25) | The small model reads skills, which needs no conversation and happens once per version. Slips and the user's words go through the main model. Souffleur asks in both cases. |
 
+### Holding an over-long answer
+
+The adapter hooks `classic.Stop`, which runs when the main session is about to end a turn and before `turn.complete`. The hook passes `last_assistant_message` to the core as a `stop` event. The core reuses the reply check: no hold for a typed command, a paused session, a mostly-code or empty answer, or an answer within the limits. In `enforce` it answers with a `hold` action and the adapter returns `block` with the reason, so Claude Code feeds the reason to the model as a Stop hook note and the model answers again. In `observe` the core only records the would-be hold in `observed`. One hold per prompt of the person: the adapter skips the check when `stop_hook_active` is true or when it held already since the last prompt. The `turn.complete` that follows still carries only the final answer, so the reminder for the next prompt follows the rewritten answer.
+
 ### Subagents
 
 The ledger, gates and duties cover the main session only (the user's choice on 2026-11-25). `skill.prompt` carries no agent id, but a Skill tool call does: a load the model asks for is preceded by a `tool.call` for the Skill tool, with `agentId` when a subagent made it. Souffleur counts a `skill.prompt` for the main session only when it follows a main-session Skill call for that skill, a typed `/name` (`command.run`), or arrives while no subagent is running. Anything else, such as a skill preloaded into a subagent, leaves the main ledger alone. A gate on a subagent's own writes could still not be lifted reliably, so subagents are not gated.

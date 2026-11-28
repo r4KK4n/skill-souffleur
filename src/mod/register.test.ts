@@ -378,6 +378,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   })
   on('skill.prompt', (_, e) => ({ text: e.text }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
+  on('classic.Stop', () => ({}))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('session.compact', () => (opts.skipCompact ? { skip: 'vetoed' } : { messages: [{ role: 'user', text: 'summary', toolUses: [] }] }))
   on('command.run', () => ({}))
@@ -6064,4 +6065,48 @@ test('a prompt delivered into a running turn or from an observer does not take t
   for (const e of [{ origin: { kind: 'peer' }, turnId: 't1' }, { origin: { kind: 'observer' } }, { origin: { kind: 'composer' }, isMeta: true }]) {
     expect((await submit($, { text: 'x', ...e } as never)).context).toBe(undefined)
   }
+})
+
+// ---- hold the turn end once (#139) ----
+const HOLD_FILE = (mode: string) => JSON.stringify({ mode, skills: { 'chat:chat': { always: true, startup: 'injected', for: 'chat', reply: { maxChars: 200 } } } })
+const LONG_ANSWER = 'word '.repeat(60)
+const stopEnd = ($: any, answer: string, active = false) => $.classic.Stop({ stop_hook_active: active, last_assistant_message: answer })
+
+test('enforce: an over-limit answer is held once with the size, the limit and the skill; the second ends the turn', async ($, on) => {
+  world(on, { [USER_FILE]: HOLD_FILE('enforce') })
+  await start($)
+  await submit($, { text: 'hello', origin: { kind: 'composer' } } as never)
+  const first = await stopEnd($, LONG_ANSWER)
+  expect(first.block).toBe('Souffleur: this answer has 300 characters (limit 200 characters, chat:chat). Rewrite it within the limit, then end the turn.')
+  expect((await stopEnd($, LONG_ANSWER, true)).block).toBeUndefined()
+  // Even where the engine does not say the hook is active, one hold per turn is all there is.
+  expect((await stopEnd($, LONG_ANSWER)).block).toBeUndefined()
+  expect(await table($)).toContain('chat:chat: 0 of 0 replies over the limit, 1 held')
+})
+
+test('enforce: the next prompt of the person can be held again', async ($, on) => {
+  world(on, { [USER_FILE]: HOLD_FILE('enforce') })
+  await start($)
+  for (let i = 0; i < 2; i++) {
+    await submit($, { text: `hello ${i}`, origin: { kind: 'composer' } } as never)
+    expect((await stopEnd($, LONG_ANSWER)).block).toMatch(/300 characters/)
+  }
+})
+
+test('enforce: a short answer, a typed command and a turn without a prompt of the person are not held', async ($, on) => {
+  world(on, { [USER_FILE]: HOLD_FILE('enforce') })
+  await start($)
+  expect((await stopEnd($, LONG_ANSWER)).block).toBeUndefined()
+  await submit($, { text: 'hello', origin: { kind: 'composer' } } as never)
+  expect((await stopEnd($, 'short')).block).toBeUndefined()
+  await submit($, { text: '/status', command: { name: 'status', args: '' }, origin: { kind: 'composer' } } as never)
+  expect((await stopEnd($, LONG_ANSWER)).block).toBeUndefined()
+})
+
+test('observe: nothing is held and the would-be hold is listed', async ($, on) => {
+  world(on, { [USER_FILE]: HOLD_FILE('observe') })
+  await start($)
+  await submit($, { text: 'hello', origin: { kind: 'composer' } } as never)
+  expect((await stopEnd($, LONG_ANSWER)).block).toBeUndefined()
+  expect(await table($)).toMatch(/Would have denied:\n- \d\d:\d\d reply limit: this answer has 300 characters/)
 })

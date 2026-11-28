@@ -65,7 +65,7 @@ export function renderTable(config: Config, s: Session, now: number, root?: stri
   })
   if (denied.length) lines.push('', 'Would have denied:', ...denied)
   const chat = replySkill(config, root)
-  if (chat !== undefined && s.replyCheck !== undefined && s.replyCheck.total > 0) lines.push('', 'Reply check:', `- ${chat.name}: ${s.replyCheck.over} of ${s.replyCheck.total} replies over the limit`)
+  if (chat !== undefined && s.replyCheck !== undefined && (s.replyCheck.total > 0 || (s.replyCheck.held ?? 0) > 0)) lines.push('', 'Reply check:', `- ${chat.name}: ${s.replyCheck.over} of ${s.replyCheck.total} replies over the limit${s.replyCheck.held ? `, ${s.replyCheck.held} held` : ''}`)
   const spent = formatUse(s.modelUse, total)
   if (spent !== undefined) lines.push('', spent)
   if (update !== undefined) lines.push(...(spent === undefined ? [''] : []), `Version ${update.current} · latest ${update.latest === undefined ? 'unknown' : shown(update.latest)} · checked ${update.at === undefined ? 'never' : clock(update.at)} · update: ${config.update}`)

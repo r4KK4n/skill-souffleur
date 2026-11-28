@@ -81,6 +81,8 @@ export const newSessionState = () => ({
   ownActed: false,
   /** A late `Set up now`: the round runs at the next turn end, where a dialog may open. */
   pendingSetUp: undefined as { token: number; names: string[] } | undefined,
+  /** The turn end was held once since the last prompt of the person; a second over-limit answer ends the turn. */
+  held: false,
 })
 export const sess = newSessionState()
 /** The session id the state above belongs to, so one id change resets it once however many hooks notice the change. */
@@ -2606,6 +2608,7 @@ export const register: Register = (on) => {
     if (fromUser) lastPromptKind = e.origin?.kind
     personTurn = fromUser || (e.command !== undefined && isUserOrigin(e))
     lastPromptCommand = e.command !== undefined
+    if (fromUser) sess.held = false
     // A hand edit or another session's save: read the files again before this prompt is judged.
     await safe($, 'config.reload', undefined, async () => {
       if (!loaded || (await configSig($, loaded.root)) === loadedSig) return
@@ -2842,6 +2845,21 @@ export const register: Register = (on) => {
       })
     }
     return r
+  })
+
+  // The end of a main-session turn: an answer over a `reply` limit is held once (`enforce`), so the model rewrites it.
+  on('classic.Stop', async ($, e, next) => {
+    const r = await next(e)
+    if (!personTurn || typeof e.last_assistant_message !== 'string') return r
+    const text = await safe($, 'turn.hold', undefined as string | undefined, async () => {
+      await syncClock($)
+      const again = e.stop_hook_active === true || sess.held
+      const { actions } = await apply($, (l) => ({ type: 'stop', now: now(), answer: e.last_assistant_message!, fromCommand: lastPromptCommand, again, root: l.root }))
+      return actions.flatMap((a) => (a.kind === 'hold' ? [a.text] : []))[0]
+    })
+    if (text === undefined) return r
+    sess.held = true
+    return { ...r, block: text }
   })
 
   on('command.run', async ($, e, next) => {

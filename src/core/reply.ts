@@ -40,3 +40,13 @@ export function reminderLine(skill: SkillName, limits: ReplyLimits, r: { chars: 
   if (limits.headings !== undefined) { had.push(heading(r.headings)); limit.push(heading(limits.headings)) }
   return `Souffleur: your last reply had ${had.join(' and ')} (limit ${limit.join(', ')}). Replies in this chat follow ${skill}.`
 }
+
+/** The reason the model gets when its answer is held: the measured size, the limit and the skill. */
+export function holdLine(skill: SkillName, limits: ReplyLimits, r: { chars: number; headings: number }): string {
+  const had: string[] = []
+  const limit: string[] = []
+  if (limits.maxChars !== undefined) { had.push(`${r.chars} characters`); limit.push(`${limits.maxChars} characters`) }
+  const heading = (n: number) => `${n} ${n === 1 ? 'heading' : 'headings'}`
+  if (limits.headings !== undefined) { had.push(heading(r.headings)); limit.push(heading(limits.headings)) }
+  return `Souffleur: this answer has ${had.join(' and ')} (limit ${limit.join(', ')}, ${skill}). Rewrite it within the limit, then end the turn.`
+}
