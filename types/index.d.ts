@@ -70,7 +70,6 @@ declare module 'claude-code' {
         touched?: number
         noticed?: { cut: string[]; problems: string[]; tells?: Record<string, number> }
         failCounts?: Record<string, number>
-        replyCheck?: { total: number; over: number; sinceReminder: number; pending?: string }
         modelUse?: { calls: number; input: number; output: number; cacheRead: number; cacheWrite: number; usd: number; unpriced?: string[] }
         turnDenials?: Record<string, number>
         turnTries?: string[]

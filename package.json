@@ -1,6 +1,6 @@
 {
   "name": "skill-souffleur",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Keeps the skills a Claude Code session needs loaded across compaction and resume.",
   "license": "MIT",

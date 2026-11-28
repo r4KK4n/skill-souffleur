@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Removed
+
+- The reply-length check and the turn-end hold are gone: Souffleur keeps skills loaded and no longer measures or corrects what a skill produces. A `reply` key in a skill entry is ignored with the notice `reply is no longer supported; ignored`.
+
 ## [0.3.0] - 2026-11-28
 
 ### Security
