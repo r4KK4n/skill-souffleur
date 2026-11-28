@@ -549,7 +549,7 @@ test('/souffleur prints the ledger table', async ($, on) => {
 
 test('session restored from $.store when $.state is empty', async ($, on) => {
   const { config } = parseConfig(ALWAYS, undefined)
-  const first = decide(config, initSession(config, 's1', 1, 'startup', '2.1.331'), { type: 'skill', now: 2, skill: 'writing-guide' }).session
+  const first = decide(config, initSession(config, 's1', 1, 'startup', '9.9.9'), { type: 'skill', now: 2, skill: 'writing-guide' }).session
   world(on, { [USER_FILE]: ALWAYS }, { stored: { 'session:s1': first } })
   await start($)
   expect(await table($)).toMatch(/writing-guide \| loaded/)
@@ -559,7 +559,7 @@ test('session restored from $.store when $.state is empty', async ($, on) => {
 
 test('a reload of the held state keeps per-run counters', async ($, on) => {
   const { config } = parseConfig(ALWAYS, undefined)
-  const busy = { ...initSession(config, 's1', 1, 'startup', '2.1.331'), liveAgents: ['a1', 'a2'] }
+  const busy = { ...initSession(config, 's1', 1, 'startup', '9.9.9'), liveAgents: ['a1', 'a2'] }
   const written: any[] = []
   on('state.get', () => ({ value: { value: busy, version: 0 } }) as never)
   on('state.set', (_, e) => {
@@ -573,7 +573,7 @@ test('a reload of the held state keeps per-run counters', async ($, on) => {
 
 test('a resume from the store resets per-run counters', async ($, on) => {
   const { config } = parseConfig(ALWAYS, undefined)
-  const busy = { ...initSession(config, 's1', 1, 'startup', '2.1.331'), liveAgents: ['a1', 'a2'] }
+  const busy = { ...initSession(config, 's1', 1, 'startup', '9.9.9'), liveAgents: ['a1', 'a2'] }
   const written: any[] = []
   on('state.get', () => ({ value: { value: undefined, version: 0 } }) as never)
   on('state.set', (_, e) => {
@@ -803,7 +803,7 @@ test('new session id after clear starts a fresh ledger', async ($, on) => {
 
 test('an id change inside the process restores the stored copy of the new id (an in-process resume)', async ($, on) => {
   const { config } = parseConfig(ALWAYS, undefined)
-  const other = decide(config, initSession(config, 's2', 1, 'startup', '2.1.331'), { type: 'skill', now: 2, skill: 'writing-guide' }).session
+  const other = decide(config, initSession(config, 's2', 1, 'startup', '9.9.9'), { type: 'skill', now: 2, skill: 'writing-guide' }).session
   const w = world(on, { [USER_FILE]: ALWAYS }, { stored: { 'session:s2': other } })
   await start($)
   expect(await table($)).toMatch(/writing-guide \| not needed yet/)
@@ -813,7 +813,7 @@ test('an id change inside the process restores the stored copy of the new id (an
 
 test('an in-process resume goes through the resume step: a stored pause is not carried over, as at session.start', async ($, on) => {
   const { config } = parseConfig(ALWAYS, undefined)
-  const other = { ...decide(config, initSession(config, 's2', 1, 'startup', '2.1.331'), { type: 'skill', now: 2, skill: 'writing-guide' }).session, paused: true }
+  const other = { ...decide(config, initSession(config, 's2', 1, 'startup', '9.9.9'), { type: 'skill', now: 2, skill: 'writing-guide' }).session, paused: true }
   const w = world(on, { [USER_FILE]: ALWAYS }, { stored: { 'session:s2': other } })
   await start($)
   w.setId('s2')
@@ -824,7 +824,7 @@ test('an in-process resume goes through the resume step: a stored pause is not c
 
 test('a stored copy without the rule fields still restores on an id change', async ($, on) => {
   const { config } = parseConfig(ALWAYS, undefined)
-  const other: Record<string, unknown> = { ...decide(config, initSession(config, 's2', 1, 'startup', '2.1.331'), { type: 'skill', now: 2, skill: 'writing-guide' }).session }
+  const other: Record<string, unknown> = { ...decide(config, initSession(config, 's2', 1, 'startup', '9.9.9'), { type: 'skill', now: 2, skill: 'writing-guide' }).session }
   delete other.ruleSkills
   delete other.openRules
   delete other.duties
@@ -837,7 +837,7 @@ test('a stored copy without the rule fields still restores on an id change', asy
 
 test('an id change with an empty $.state is found through the process copy and resumed', async ($, on) => {
   const { config } = parseConfig(ALWAYS, undefined)
-  const other = { ...decide(config, initSession(config, 's2', 1, 'startup', '2.1.331'), { type: 'skill', now: 2, skill: 'writing-guide' }).session, paused: true }
+  const other = { ...decide(config, initSession(config, 's2', 1, 'startup', '9.9.9'), { type: 'skill', now: 2, skill: 'writing-guide' }).session, paused: true }
   on('state.get', () => ({ value: { value: undefined, version: 0 } }) as never)
   on('state.set', () => ({ value: { isSet: true, version: 1 } }) as never)
   const w = world(on, { [USER_FILE]: ALWAYS }, { stored: { 'session:s2': other } })
@@ -3224,7 +3224,7 @@ test('after three failed call B runs the status lists the B pause and B is no lo
 test('an in-process resume clears a stored B pause (#126)', async ($, on) => {
   const cfgText = B_CFG()
   const { config } = parseConfig(cfgText, undefined)
-  const other = { ...initSession(config, 's2', 1, 'startup', '2.1.331'), workPause: 6, workFails: 3 }
+  const other = { ...initSession(config, 's2', 1, 'startup', '9.9.9'), workPause: 6, workFails: 3 }
   const w = world(on, { [USER_FILE]: cfgText }, { stored: { 'session:s2': other } })
   await start($)
   w.setId('s2')
@@ -3417,7 +3417,7 @@ test('a reload keeps the stop and the dismissed dialog', async ($, on) => {
 
 test('an in-process resume keeps the dismissed dialog of the stored session', async ($, on) => {
   const { config } = parseConfig(ENFORCE, undefined)
-  const other = { ...initSession(config, 's2', 1, 'startup', '2.1.331'), askStopped: true }
+  const other = { ...initSession(config, 's2', 1, 'startup', '9.9.9'), askStopped: true }
   const w = world(on, { [USER_FILE]: ENFORCE }, { answers: ['No'], stored: { 'session:s2': other } })
   await start($)
   w.setId('s2')
@@ -3558,7 +3558,7 @@ for (const [how, change] of [
 ] as const) {
   test(`a late tap on the project question of the old session does nothing after ${how}`, async ($, on) => {
     const { tap, opts } = ownLate({ answers: ['When the task needs it', 'This project only', "Don't watch"] })
-    const w = world(on, { [USER_FILE]: STD }, { ...opts, stored: { 'session:s2': initSession(parseConfig(STD, undefined).config, 's2', 1, 'startup', '2.1.331') } })
+    const w = world(on, { [USER_FILE]: STD }, { ...opts, stored: { 'session:s2': initSession(parseConfig(STD, undefined).config, 's2', 1, 'startup', '9.9.9') } })
     await start($)
     await ownTimedOut($, w)
     await change($, w)
@@ -4515,7 +4515,7 @@ test('a main-loop turn end stamps lastSeen; a subagent turn end does not', async
 
 test('a resume shows a time in the status line at once', async ($, on) => {
   const { config } = parseConfig(ALWAYS, undefined)
-  const old = { ...initSession(config, 's1', 1, 'startup', '2.1.331'), lastSeen: new Date(2026, 10, 27, 14, 2).getTime() }
+  const old = { ...initSession(config, 's1', 1, 'startup', '9.9.9'), lastSeen: new Date(2026, 10, 27, 14, 2).getTime() }
   const w = world(on, { [USER_FILE]: ALWAYS }, { stored: { 'session:s1': old } })
   await start($)
   expect(w.statuses.at(-1)).toMatch(/^\d\d:\d\d · /)
@@ -5214,8 +5214,8 @@ test('compaction writes the stored copy', async ($, on) => {
 test('session start keeps at most 50 stored sessions and drops copies older than 14 days', async ($, on) => {
   const { config } = parseConfig(ALWAYS, undefined)
   const stored: Record<string, unknown> = {}
-  for (let i = 0; i < 60; i++) stored[`session:old${i}`] = { ...initSession(config, `old${i}`, 1, 'startup', '2.1.331'), touched: T0 - i * 1000 }
-  stored['session:ancient'] = { ...initSession(config, 'ancient', 1, 'startup', '2.1.331'), touched: T0 - 15 * 86_400_000 }
+  for (let i = 0; i < 60; i++) stored[`session:old${i}`] = { ...initSession(config, `old${i}`, 1, 'startup', '9.9.9'), touched: T0 - i * 1000 }
+  stored['session:ancient'] = { ...initSession(config, 'ancient', 1, 'startup', '9.9.9'), touched: T0 - 15 * 86_400_000 }
   world(on, { [USER_FILE]: ALWAYS }, { stored })
   await start($)
   await settle()
