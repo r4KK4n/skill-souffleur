@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-28
+
 ### Security
 
 - `/souffleur init` and `migrate` follow an `@path` import in a project's CLAUDE.md only when the real path of the file lies inside the project root or the user's Claude folder (`~/.claude` or `CLAUDE_CONFIG_DIR`). An absolute path, a `../` path or a symlink that leads elsewhere is skipped (#101).
@@ -245,7 +247,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - A project file is report only unless its root is in `trustProjects`: Souffleur no longer asks the model to load its skills, names them in the system prompt or lets its needs deny an `Agent` brief. A project file may define 20 skills and 10 needs; more get an error that names the cap. Duty evidence gets the same length and control character checks as rule evidence, and `trustProjects` ignores trailing slashes.
 
-[Unreleased]: https://github.com/r4KK4n/skill-souffleur/compare/v0.2.9...HEAD
+[Unreleased]: https://github.com/r4KK4n/skill-souffleur/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/r4KK4n/skill-souffleur/compare/v0.2.9...v0.3.0
 [0.2.9]: https://github.com/r4KK4n/skill-souffleur/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/r4KK4n/skill-souffleur/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/r4KK4n/skill-souffleur/compare/v0.2.6...v0.2.7
