@@ -90,7 +90,7 @@ export type CoreEvent =
   | { type: 'skill'; now: number; skill: string; text?: string; source?: string; pluginName?: string; path?: string }
   | { type: 'compact'; now: number; phase: 'before' | 'after'; trigger: string; skipped?: boolean; agentId?: string }
   /** `classifierFailed`: call A failed (true) or answered (false); absent when the classifier did not run. `workFailed`: call B failed (true) or answered (false) after A said code work; absent when B did not run. `deliverable`: A's answer. */
-  | { type: 'prompt'; now: number; text: string; fromUser: boolean; matched: NeedName[]; root?: string; classifierFailed?: boolean; /** The breaker skipped the classifier on this prompt. */ classifierSkipped?: boolean; workFailed?: boolean; /** The breaker skipped call B on this prompt, which A called code work. */ workSkipped?: boolean; deliverable?: Deliverable }
+  | { type: 'prompt'; now: number; text: string; fromUser: boolean; /** A prompt that is not the person's but starts a main-session turn (a peer message, a task notification). */ startsTurn?: boolean; matched: NeedName[]; root?: string; classifierFailed?: boolean; /** The breaker skipped the classifier on this prompt. */ classifierSkipped?: boolean; workFailed?: boolean; /** The breaker skipped call B on this prompt, which A called code work. */ workSkipped?: boolean; deliverable?: Deliverable }
   /** `present` names the arguments the call carries, for field rules. */
   | { type: 'tool'; now: number; tool: string; path?: string; command?: string; brief?: string; skill?: string; model?: string; present?: string[]; agentId?: string; root?: string; tree?: string }
   | { type: 'command'; now: number; args: string; root?: string; /** The small-model count over all sessions, from the plugin store. */ total?: ModelUse; /** What the stored release check says. */ update?: UpdateInfo }
@@ -387,7 +387,14 @@ const NEED_MISSES = 20
 const SHORT_PROMPT_WORDS = 3
 
 function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'prompt' }>): Result {
-  if (!e.fromUser) return { session: s, actions: [] }
+  if (!e.fromUser) {
+    // Another session's message or a task notification can start the first turn after a compaction: it carries the request, and nothing else of a person's prompt.
+    if (!e.startsTurn || !s.compactedSincePrompt || s.paused) return { session: s, actions: [] }
+    const next = { ...s, compactedSincePrompt: false }
+    const r = restore(config, next, e.now, isTrustedRoot(config, e.root), e.root)
+    next.ledger = r.ledger
+    return { session: next, actions: r.text === undefined ? [] : [{ kind: 'context', text: r.text }] }
+  }
   const trusted = isTrustedRoot(config, e.root)
   const needs = { ...s.needs }
   const debug: Action[] = []

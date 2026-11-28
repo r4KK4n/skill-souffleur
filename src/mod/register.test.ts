@@ -6035,3 +6035,33 @@ test('the same block rule is active in its own root', async ($, on) => {
   await start($)
   expect((await $.tool.call({ tool: 'Agent', prompt: 'x' } as never)).deny).toMatch(/dev-workflow/)
 })
+
+const CHAT_INJECTED = JSON.stringify({ skills: { 'chat:chat': { always: true, startup: 'injected', for: 'chat' } } })
+
+test('a subagent hand-back (isMeta, peer, as recorded) after a compaction carries the reload request; the tool call carries none', async ($, on) => {
+  world(on, { [USER_FILE]: CHAT_INJECTED })
+  await start($)
+  await compact($, { trigger: 'manual' })
+  const r = await submit($, { text: '<agent-message from="agent-1">\n[Subagent hand-back] done', isMeta: true, origin: { kind: 'peer' } } as never)
+  expect(r.context?.join('\n')).toMatch(/chat:chat/)
+  expect(JSON.stringify(await $.tool.call({ tool: 'Read', file_path: '/work/proj/a.ts' } as never))).not.toMatch(/chat:chat/)
+})
+
+test('a typed command after a compaction carries nothing; the request waits for the next turn', async ($, on) => {
+  world(on, { [USER_FILE]: CHAT_INJECTED })
+  await start($)
+  await compact($, { trigger: 'manual' })
+  const c = await submit($, { text: '/status', command: { name: 'status', args: '' }, origin: { kind: 'composer' } } as never)
+  expect(c.context).toBe(undefined)
+  const r = await submit($, { text: 'hello', origin: { kind: 'composer' } } as never)
+  expect(r.context?.join('\n')).toMatch(/chat:chat/)
+})
+
+test('a prompt delivered into a running turn or from an observer does not take the request', async ($, on) => {
+  world(on, { [USER_FILE]: CHAT_INJECTED })
+  await start($)
+  await compact($, { trigger: 'manual' })
+  for (const e of [{ origin: { kind: 'peer' }, turnId: 't1' }, { origin: { kind: 'observer' } }, { origin: { kind: 'composer' }, isMeta: true }]) {
+    expect((await submit($, { text: 'x', ...e } as never)).context).toBe(undefined)
+  }
+})

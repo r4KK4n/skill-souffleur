@@ -40,3 +40,15 @@ test('presentArgs drops reserved metadata', () => {
 test('presentArgs keeps real arguments', () => {
   assert.deepEqual(presentArgs({ tool: 'Agent', file_path: '/a', content: undefined, command: null, prompt: 'x', agent: 'reviewer' }), ['file_path', 'prompt', 'agent'])
 })
+
+test('startsTurn: non-user prompts that start a main-session model turn', async () => {
+  const { startsTurn } = await import('../src/mod/map.ts')
+  for (const kind of ['peer', 'peer-send-message', 'task-notification', 'scheduled-trigger', 'projects-relay', 'channel', 'coordinator', 'slack-ping', 'auto-continuation']) assert.equal(startsTurn({ origin: { kind } }), true, kind)
+  for (const kind of ['composer', 'observer', 'observer-activity', 'unclassified', 'plugin']) assert.equal(startsTurn({ origin: { kind } }), false, kind)
+  // The recorded subagent hand-back (test/fixtures/subagent.json) is meta and starts the turn.
+  assert.equal(startsTurn({ isMeta: true, origin: { kind: 'peer' } }), true)
+  assert.equal(startsTurn({ origin: { kind: 'peer' }, turnId: 't1' }), false)
+  assert.equal(startsTurn({ isMeta: true, origin: { kind: 'peer' }, turnId: 't1' }), false)
+  assert.equal(startsTurn({ origin: { kind: 'peer' }, command: {} }), false)
+  assert.equal(startsTurn({}), false)
+})

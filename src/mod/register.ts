@@ -22,7 +22,7 @@ import { PLUGIN_VERSION } from './version.ts'
 import { isCheckDue, isUpdateCheck, newestRelease, refusalLine, shown, updateLine } from '../core/update.ts'
 import type { UpdateInfo } from '../core/status.ts'
 import { compareVersions } from '../core/version.ts'
-import { isFromUser, isUserOrigin, presentArgs, toolFields } from './map.ts'
+import { isFromUser, isUserOrigin, startsTurn, presentArgs, toolFields } from './map.ts'
 
 // The hooks' `$` is the engine interface; the adapter calls only documented members. The type resolves only under tsconfig.mod.json (npm run typecheck:mod).
 type Dollar = EngineInterface
@@ -2673,7 +2673,7 @@ export const register: Register = (on) => {
           )
         : undefined
       await listing
-      const { actions } = await apply($, (l2) => ({ type: 'prompt', now: now(), text: e.text, fromUser, matched: verdict?.matched ?? [], root: l2.root, ...(breaker ? { classifierSkipped: true } : {}), ...(verdict === undefined ? {} : { classifierFailed: verdict.failed }), ...(verdict?.kind === undefined ? {} : { deliverable: verdict.kind }), ...(verdict?.kind === 'code-or-repo-work' && workBreaker && Object.values(needs).some((n) => n.for === 'work') ? { workSkipped: true } : verdict?.bFailure !== undefined ? { workFailed: true } : verdict?.kind === 'code-or-repo-work' ? { workFailed: false } : {}) }))
+      const { actions } = await apply($, (l2) => ({ type: 'prompt', now: now(), text: e.text, fromUser, ...(!fromUser && startsTurn(e) ? { startsTurn: true } : {}), matched: verdict?.matched ?? [], root: l2.root, ...(breaker ? { classifierSkipped: true } : {}), ...(verdict === undefined ? {} : { classifierFailed: verdict.failed }), ...(verdict?.kind === undefined ? {} : { deliverable: verdict.kind }), ...(verdict?.kind === 'code-or-repo-work' && workBreaker && Object.values(needs).some((n) => n.for === 'work') ? { workSkipped: true } : verdict?.bFailure !== undefined ? { workFailed: true } : verdict?.kind === 'code-or-repo-work' ? { workFailed: false } : {}) }))
       const classifierLine = verdict?.failure !== undefined ? `classifier: ${verdict.failure}` : verdict?.bFailure !== undefined ? `classifier B: ${verdict.bFailure}` : undefined
       if (classifierLine !== undefined) {
         try {

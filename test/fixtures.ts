@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { startsTurn } from '../src/mod/map.ts'
 import type { CoreEvent } from '../src/core/decide.ts'
 
 export const EVENT_NAMES = [
@@ -29,6 +30,7 @@ export type PromptSubmitInput = {
   text: string
   origin: Origin
   isMeta?: boolean
+  turnId?: string
   command?: { name: string; args: string }
 }
 
@@ -98,7 +100,7 @@ export function toCoreEvents(f: FixtureEvent[]): CoreEvent[] {
       case 'prompt.submit': {
         const i = e.input
         const fromUser = i.command === undefined && !i.isMeta && USER_ORIGINS.includes(i.origin.kind)
-        out.push({ type: 'prompt', now, text: i.text, fromUser, matched: [] })
+        out.push({ type: 'prompt', now, text: i.text, fromUser, ...(!fromUser && startsTurn(i) ? { startsTurn: true } : {}), matched: [] })
         break
       }
       case 'tool.call': {
