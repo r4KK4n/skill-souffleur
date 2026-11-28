@@ -59,7 +59,7 @@ export const MAX_LIST = 20
 /** Project blocks read from the user file. */
 export const MAX_PROJECT_ROOTS = 50
 const MAX_TOOL = 100
-const MAX_GLOB = 200
+export const MAX_GLOB = 200
 /** A project file is untrusted input: it may define this many skills and needs. */
 export const MAX_PROJECT_SKILLS = 20
 export const MAX_PROJECT_NEEDS = 10
@@ -103,7 +103,7 @@ function parseMatch(v: unknown, where: string): Match {
 
 
 const ABSOLUTE = /^(\/|[A-Za-z]:[\\/])/
-const isAbsolutePath = (v: unknown, max: number): v is string => typeof v === 'string' && ABSOLUTE.test(v) && !hasControl(v) && v.length <= max
+export const isAbsolutePath = (v: unknown, max: number): v is string => typeof v === 'string' && ABSOLUTE.test(v) && !hasControl(v) && v.length <= max
 
 const SOURCE = /^(skill(:[A-Za-z0-9:_-]{1,64})?|slip|user)$/
 const FIELD = /^[A-Za-z0-9_]{1,40}$/

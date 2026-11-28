@@ -12,7 +12,7 @@ Every `/souffleur` command. `/souffleur init` and `/souffleur migrate` are descr
 - `/souffleur migrate` goes through your old reload hooks and offers to turn them off. See [Coming from your own hooks](#coming-from-your-own-hooks).
 - `/souffleur rule <text>` turns your words into a rule or a note and asks before it keeps anything. See [Rules and notes](config.md#rules-and-notes).
 - `/souffleur review` asks about every waiting proposal, one dialog each. Without a dialog it lists them.
-- `/souffleur accept <id> [here|project]` keeps a waiting proposal in text mode, everywhere or for this project only. `/souffleur decline <id>` declines one. `rule`, `review`, `accept` and `decline` act only when you type them; a plugin or the model cannot run them.
+- `/souffleur accept <id> [here|project]` keeps a waiting proposal in text mode, everywhere (top level of the user file) or for this project only (the `rules` or `notes` of this project's block in `projects`; a standard id that is not blocked is refused and the proposal stays queued). `/souffleur decline <id>` declines one. `rule`, `review`, `accept` and `decline` act only when you type them; a plugin or the model cannot run them.
 
 ## Per-project blocks
 

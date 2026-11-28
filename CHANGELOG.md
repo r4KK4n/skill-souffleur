@@ -13,6 +13,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Accepting a proposal with "Yes, this project only" (or `/souffleur accept <id> here`) now writes the rule or note into the project's block in `~/.claude/souffleur.json`, where `/souffleur init` and `block` keep project settings, and no longer writes a top-level entry with `where`. `/souffleur project` lists it as this project's own. If the standard already has the same id, nothing is written and the proposal stays queued. Old `where` entries keep working (#120).
 - The classifier is bounded. Each call gets at most the first 1,500 and the last 500 characters of a prompt, and its request has its own timeout (2.5 s for call A, 4 s for call B), so it stops instead of running on and being billed. After three failed runs of call A the classifier is skipped for the next 10 prompts, then tried once: a good answer ends the pause, a failure starts another one. `/souffleur` and the degraded notice say while need detection is paused, a resume clears the pause, and the clip never splits an emoji (#90).
 
 ### Fixed
