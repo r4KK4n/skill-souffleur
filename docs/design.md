@@ -1,6 +1,6 @@
 # Design
 
-Describes version 0.2.9. Verified against Claude Code 2.1.322 and 2.1.332; see [compatibility.md](compatibility.md) for what was checked on which version.
+Describes version 0.3.0. Verified against Claude Code 2.1.322 and 2.1.332; see [compatibility.md](compatibility.md) for what was checked on which version.
 
 ## Intent
 
