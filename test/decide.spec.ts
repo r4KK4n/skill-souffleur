@@ -1518,6 +1518,41 @@ test('reply: a long reply that is mostly a code block is not a violation', () =>
   assert.doesNotMatch(ctx(r.out.at(-1)!), /last reply/)
 })
 
+const stop = (answer: string, extra: Partial<Extract<CoreEvent, { type: 'stop' }>> = {}): CoreEvent => ({ type: 'stop', now: at(), answer, fromCommand: false, again: false, ...extra })
+
+test('hold: in enforce an over-limit answer is held once with the size, the limit and the skill', () => {
+  const r = run(replyCfg('enforce', { maxChars: 100 }), [loadSkill('terse:terse-mode'), stop(LONG)])
+  assert.deepEqual(r.out.at(-1), [{ kind: 'hold', text: 'Souffleur: this answer has 300 characters (limit 100 characters, terse:terse-mode). Rewrite it within the limit, then end the turn.' }])
+  assert.equal(r.s.replyCheck?.held, 1)
+  assert.deepEqual(r.s.observed, [])
+})
+
+test('hold: a heading limit is named too', () => {
+  const r = run(replyCfg('enforce', { headings: 1 }), [loadSkill('terse:terse-mode'), stop('# a\n## b\nok')])
+  assert.match(JSON.stringify(r.out.at(-1)), /this answer has 2 headings \(limit 1 heading, terse:terse-mode\)/)
+})
+
+test('hold: no hold within the limits, for a second answer in the turn, for a typed command, when paused, for mostly code or without a rule', () => {
+  const c = replyCfg('enforce', { maxChars: 100 })
+  const code = `ok\n\`\`\`ts\n${'x'.repeat(3000)}\n\`\`\`\n`
+  for (const e of [stop('short'), stop(LONG, { again: true }), stop(LONG, { fromCommand: true }), stop(code), stop('')]) {
+    const r = run(c, [loadSkill('terse:terse-mode'), e])
+    assert.deepEqual(r.out.at(-1), [])
+    assert.equal(r.s.replyCheck?.held ?? 0, 0)
+  }
+  assert.deepEqual(run(c, [loadSkill('terse:terse-mode'), command('pause'), stop(LONG)]).out.at(-1), [])
+  assert.deepEqual(run(cfg({ mode: 'enforce' }), [stop(LONG)]).out.at(-1), [])
+})
+
+test('hold: in observe the would-be hold is listed under "Would have denied", nothing is held', () => {
+  const c = replyCfg('observe', { maxChars: 100 })
+  const r = run(c, [loadSkill('terse:terse-mode'), stop(LONG)])
+  assert.deepEqual(r.out.at(-1), [])
+  assert.equal(r.s.observed.length, 1)
+  assert.match(r.s.observed[0]!.reason, /300 characters \(limit 100 characters, terse:terse-mode\)/)
+  assert.match(renderTable(c, r.s, at()), /Would have denied:\n- \d\d:\d\d .*300 characters/)
+})
+
 test('reply: a reply to a typed command, an aborted turn and a paused session are not checked', () => {
   const c = replyCfg()
   for (const e of [reply(LONG, { fromCommand: true }), reply(LONG, { aborted: true })]) {

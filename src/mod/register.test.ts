@@ -62,6 +62,8 @@ type Opts = {
   classify?: string | ((labels?: readonly string[]) => string)
   stored?: Record<string, unknown>
   skipCompact?: boolean
+  /** What the Stop hooks beneath the mod answer, as another settings hook's block would. */
+  stopResult?: Record<string, unknown>
   /** Installed skill names `$.session.usage` lists. */
   skills?: string[]
   /** Installed skills whose source is the project (`projectSettings`). */
@@ -378,6 +380,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
   })
   on('skill.prompt', (_, e) => ({ text: e.text }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
+  on('classic.Stop', () => (opts.stopResult ?? {}))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('session.compact', () => (opts.skipCompact ? { skip: 'vetoed' } : { messages: [{ role: 'user', text: 'summary', toolUses: [] }] }))
   on('command.run', () => ({}))
@@ -6064,4 +6067,96 @@ test('a prompt delivered into a running turn or from an observer does not take t
   for (const e of [{ origin: { kind: 'peer' }, turnId: 't1' }, { origin: { kind: 'observer' } }, { origin: { kind: 'composer' }, isMeta: true }]) {
     expect((await submit($, { text: 'x', ...e } as never)).context).toBe(undefined)
   }
+})
+
+// ---- hold the turn end once (#139) ----
+const HOLD_FILE = (mode: string) => JSON.stringify({ mode, skills: { 'chat:chat': { always: true, startup: 'injected', for: 'chat', reply: { maxChars: 200 } } } })
+const LONG_ANSWER = 'word '.repeat(60)
+const stopEnd = ($: any, answer: string, active = false) => $.classic.Stop({ stop_hook_active: active, last_assistant_message: answer })
+
+test('enforce: an over-limit answer is held once with the size, the limit and the skill; the second ends the turn', async ($, on) => {
+  world(on, { [USER_FILE]: HOLD_FILE('enforce') })
+  await start($)
+  await submit($, { text: 'hello', origin: { kind: 'composer' } } as never)
+  const first = await stopEnd($, LONG_ANSWER)
+  expect(first.block).toBe('Souffleur: this answer has 300 characters (limit 200 characters, chat:chat). Rewrite it within the limit, then end the turn.')
+  expect((await stopEnd($, LONG_ANSWER, true)).block).toBeUndefined()
+  // Even where the engine does not say the hook is active, one hold per turn is all there is.
+  expect((await stopEnd($, LONG_ANSWER)).block).toBeUndefined()
+  expect(await table($)).toContain('chat:chat: 0 of 0 replies over the limit, 1 held')
+})
+
+test('enforce: the next prompt of the person can be held again', async ($, on) => {
+  world(on, { [USER_FILE]: HOLD_FILE('enforce') })
+  await start($)
+  for (let i = 0; i < 2; i++) {
+    await submit($, { text: `hello ${i}`, origin: { kind: 'composer' } } as never)
+    expect((await stopEnd($, LONG_ANSWER)).block).toMatch(/300 characters/)
+  }
+})
+
+test('enforce: a short answer, a typed command and a turn without a prompt of the person are not held', async ($, on) => {
+  world(on, { [USER_FILE]: HOLD_FILE('enforce') })
+  await start($)
+  expect((await stopEnd($, LONG_ANSWER)).block).toBeUndefined()
+  await submit($, { text: 'hello', origin: { kind: 'composer' } } as never)
+  expect((await stopEnd($, 'short')).block).toBeUndefined()
+  await submit($, { text: '/status', command: { name: 'status', args: '' }, origin: { kind: 'composer' } } as never)
+  expect((await stopEnd($, LONG_ANSWER)).block).toBeUndefined()
+})
+
+test('observe: nothing is held and the would-be hold is listed', async ($, on) => {
+  world(on, { [USER_FILE]: HOLD_FILE('observe') })
+  await start($)
+  await submit($, { text: 'hello', origin: { kind: 'composer' } } as never)
+  expect((await stopEnd($, LONG_ANSWER)).block).toBeUndefined()
+  expect(await table($)).toMatch(/Would have denied:\n- \d\d:\d\d reply limit: this answer has 300 characters/)
+})
+
+test('enforce: another Stop hook\'s block or stop is left alone and uses up no hold', async ($, on) => {
+  world(on, { [USER_FILE]: HOLD_FILE('enforce') }, { stopResult: { block: 'tests are red' } })
+  await start($)
+  await submit($, { text: 'hello', origin: { kind: 'composer' } } as never)
+  expect((await stopEnd($, LONG_ANSWER)).block).toBe('tests are red')
+  expect(await table($)).not.toContain('held')
+})
+
+test('enforce: a stop another hook ordered is not turned into a hold', async ($, on) => {
+  world(on, { [USER_FILE]: HOLD_FILE('enforce') }, { stopResult: { preventContinuation: true } })
+  await start($)
+  await submit($, { text: 'hello', origin: { kind: 'composer' } } as never)
+  const r = await stopEnd($, LONG_ANSWER)
+  expect(r.block).toBeUndefined()
+  expect(r.preventContinuation).toBe(true)
+})
+
+test('enforce: a subagent\'s Stop is not held', async ($, on) => {
+  world(on, { [USER_FILE]: HOLD_FILE('enforce') })
+  await start($)
+  await submit($, { text: 'hello', origin: { kind: 'composer' } } as never)
+  expect((await $.classic.Stop({ stop_hook_active: false, last_assistant_message: LONG_ANSWER, agent_id: 'a1' })).block).toBeUndefined()
+})
+
+test('enforce: an aborted or failed person turn does not leave the next turn held', async ($, on) => {
+  world(on, { [USER_FILE]: HOLD_FILE('enforce') })
+  await start($)
+  await submit($, { text: 'hello', origin: { kind: 'composer' } } as never)
+  await turnEnd($, { reason: 'aborted', isAborted: true })
+  expect((await stopEnd($, LONG_ANSWER)).block).toBeUndefined()
+})
+
+test('enforce: hold, second Stop, turn end and next prompt: a short rewrite leaves no reminder, a long one does', async ($, on) => {
+  world(on, { [USER_FILE]: HOLD_FILE('enforce') })
+  await start($)
+  await submit($, { text: 'one', origin: { kind: 'composer' } } as never)
+  expect((await stopEnd($, LONG_ANSWER)).block).toMatch(/300 characters/)
+  expect((await stopEnd($, 'short', true)).block).toBeUndefined()
+  await turnEnd($, { answer: 'short' })
+  expect(await table($)).toContain('chat:chat: 0 of 1 replies over the limit, 1 held')
+  expect((await submit($, { text: 'two', origin: { kind: 'composer' } } as never)).context?.join('\n') ?? '').not.toMatch(/last reply/)
+  expect((await stopEnd($, LONG_ANSWER)).block).toMatch(/300 characters/)
+  await stopEnd($, LONG_ANSWER, true)
+  await turnEnd($, { answer: LONG_ANSWER })
+  expect(await table($)).toContain('chat:chat: 1 of 2 replies over the limit, 2 held')
+  expect((await submit($, { text: 'three', origin: { kind: 'composer' } } as never)).context?.join('\n')).toMatch(/your last reply had 300 characters/)
 })

@@ -3,7 +3,7 @@ import { compacted, initLedger, ledgerKey, markInstalled, requested, sameSkill, 
 import type { Ledger } from './ledger.ts'
 import { audienceOf, neededSkills, type Deliverable } from './needs.ts'
 import type { Proposal } from './proposals.ts'
-import { checkReply, replySkill, reminderLine } from './reply.ts'
+import { checkReply, holdLine, replySkill, reminderLine } from './reply.ts'
 import { checkRules, contextNotes, ruleKind, ruleSkillNames } from './rules.ts'
 import { renderTable } from './status.ts'
 import type { UpdateInfo } from './status.ts'
@@ -72,7 +72,7 @@ export type Session = {
   /** Failures per step (`error` events by `where`) in this session, kept after the error cleared and over reload and resume. */
   failCounts?: Record<string, number>
   /** The reply check of the chat skill: replies checked, replies over the limit, user prompts since the last reminder, and the reminder waiting for a prompt. */
-  replyCheck?: { total: number; over: number; sinceReminder: number; pending?: string }
+  replyCheck?: { total: number; over: number; sinceReminder: number; pending?: string; held?: number }
   /** The small-model calls of this session with their tokens and estimated cost; kept over reload and resume, reset by a new session or /clear. */
   modelUse?: ModelUse
   /** Denials per skill ("skill X not loaded") in the current turn; reset by a person's prompt. After `RELEASE_AFTER` the skill's gate and rules let calls pass. */
@@ -104,6 +104,8 @@ export type CoreEvent =
   | { type: 'seen'; now: number }
   /** A main-session turn ended with this answer. `fromCommand`: the turn's prompt was a typed command. */
   | { type: 'reply'; now: number; answer: string; fromCommand: boolean; aborted: boolean; root?: string }
+  /** The main session is about to end a turn with this answer: the point where an over-limit answer can be held. `again`: the turn was held already. */
+  | { type: 'stop'; now: number; answer: string; fromCommand: boolean; again: boolean; root?: string }
   /** A learn call (the small model reading a skill text) ended: `ok` is false when it failed or gave no usable answer. */
   | { type: 'learned'; now: number; ok: boolean }
   /** The config was read again (after `/souffleur init`): the ledger follows it, and `errors` replace the old config errors. */
@@ -122,6 +124,8 @@ export type Action =
   | { kind: 'learn'; skill: SkillName; text: string; source?: string; pluginName?: string; path?: string }
   | { kind: 'deny'; reason: string }
   | { kind: 'reply'; text: string }
+  /** Keep the turn open: the model gets this text and rewrites its answer. */
+  | { kind: 'hold'; text: string }
   | { kind: 'toolContext'; text: string }
 
 type Result = { session: Session; actions: Action[] }
@@ -240,6 +244,8 @@ export function decide(config: Config, s: Session, e: CoreEvent): Result {
       return { session: { ...s, ledger: markInstalled(s.ledger, e.names, e.now) }, actions: [] }
     case 'reply':
       return { session: onReply(config, s, e), actions: [] }
+    case 'stop':
+      return onStop(config, s, e)
     case 'agentStart': {
       const live = s.liveAgents ?? []
       return { session: live.includes(e.agentId) ? s : { ...s, liveAgents: [...live, e.agentId].slice(-KEEP) }, actions: [] }
@@ -310,6 +316,19 @@ function onReply(config: Config, s: Session, e: Extract<CoreEvent, { type: 'repl
     rc.pending = reminderLine(rule.name, rule.limits, r)
   }
   return { ...s, replyCheck: rc }
+}
+
+/** In `enforce` an over-limit answer is held once: the model rewrites it before the turn ends. In `observe` the hold is only listed. */
+function onStop(config: Config, s: Session, e: Extract<CoreEvent, { type: 'stop' }>): Result {
+  if (e.fromCommand || e.again || s.paused) return { session: s, actions: [] }
+  const rule = replySkill(config, e.root)
+  if (rule === undefined) return { session: s, actions: [] }
+  const r = checkReply(e.answer, rule.limits)
+  if (r.skip || !r.over) return { session: s, actions: [] }
+  const text = holdLine(rule.name, rule.limits, r)
+  if (config.mode !== 'enforce') return { session: { ...s, observed: lastN(s.observed, { at: e.now, reason: `reply limit: ${text.replace(/^Souffleur: /, '').replace(/ Rewrite it within the limit, then end the turn\.$/, '')}. The turn end would be held once` }) }, actions: [] }
+  const old = s.replyCheck ?? { total: 0, over: 0, sinceReminder: REMINDER_EVERY }
+  return { session: { ...s, replyCheck: { ...old, held: (old.held ?? 0) + 1 } }, actions: [{ kind: 'hold', text }] }
 }
 
 const DELIVERABLE_OF: Partial<Record<Audience, Deliverable>> = { readers: 'text-for-others', users: 'screen' }

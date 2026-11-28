@@ -13,6 +13,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- In `enforce`, an answer that breaks a `reply` limit is held once at the end of the turn: the model gets the measured size, the limit and the skill, and writes the answer again. The first answer stays visible; a second over-limit answer in the same turn ends normally. In `observe` the hold is listed under "Would have denied" (#139).
 - A user-file key `"workCheck": "after"` starts the work-need call (call B) only after call A answered code or repo work, which saves one small-model call on most prompts and detects work about 0.7 s later on code prompts; the default `"parallel"` keeps today's behaviour. After three failed call B runs in a row, B is skipped on the next 10 code prompts and then tried once, and `/souffleur` and the degraded notice say while work detection is paused (#126).
 
 ### Changed
