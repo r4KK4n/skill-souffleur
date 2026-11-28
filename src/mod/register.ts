@@ -2814,9 +2814,9 @@ export const register: Register = (on) => {
       await safe($, 'turn.reply', undefined, async () => {
         await apply($, (l) => ({ type: 'reply', now: now(), answer: e.answer, fromCommand: lastPromptCommand, aborted: e.isAborted, root: l.root }))
       })
-      // One check per person prompt: a later turn without its own prompt (a background completion) is not the person's.
-      personTurn = false
     }
+    // One check per person prompt, whatever way its turn ended: a later turn without its own prompt (a background completion) is not the person's.
+    if (e.agentId === undefined) personTurn = false
     if (e.agentId === undefined && e.reason === 'answer' && (!sess.askStopped || sess.askAtTurnEnd || sess.noDialog)) {
       await safe($, 'turn.complete', undefined, async () => {
         if ((await current($)).session.paused) return
@@ -2850,7 +2850,8 @@ export const register: Register = (on) => {
   // The end of a main-session turn: an answer over a `reply` limit is held once (`enforce`), so the model rewrites it.
   on('classic.Stop', async ($, e, next) => {
     const r = await next(e)
-    if (!personTurn || typeof e.last_assistant_message !== 'string') return r
+    // A subagent's end, a decision of another Stop hook and a turn the person did not start are left alone.
+    if (e.agent_id !== undefined || r.block !== undefined || r.preventContinuation || !personTurn || typeof e.last_assistant_message !== 'string') return r
     const text = await safe($, 'turn.hold', undefined as string | undefined, async () => {
       await syncClock($)
       const again = e.stop_hook_active === true || sess.held
