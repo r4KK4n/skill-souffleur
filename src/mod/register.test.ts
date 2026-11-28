@@ -7,6 +7,8 @@ import { clip } from '../core/needs.ts'
 import { makeProposal } from '../core/proposals.ts'
 import { hashKey, skillHash } from '../core/learn.ts'
 
+/** The fake clock of the world the running test built; `settle` flushes work the mod left detached. */
+let fakeClock: { settle: () => Promise<void>; advance: (ms: number) => Promise<void> }
 /** The fake clock starts here: stored times in the tests are relative to it, never to the system clock. */
 const T0 = 1_800_000_000_000
 const HOME = '/users/test'
@@ -165,6 +167,7 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
     return { value: undefined } as never
   })
   const clock = mock.clock(on, { now: T0 })
+  fakeClock = clock
   mock.session(on)
   const options: string[][] = []
   on('session.id', () => ({ value: id }))
@@ -654,7 +657,7 @@ test('a skill preloaded while the agent spawns does not count for main', async (
   await start($)
   await $.prompt.submit({ text: 'build me a login screen' })
   const spawn = $.agent.spawn({ prompt: 'x' } as never)
-  await new Promise((r) => setTimeout(r, 20))
+  await settle()
   await skillLoaded($, 'ui-checklist')
   expect(await table($)).not.toMatch(/ui-checklist \| loaded/)
   release()
@@ -2003,7 +2006,7 @@ const OBLIGATION = 'Always run `npm test` after editing files under src/.'
 const TEST_RULE = { kind: 'rule', after: { tools: ['Edit'], paths: ['src/**'] }, evidence: { tool: 'Bash', command: 'npm test' } }
 const answerWith = (...items: unknown[]) => () => JSON.stringify(items)
 /** Lets the background read finish: the mod does not hand it back to the hook. */
-const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 30))
+const settle = () => fakeClock.settle()
 const loadSkill = ($: any, skill: string, text = OBLIGATION, extra: Record<string, unknown> = {}) => $.skill.prompt({ skill, text, len: text.length, head: text, tail: text, ...extra })
 const mainLoad = async ($: any, skill: string, text = OBLIGATION, extra: Record<string, unknown> = {}) => {
   await $.tool.call({ tool: 'Skill', skill } as never)
@@ -2103,8 +2106,8 @@ test('a slow or failing model call never delays or breaks skill.prompt', async (
   let mode: 'hang' | 'fail' = 'hang'
   world(on, { [USER_FILE]: ENFORCE }, { answers: 'reject', skillAnswer: () => (mode === 'hang' ? new Promise<string>(() => {}) : Promise.reject(new Error('model down'))) })
   await start($)
-  const first = await Promise.race([loadSkill($, 'writing-guide'), new Promise((resolve) => setTimeout(() => resolve('timeout'), 1000))])
-  expect(first).not.toBe('timeout')
+  // The model call never answers: the hook must still return (a hang fails the test by its own timeout).
+  await loadSkill($, 'writing-guide')
   mode = 'fail'
   const second = await loadSkill($, 'other-skill', 'Always do the other thing.')
   expect(second).toBeDefined()
@@ -2913,7 +2916,7 @@ test('a dialog nobody answers gives up after two minutes and shows the notice', 
   await start($)
   const id = idOf(await propose($, note('Reply in German.')))
   const t = turnEnd($)
-  await new Promise((r) => setTimeout(r, 50)) // let the turn end reach its dialog
+  await settle() // let the turn end reach its dialog
   await w.clock.advance(120_000)
   await t
   expect(w.logs.filter((l) => l.includes(`proposal ${id}`)).length).toBe(1)
@@ -2993,11 +2996,11 @@ const lateWorld = (on: any) => {
 }
 const timedOut = async ($: any, w: World) => {
   const t = turnEnd($)
-  await new Promise((r) => setTimeout(r, 50))
+  await settle()
   await w.clock.advance(120_000)
   await t
 }
-const idle = () => new Promise((r) => setTimeout(r, 50))
+const idle = settle
 
 test('a dialog tapped after the timeout still writes once and disarms the reply', async ($, on) => {
   const { w, tap } = lateWorld(on)
@@ -3256,7 +3259,7 @@ test('declining by reply word stops proposals', async ($, on) => {
   await start($)
   await propose($, note('Reply in German.'))
   const t = turnEnd($)
-  await new Promise((r) => setTimeout(r, 50))
+  await settle()
   await w.clock.advance(120_000)
   await t
   expect(String((await propose($, note('Answer in French, always.'))).result)).toMatch(/Queued as note-/)
@@ -3343,7 +3346,7 @@ test('a timed-out dialog that the person accepts by command does not stop propos
   await start($)
   const id = idOf(await propose($, note('Reply in German.')))
   const t = turnEnd($)
-  await new Promise((r) => setTimeout(r, 50))
+  await settle()
   await w.clock.advance(120_000)
   await t
   await $.prompt.submit({ text: `/souffleur accept ${id}`, command: { name: 'souffleur', args: `accept ${id}` }, origin: COMPOSER } as never)
@@ -3355,7 +3358,7 @@ test('a timed-out dialog and a person who just continues work do not stop propos
   await start($)
   await propose($, note('Reply in German.'))
   const t = turnEnd($)
-  await new Promise((r) => setTimeout(r, 50))
+  await settle()
   await w.clock.advance(120_000)
   await t
   await reply($, 'ok, now fix the second test', COMPOSER)
@@ -3391,7 +3394,7 @@ test('an accepted reply does not stop proposals', async ($, on) => {
   await start($)
   await propose($, note('Reply in German.'))
   const t = turnEnd($)
-  await new Promise((r) => setTimeout(r, 50))
+  await settle()
   await w.clock.advance(120_000)
   await t
   await reply($, 'accept', COMPOSER)
@@ -3727,7 +3730,7 @@ const ownLate = (opts: Opts = {}) => {
 const PAUSED_LINE = 'Souffleur: Souffleur is paused; /souffleur init sets them up later.'
 const ownTimedOut = async ($: any, w: World) => {
   const t = turnEnd($)
-  await new Promise((r) => setTimeout(r, 50))
+  await settle()
   await w.clock.advance(120_000)
   await t
 }
@@ -4284,8 +4287,8 @@ test('counting never delays the answer: a held total write does not hold the pro
   const hold = new Promise<void>((r) => { release = r })
   const w = world(on, { [USER_FILE]: COST_CFG }, { classify: 'match', usage: USAGE, holdTotal: hold })
   await start($)
-  const first = await Promise.race([$.prompt.submit({ text: 'fix the build' }), new Promise((resolve) => setTimeout(() => resolve('timeout'), 1000))])
-  expect(first).not.toBe('timeout')
+  // The total write is held: the prompt must still return (a hang fails the test by its own timeout).
+  await $.prompt.submit({ text: 'fix the build' })
   release()
   await settle()
   expect(w.stored['modelUseTotal']).toMatchObject({ calls: 2 })
@@ -4476,7 +4479,7 @@ test('update: a second start before the first detached work finishes does not sa
   await start($)
   release({ exitCode: 0, stdout: '\n', stderr: '' })
   await settleUpdate(w, 2)
-  await new Promise((r) => setTimeout(r, 20))
+  await settle()
   expect(w.logs.filter((l) => l.includes('is out')).length).toBe(1)
 })
 
@@ -4487,7 +4490,7 @@ test('update: a second start before the first detached work finishes does not sa
  * The engine runs its own copy of the mod, so the test cannot read a promise from it; the debug line is the signal.
  */
 const settleUpdate = async (w: World, starts = 1) => {
-  for (let i = 0; i < 200 && w.debugLogs.filter((l) => l === 'update work done').length < starts; i++) await new Promise((r) => setTimeout(r, 15))
+  for (let i = 0; i < 200 && w.debugLogs.filter((l) => l === 'update work done').length < starts; i++) await settle()
   expect(w.debugLogs.filter((l) => l === 'update work done').length).toBeGreaterThanOrEqual(starts)
 }
 
