@@ -417,7 +417,7 @@ function onPrompt(config: Config, s: Session, e: Extract<CoreEvent, { type: 'pro
       for (const [name, n] of Object.entries(needs)) {
         // A readers/users need is hit by its own deliverable only; A answering anything else is a miss.
         if (e.matched.includes(name) || n.reason === 'command' || (e.deliverable !== undefined && ownDeliverable(config, name) === e.deliverable)) continue
-        if (e.workFailed && config.needs[name]?.for === 'work') continue
+        if ((e.workFailed || e.workSkipped) && config.needs[name]?.for === 'work') continue
         const misses = (n.misses ?? 0) + 1
         if (misses >= NEED_MISSES) {
           delete needs[name]

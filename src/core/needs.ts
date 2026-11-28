@@ -28,11 +28,12 @@ export function clip(text: string, head = 1500, tail = 500): string {
 }
 
 /**
- * Two classifier calls, each under its own budget (A 2.5 s, B 4 s). By default they run in parallel, both budgets from the start; with `workCheck: 'after'` B starts only once A said
- * code work and its budget counts from its own start; with `skipWork` (B is paused) B is not called at all. Call A asks what the agent will produce; `text-for-others` starts every
- * `readers` need, `screen` every `users` need, `chat-reply` nothing. Call B picks one `work` need (or `none`) and counts only
- * when A says `code-or-repo-work`; A is awaited first and B only then. A late, rejected, empty or unknown answer of A fails the prompt; a failed B is reported as `bFailure` and fails nothing.
+ * Call A always runs: it asks what the agent will produce; `text-for-others` starts every `readers` need, `screen` every `users` need, `chat-reply` nothing.
+ * Call B (pick one `work` need or `none`) runs only when work needs exist and `skipWork` is not set. In parallel mode it starts with A and is awaited only when A says
+ * `code-or-repo-work`; with `workCheck: 'after'` it starts only then, and its 4 s budget counts from its own start. A gets 2.5 s. A late, rejected, empty or unknown answer of A
+ * fails the prompt; a failed B is reported as `bFailure` and fails nothing.
  */
+
 export async function classifyDeliverable(
   prompt: string,
   needs: Record<NeedName, Need>,

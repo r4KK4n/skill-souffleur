@@ -1925,3 +1925,17 @@ test('while the B pause is open the table and the degraded notice say so', () =>
   assert.match(problemKeys(cfg(), s).get('degraded:classifier B') ?? '', /Work detection is paused and will retry in 10 prompts\. Details: \/souffleur\.$/)
   assert.doesNotMatch(renderTable(cfg(), { ...s, workPause: 0 }, at()), /work detection paused/)
 })
+
+test('skipped call B prompts count no miss: an active work need survives two rounds of a B outage', () => {
+  const c = cfg({ needs: { ...base.needs, debug: { for: 'work', what: 'Debugging a failure.' } }, skills: { ...base.skills, 'root-cause': { need: 'debug', from: 'user' } } })
+  const words = 'please fix the failing test now'
+  const code = (extra: Record<string, unknown>): CoreEvent => ({ ...prompt(words), classifierFailed: false, deliverable: 'code-or-repo-work', ...extra }) as CoreEvent
+  let s = decide(c, run(c, []).s, { ...prompt(words, ['debug']), classifierFailed: false, deliverable: 'code-or-repo-work' } as CoreEvent).session
+  assert.ok(s.needs.debug)
+  for (let round = 0; round < 2; round++) {
+    for (let i = 0; i < 3; i++) s = decide(c, s, code({ workFailed: true })).session
+    for (let i = 0; i < 10; i++) s = decide(c, s, code({ workSkipped: true })).session
+  }
+  assert.ok(s.needs.debug)
+  assert.equal(s.needs.debug!.misses ?? 0, 0)
+})

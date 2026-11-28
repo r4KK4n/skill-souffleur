@@ -229,7 +229,6 @@ test('in parallel mode both calls start before A resolves', async () => {
 })
 
 test('with workCheck after, B gets its own budget counted from its own start', async () => {
-  const sleeps: { ms: number; at: string[] }[] = []
   const events: string[] = []
   const sleep = (ms: number) => { events.push(`sleep ${ms}`); return new Promise<void>(() => {}) }
   await classifyDeliverable(
@@ -241,7 +240,6 @@ test('with workCheck after, B gets its own budget counted from its own start', a
     4000,
     { workCheck: 'after' },
   )
-  void sleeps
   // B's timer is created after A's call started and answered, not together with A's timer.
   assert.deepEqual(events, ['sleep 2500', 'A 2500', 'sleep 4000', 'B 4000'])
 })

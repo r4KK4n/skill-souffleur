@@ -3224,6 +3224,20 @@ test('an in-process resume clears a stored B pause (#126)', async ($, on) => {
   expect(await table($)).not.toMatch(/work detection paused/)
 })
 
+test('only code prompts use up the B pause; a chat reply leaves it alone (#126)', async ($, on) => {
+  let a = 'code-or-repo-work'
+  world(on, { [USER_FILE]: B_CFG() }, { classify: (labels) => (labels?.includes('chat-reply') ? a : 'banana') })
+  await start($)
+  for (let i = 0; i < 3; i++) await $.prompt.submit({ text: 'one two three four' })
+  expect(await table($)).toMatch(/next try in 10 prompts/)
+  a = 'chat-reply'
+  await $.prompt.submit({ text: 'one two three four' })
+  expect(await table($)).toMatch(/next try in 10 prompts/)
+  a = 'code-or-repo-work'
+  await $.prompt.submit({ text: 'one two three four' })
+  expect(await table($)).toMatch(/next try in 9 prompts/)
+})
+
 test('workCheck after: a chat reply makes one classifier call, code work two (#126)', async ($, on) => {
   const requests: Record<string, unknown>[] = []
   let a = 'chat-reply'
