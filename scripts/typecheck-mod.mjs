@@ -18,7 +18,7 @@ function newest(paths) {
 
 function find() {
   const explicit = process.env.CLAUDE_MOD_TYPES
-  if (explicit) return existsSync(explicit) ? explicit : undefined
+  if (explicit) return existsSync(explicit) && statSync(explicit).isFile() ? explicit : undefined
   let version
   try {
     version = execFileSync('claude', ['--version'], { encoding: 'utf8' }).trim().split(' ')[0]
@@ -49,7 +49,10 @@ function find() {
 
 const source = find()
 if (!source) {
-  if (process.env.CLAUDE_MOD_TYPES) console.log(`typecheck:mod skipped: CLAUDE_MOD_TYPES points to a missing file. ${HOW}`)
+  if (process.env.CLAUDE_MOD_TYPES) {
+    console.error(`typecheck:mod: CLAUDE_MOD_TYPES does not point to a file.`)
+    process.exit(1)
+  }
   process.exit(0)
 }
 mkdirSync(dirname(target), { recursive: true })

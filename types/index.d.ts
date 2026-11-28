@@ -1,5 +1,6 @@
 // The contract for `$.state`. It must be self-contained, so the session shape is spelled out here
-// and mirrors `Session` in src/core/decide.ts; the type check fails when the two drift apart.
+// and mirrors `Session` in src/core/decide.ts. test/types.spec.ts asserts at type level (`npm run typecheck`, in CI)
+// that the two have the same keys and are mutually assignable, so a field added or dropped on one side fails there.
 declare module 'claude-code' {
   interface PluginState {
     'skill-souffleur': {
