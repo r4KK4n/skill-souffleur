@@ -321,7 +321,9 @@ test('need pruning counts needs used by any project block skill or note', () => 
 
 test('project helpers write only into projects[root] and never touch the standard', () => {
   const user = { skills: { a: { need: 'n' } }, needs: { n: 'Standard text.' } }
-  assert.equal(hasProjectKey({ projects: { '/w/': {} } }, '/w'), true)
+  assert.equal(hasProjectKey({ projects: { '/w/': { block: ['x'] } } }, '/w'), true)
+  assert.equal(hasProjectKey({ projects: { '/w/': { ignored: ['x'] } } }, '/w'), true)
+  assert.equal(hasProjectKey({ projects: { '/w/': { rules: [{ id: 'r' }], notes: [{ id: 'n' }] } } }, '/w'), false)
   assert.equal(hasProjectKey(user, '/w'), false)
   const same = addSkillToProject(user, '/w', 'o', 'need', { key: 'n', text: 'Standard text.' }).config as { skills: unknown; needs: unknown; projects: Record<string, unknown> }
   assert.deepEqual(same.projects['/w'], { skills: { o: { need: 'n' } } })

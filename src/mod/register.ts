@@ -2008,7 +2008,7 @@ async function commitAnswerNow($: Dollar, hash: string, label: string): Promise<
     // The file is what counts: confirm that the reader kept the entry before saying it is there.
     const kept = [...l2.config.rules, ...l2.config.notes].some((x) => x.id === r.write!.entry.id)
     if (w.wrote && !kept) {
-      const why = l2.errors.filter((m) => m.startsWith('user config')).slice(-2).join('; ')
+      const why = l2.errors.filter((m) => m.startsWith('user config') || m.startsWith('projects[')).slice(-2).join('; ')
       return `Souffleur: wrote ${r.write.entry.id} to the file, but the reader did not keep it${why ? ` (${why})` : ''}. Check ${await shownUserFile($)}.`
     }
     return `Souffleur: ${w.text}.`

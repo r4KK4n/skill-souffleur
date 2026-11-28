@@ -163,9 +163,16 @@ const closeBlock = (o: ReturnType<typeof openBlock>): unknown => {
   return { ...o.doc, projects: o.projects }
 }
 
-/** True when the user file has a `projects` key for this root (any value). */
+/**
+ * True when this root's block holds something `init`, `block` or `migrate` wrote: `skills`, `needs`, `block` or `ignored`.
+ * A block with only `rules` or `notes` (a project-only proposal) does not count. A block that is no object counts, so a broken one is not nagged about.
+ */
 export function hasProjectKey(userConfig: unknown, root: string): boolean {
-  return isObject(userConfig) && isObject(userConfig.projects) && Object.keys(userConfig.projects).some((k) => normRoot(k) === normRoot(root))
+  if (!isObject(userConfig) || !isObject(userConfig.projects)) return false
+  const key = Object.keys(userConfig.projects).find((k) => normRoot(k) === normRoot(root))
+  if (key === undefined) return false
+  const block = userConfig.projects[key]
+  return !isObject(block) || ['skills', 'needs', 'block', 'ignored'].some((k) => block[k] !== undefined)
 }
 
 /** The user file with the skill under `projects[root].ignored`. A full list leaves the file as it was and says so. */

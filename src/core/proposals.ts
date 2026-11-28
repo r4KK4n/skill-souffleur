@@ -1,4 +1,4 @@
-import { MAX_LIST, checkEntry, normRoot } from './config.ts'
+import { MAX_GLOB, MAX_LIST, MAX_PROJECT_ROOTS, checkEntry, isAbsolutePath, normRoot } from './config.ts'
 import type { Session } from './decide.ts'
 import { describeNote, describeRule } from './rules.ts'
 import type { Config, Need, Note, Rule } from './types.ts'
@@ -137,6 +137,8 @@ export function addEntry(doc: unknown, kind: 'rule' | 'note', entry: Rule | Note
   const key = kind === 'rule' ? 'rules' : 'notes'
   const base: Record<string, unknown> = isDoc(doc) ? { ...doc } : {}
   const has = (list: unknown) => Array.isArray(list) && list.some((x) => isObject(x) && x.id === entry.id)
+  // Notes and rules share one id space, as the reader checks them.
+  const hasAny = (o: unknown) => isObject(o) && ['notes', 'rules'].some((k) => has(o[k]))
   if (root === undefined) {
     if (has(base[key])) return { config: doc, note: `${entry.id} is already in the file.` }
     if (isObject(base.projects)) {
@@ -148,12 +150,17 @@ export function addEntry(doc: unknown, kind: 'rule' | 'note', entry: Rule | Note
   }
   if (base.projects !== undefined && !isObject(base.projects)) return { config: doc, note: '"projects" is not an object, so nothing was added.', keep: true }
   const projects: Record<string, unknown> = { ...(base.projects as Record<string, unknown> | undefined) }
-  const at = Object.keys(projects).find((k) => normRoot(k) === root) ?? root
+  const found = Object.keys(projects).find((k) => normRoot(k) === root)
+  const at = found ?? root
+  if (found === undefined) {
+    if (!isAbsolutePath(root, MAX_GLOB)) return { config: doc, note: `the project root is not an absolute one-line path of at most ${MAX_GLOB} characters, so nothing was added.`, keep: true }
+    if (Object.keys(projects).length >= MAX_PROJECT_ROOTS) return { config: doc, note: `projects already has ${MAX_PROJECT_ROOTS} roots and the reader ignores more, so nothing was added.`, keep: true }
+  }
   if (projects[at] !== undefined && !isObject(projects[at])) return { config: doc, note: `the block for ${root} is not an object, so nothing was added.`, keep: true }
   const block: Record<string, unknown> = { ...(projects[at] as Record<string, unknown> | undefined) }
   const names = Array.isArray(block.block) ? block.block : []
-  if (has(base[key]) && !names.includes(entry.id)) return { config: doc, note: `projects["${root}"].${key}.${entry.id}: already in the standard; block it first or rename`, keep: true }
-  if (has(block[key])) return { config: doc, note: `${entry.id} is already in the block of ${root}.` }
+  if (hasAny(base) && !names.includes(entry.id)) return { config: doc, note: `projects["${root}"].${key}.${entry.id}: already in the standard; block it first or rename`, keep: true }
+  if (hasAny(block)) return { config: doc, note: `${entry.id} is already in the block of ${root}.` }
   const own: unknown[] = Array.isArray(block[key]) ? [...(block[key] as unknown[])] : []
   if (own.length >= MAX_LIST) return { config: doc, note: `the block of ${root} already has ${MAX_LIST} ${key}, so nothing was added.`, keep: true }
   block[key] = [...own, entry]
