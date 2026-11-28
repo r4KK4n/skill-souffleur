@@ -11,13 +11,18 @@ import { allowedSigners, goodSignature, signedTagObject, verifyTagArgs } from '.
 
 const onPath = (tool: string) => spawnSync(tool, ['-?'], { stdio: 'ignore' }).error === undefined
 const have = onPath('git') && onPath('ssh-keygen')
-const skip = have ? false : 'git and ssh-keygen are not both on PATH, so no real signature can be made or checked'
+/** SSH signing and `verify-tag` with `gpg.ssh.allowedSignersFile` need git 2.34. */
+const gitOk = (() => {
+  const m = /(\d+)\.(\d+)/.exec(spawnSync('git', ['--version'], { encoding: 'utf8' }).stdout ?? '')
+  return m !== null && (Number(m[1]) > 2 || (Number(m[1]) === 2 && Number(m[2]) >= 34))
+})()
+const skip = have && !gitOk ? 'git is older than 2.34, which cannot verify SSH signatures' : have ? false : 'git and ssh-keygen are not both on PATH, so no real signature can be made or checked'
 const TAG = 'v9.9.9'
 
 let dir = ''
 let repo = ''
 const key = { a: '', b: '' }
-const oid = { good: '', other: '', unsigned: '', pgp: '' }
+const oid = { good: '', other: '', unsigned: '', pgp: '', renamed: '' }
 
 /** A clean environment: no user git config, no signing key or ssh agent from the machine running the test. */
 const env = () => ({ PATH: process.env['PATH'] ?? '', HOME: dir, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' })
@@ -42,7 +47,7 @@ function verified(signer: string, id: string): boolean {
 }
 
 before(() => {
-  if (!have) return
+  if (skip !== false) return
   dir = mkdtempSync(join(tmpdir(), 'souffleur-sig-'))
   repo = join(dir, 'repo')
   mkdirSync(repo)
@@ -59,6 +64,9 @@ before(() => {
     oid[name] = git('rev-parse', `refs/tags/${TAG}`)
     git('tag', '-d', TAG)
   }
+  // A genuinely signed tag object that names another tag: the signature is good, the header is not the tag asked for.
+  git('-c', 'gpg.format=ssh', '-c', `user.signingkey=${join(dir, 'key-a.pub')}`, 'tag', '-s', 'v1.0.0', '-m', 'release')
+  oid.renamed = git('rev-parse', 'refs/tags/v1.0.0')
   const head = git('rev-parse', 'HEAD')
   const body = `object ${head}\ntype commit\ntag ${TAG}\ntagger t <t@t> 1 +0000\n\nrelease\n-----BEGIN PGP SIGNATURE-----\n\niQEzBAABCAAdFiEE\n-----END PGP SIGNATURE-----\n`
   oid.pgp = run('git', ['hash-object', '-t', 'tag', '-w', '--stdin'], repo, body)
@@ -83,6 +91,13 @@ test('an unsigned annotated tag does not verify', { skip }, () => {
 
 test('a tag whose signature block is PGP armor does not verify', { skip }, () => {
   assert.equal(verified(key.a, oid.pgp), false)
+})
+
+test('a validly signed tag object that names another tag is refused', { skip }, () => {
+  const file = join(dir, 'allowed_signers')
+  writeFileSync(file, allowedSigners(key.a))
+  assert.equal(verifyTag(key.a, oid.renamed).status, 0, 'git itself accepts the signature')
+  assert.equal(verified(key.a, oid.renamed), false, 'the adapter asked for v9.9.9, the object says v1.0.0')
 })
 
 test('git itself accepts the good tag with exactly these arguments', { skip }, () => {

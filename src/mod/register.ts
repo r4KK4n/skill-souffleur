@@ -73,14 +73,40 @@ let restoredAskStopped = false
 /** The time of the host's clock as of the last `syncClock`; a test's fake clock moves it, nothing else reads the system time. */
 let clockMs = Date.now()
 const now = (): number => clockMs
-/** `$.clock.now()` is asynchronous, so the synchronous `now()` reads this copy: refresh it at every event and after every wait. */
+/** The clock call failed or was silent once already in this process; the debug line is written once. */
+let clockFallbackLogged = false
+/**
+ * `$.clock.now()` is asynchronous, so the synchronous `now()` reads this copy. It is refreshed at every event handler and at every core
+ * event (`apply`); a time that another process wrote is compared only after `wallNow`. When the host clock throws or does not answer
+ * within 50 ms the system time is used, and the first time says so in the debug log.
+ */
 async function syncClock($: Dollar): Promise<void> {
+  const quiet = new AbortController()
   try {
-    const t = await $.clock.now()
-    if (typeof t === 'number' && Number.isFinite(t)) clockMs = t
+    const t = await Promise.race([$.clock.now(), $.clock.sleep(50, { signal: quiet.signal }).then(() => undefined, () => undefined)])
+    if (typeof t === 'number' && Number.isFinite(t)) {
+      clockMs = t
+      return
+    }
   } catch {
-    // an old host without the clock call keeps the last value
+    // falls through to the system time
+  } finally {
+    quiet.abort()
   }
+  clockMs = Date.now()
+  if (!clockFallbackLogged) {
+    clockFallbackLogged = true
+    try {
+      $.ui.log('clock unavailable: using the system time', { to: 'debug' })
+    } catch {
+      // a log line is a courtesy
+    }
+  }
+}
+/** A fresh time for comparing with a stamp written by another process (a lock, a folder time, a stored check time). */
+async function wallNow($: Dollar): Promise<number> {
+  await syncClock($)
+  return clockMs
 }
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err))
 
@@ -550,7 +576,8 @@ async function withInstallLock<T>($: Dollar, fn: () => Promise<T>): Promise<{ va
   const stale = async () => {
     const at = (await readOwner())?.at
     const t = typeof at === 'number' ? at : await mtime(lock)
-    return t !== undefined && (t > now() || now() - t >= LOCK_STALE_MS)
+    const wall = await wallNow($)
+    return t !== undefined && (t > wall || wall - t >= LOCK_STALE_MS)
   }
   await ok($, ['mkdir', '-p', data])
   let made = await ok($, ['mkdir', lock])
@@ -562,7 +589,7 @@ async function withInstallLock<T>($: Dollar, fn: () => Promise<T>): Promise<{ va
     const take = `${lock}.takeover`
     if (!(await ok($, ['mkdir', take]))) {
       const t = await mtime(take)
-      if (t !== undefined && now() - t >= LOCK_STALE_MS) await ok($, ['rm', '-rf', take])
+      if (t !== undefined && (await wallNow($)) - t >= LOCK_STALE_MS) await ok($, ['rm', '-rf', take])
       return undefined
     }
     try {
@@ -575,9 +602,10 @@ async function withInstallLock<T>($: Dollar, fn: () => Promise<T>): Promise<{ va
     }
   }
   if (!made) return undefined
-  const token = `${now()}-${Math.random().toString(36).slice(2)}`
+  const stamp = await wallNow($)
+  const token = `${stamp}-${Math.random().toString(36).slice(2)}`
   try {
-    await $.fs.write(owner, JSON.stringify({ at: now(), token }))
+    await $.fs.write(owner, JSON.stringify({ at: stamp, token }))
   } catch (err) {
     await ok($, ['rm', '-rf', lock])
     throw err
@@ -682,12 +710,13 @@ async function pruneStore($: Dollar, currentId: string): Promise<void> {
     if (!(isSession || key.startsWith(HASH_PREFIX)) || key === `session:${currentId}`) continue
     const copy: unknown = await $.store.get(key)
     const touched = typeof copy === 'object' && copy !== null ? (copy as { touched?: unknown }).touched : undefined
+    const wall = await wallNow($)
     if (typeof touched === 'number') {
-      if (now() - touched > SESSION_TTL_MS) await $.store.delete(key)
+      if (wall - touched > SESSION_TTL_MS) await $.store.delete(key)
       else if (isSession) kept.push({ key, touched })
     } else if (typeof copy === 'object' && copy !== null) {
-      await $.store.set(key, { ...copy, touched: now() })
-      if (isSession) kept.push({ key, touched: now() })
+      await $.store.set(key, { ...copy, touched: wall })
+      if (isSession) kept.push({ key, touched: wall })
     }
   }
   kept.sort((a, b) => b.touched - a.touched)
@@ -2182,9 +2211,10 @@ async function markVersionDone($: Dollar, before: Session, after: Session, hash:
 async function refreshStamp($: Dollar, key: string, stored: unknown): Promise<void> {
   if (typeof stored !== 'object' || stored === null) return
   const touched = (stored as { touched?: unknown }).touched
-  if (typeof touched === 'number' && now() - touched < 86_400_000) return
+  const wall = await wallNow($)
+  if (typeof touched === 'number' && wall - touched < 86_400_000) return
   try {
-    await $.store.set(key, { ...stored, touched: now() })
+    await $.store.set(key, { ...stored, touched: wall })
   } catch {
     // the stamp stays; a failed refresh only means the age rule counts from the older one
   }
@@ -2412,7 +2442,7 @@ export const register: Register = (on) => {
               await markShown($, tell)
             }
           }
-          await checkForUpdate($, l, now())
+          await checkForUpdate($, l, await wallNow($))
           if (l.config.update === 'auto' && k === 'folder') await autoInstall($, l, s.id)
         } finally {
           $.ui.log('update work done', { to: 'debug' })

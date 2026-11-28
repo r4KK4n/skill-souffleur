@@ -118,6 +118,8 @@ type Opts = {
   classifyRejected?: boolean
   /** `$.store.set` of this key throws. */
   failStoreKey?: string
+  /** True while `$.clock.now()` should throw. */
+  clockDown?: () => boolean
   /** The working directory `$.session.cwd` answers. */
   cwd?: string
   /** `$.fs.stat` of these paths throws something other than not-found. */
@@ -166,7 +168,12 @@ function world(on: On, files: Record<string, string>, opts: Opts = {}): World {
     delete storeData[e.key]
     return { value: undefined } as never
   })
-  const clock = mock.clock(on, { now: T0 })
+  // `opts.clockDown()` true makes `$.clock.now()` throw, as an older or broken host would.
+  const clock = mock.clock(((event: string, ...rest: unknown[]) => (event === 'clock.now' ? undefined : (on as any)(event, ...rest))) as typeof on, { now: T0 })
+  on('clock.now', () => {
+    if (opts.clockDown?.()) throw new Error('clock gone')
+    return { value: clock.now() } as never
+  })
   fakeClock = clock
   mock.session(on)
   const options: string[][] = []
@@ -5633,4 +5640,39 @@ test('a save by another writer between our read and our move is noticed: the cha
   expect(text).not.toMatch(/kept changing/)
   expect(JSON.parse(w.files[USER_FILE]!).projects['/work/proj'].block).toEqual(['writing-guide'])
   expect(Object.keys(w.files).filter((f) => f.includes('.tmp-'))).toEqual([])
+})
+
+// ---- the clock copy: other processes' stamps are compared with a fresh read ----
+
+test('/souffleur update: a lock stamped after this process last read the clock is fresh, not future-dated', async ($, on) => {
+  const base = { ...SETUP, ...heldBy(T0 + 5_000) }
+  const inner = gitRun()
+  // The clock moves while the update looks up the releases, after the handler read it for the last time.
+  const w = world(on, base, { stored: QUIET, run: async (argv, init) => {
+    if (argv.includes('ls-remote')) await fakeClock.advance(5_000)
+    return inner(argv, init) as never
+  } })
+  own(w)
+  await start($)
+  expect(await runUser($, 'update')).toBe('Souffleur: another session is installing an update; try again in a minute.')
+  expect(ran(w, 'checkout').length).toBe(0)
+  expect(JSON.parse(w.files[OWNER]!).token).toBe('other')
+})
+
+test('a host clock that throws falls back to the system time and logs once to debug', async ($, on) => {
+  let broken = false
+  const w = world(on, SETUP, { clockDown: () => broken, stored: { installKind: 'folder', updateCheck: { at: T0, latest: 'v0.0.1' } }, run: runWith({ exitCode: 0, stdout: LS(NEWER) }) })
+  own(w)
+  await start($)
+  await settleUpdate(w)
+  broken = true
+  // An hour old in system time, a year and a half old by the last good reading: only the system time says "not due".
+  w.stored['updateCheck'] = { at: Date.now() - 3_600_000, latest: 'v0.0.1' }
+  const before = lsRemoteCalls(w).length
+  own(w)
+  await start($)
+  await start($)
+  await settleUpdate(w, 3)
+  expect(lsRemoteCalls(w).length).toBe(before)
+  expect(w.debugLogs.filter((l) => l.startsWith('clock unavailable')).length).toBe(1)
 })
